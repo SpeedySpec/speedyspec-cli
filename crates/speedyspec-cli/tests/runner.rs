@@ -235,7 +235,13 @@ fn slow_task_is_killed_at_its_timeout() {
     assert!(!alive, "the child {pid} is still running");
 }
 
+/// Whether `pid` still runs. A zombie has been killed and only waits to be reaped, which a
+/// container's first process may never do, so it does not count.
 fn is_alive(pid: &str) -> bool {
+    if let Ok(stat) = fs::read_to_string(format!("/proc/{}/stat", pid.trim())) {
+        let state = stat.rsplit(')').next().unwrap_or_default().trim_start();
+        return !state.starts_with('Z');
+    }
     std::process::Command::new("kill")
         .args(["-0", pid.trim()])
         .stderr(std::process::Stdio::null())
