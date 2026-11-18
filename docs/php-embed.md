@@ -255,6 +255,18 @@ below). The global aliases and the methods share one handler each. Arguments
 are read from the frame directly and type errors are thrown as PHP's own
 `TypeError`, `ArgumentCountError` and `ValueError`.
 
+Parameter types: `$hook` must be a string, always. `$priority` (`add`,
+`remove` and their aliases) and `$acceptedArgs` (`add` and its aliases)
+accept any integer-valued number whatever the caller's `strict_types`, as
+WordPress does: an int, a float with an integral value (`20.0`), or a
+numeric string with an integral value (`'20'`, `' 20'`, `'-5'`, `'20.0'`),
+parsed by PHP's own `_is_numeric_string_ex` (surrounding whitespace allowed,
+trailing data not). `'20'` and `20` are the same priority. Anything else
+(non-numeric or partly numeric strings, fractions, `null`, bools, arrays,
+objects, values outside 64 bits) is a `TypeError` naming the parameter, as is
+a priority outside the registry's `i32`. A negative `$acceptedArgs` is a
+`ValueError`.
+
 The macro route also works, and was checked in Task 1 with a throwaway class
 (`#[php_class]` + `#[php_impl]`, `module.class::<T>()`): method names are then
 converted to camelCase by default (`add_two` -> `addTwo`) unless
@@ -428,8 +440,8 @@ x86_64 CI runner should be faster.
 
 ## Verification
 
-`cargo test -p speedyspec-php --test php` prints an `ok` line per case (34
-since Task 3's fix round) and exits 0 on both targets.
+`cargo test -p speedyspec-php --test php` prints an `ok` line per case (35
+since Task 3's second fix round) and exits 0 on both targets.
 
 - **macOS arm64**, native: `otool -L` on the test binary lists only
   `libSystem`, `libresolv` and the CoreFoundation, CoreServices and

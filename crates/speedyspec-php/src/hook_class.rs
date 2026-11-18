@@ -17,10 +17,10 @@ use std::rc::Rc;
 use ext_php_rs::args::Arg;
 use ext_php_rs::builders::{ClassBuilder, FunctionBuilder, ModuleBuilder};
 use ext_php_rs::ffi::{
-    IS_ARRAY, IS_LONG, IS_NULL, IS_OBJECT, IS_STRING, IS_UNDEF, ext_php_rs_executor_globals,
-    zend_ce_argument_count_error, zend_ce_type_error, zend_ce_value_error, zend_class_entry,
-    zend_hash_index_find, zend_hash_str_find, zend_is_callable, zend_throw_error,
-    zend_throw_exception, zval,
+    IS_ARRAY, IS_DOUBLE, IS_LONG, IS_NULL, IS_OBJECT, IS_STRING, IS_UNDEF,
+    ext_php_rs_executor_globals, zend_ce_argument_count_error, zend_ce_type_error,
+    zend_ce_value_error, zend_class_entry, zend_hash_index_find, zend_hash_str_find,
+    zend_is_callable, zend_throw_error, zend_throw_exception, zval,
 };
 use ext_php_rs::flags::{ClassFlags, DataType, MethodFlags};
 use ext_php_rs::prelude::*;
@@ -32,6 +32,20 @@ use speedyspec_hooks::{
 
 use crate::convert::{self, ZvalHandle};
 use crate::runtime::{self, CallError, PhpError, Thrown};
+
+// PHP's numeric-string parser (`Zend/zend_operators.h`), a ZEND_API symbol of
+// the linked libphp. ZEND_FASTCALL is a plain C call on x86_64 and aarch64.
+unsafe extern "C" {
+    fn _is_numeric_string_ex(
+        str_: *const std::ffi::c_char,
+        length: usize,
+        lval: *mut i64,
+        dval: *mut f64,
+        allow_errors: bool,
+        oflow_info: *mut std::ffi::c_int,
+        trailing_data: *mut bool,
+    ) -> u8;
+}
 
 const CLASS: &str = "SpeedySpec\\Hooks\\Hook";
 /// The lower-cased name under which the engine files HookException.
@@ -624,24 +638,67 @@ impl<'a> Call<'a> {
         }
     }
 
+    /// An integer argument, or `default` when it was not passed.
+    ///
+    /// Accepted whatever the caller's `strict_types`, as WordPress does for
+    /// priorities: an int, a float with an integral value, or a numeric
+    /// string (PHP's own parsing, surrounding whitespace allowed) with an
+    /// integral value. Anything else, including null, bools, fractions and
+    /// values outside the 64-bit range, is a `TypeError`.
     fn int_or(&self, i: usize, param: &str, default: i64) -> Result<i64, Fail> {
         let zv = self.arg(i);
-        // SAFETY: a live argument slot.
+        let not_int = || {
+            self.type_error(
+                i + 1,
+                param,
+                "an integer (int, or integral float or numeric string)",
+            )
+        };
+        // SAFETY: a live argument slot; each branch reads the union member
+        // matching the type.
         unsafe {
             match u32::from(convert::type_of(zv)) {
                 IS_UNDEF => Ok(default),
                 IS_NULL if i >= self.count => Ok(default),
                 IS_LONG => Ok((*zv).value.lval),
-                _ => Err(self.type_error(i + 1, param, "of type int")),
+                IS_DOUBLE => integral((*zv).value.dval).ok_or_else(not_int),
+                IS_STRING => {
+                    let bytes = convert::str_bytes((*zv).value.str_);
+                    let mut lval: i64 = 0;
+                    let mut dval: f64 = 0.0;
+                    // The inline is_numeric_string() wrapper only adds a fast
+                    // reject for a first byte above '9'.
+                    let kind = if bytes.first().is_some_and(|b| *b > b'9') {
+                        0
+                    } else {
+                        _is_numeric_string_ex(
+                            bytes.as_ptr().cast(),
+                            bytes.len(),
+                            &raw mut lval,
+                            &raw mut dval,
+                            false,
+                            std::ptr::null_mut(),
+                            std::ptr::null_mut(),
+                        )
+                    };
+                    match u32::from(kind) {
+                        IS_LONG => Ok(lval),
+                        IS_DOUBLE => integral(dval).ok_or_else(not_int),
+                        _ => Err(not_int()),
+                    }
+                }
+                _ => Err(not_int()),
             }
         }
     }
 
+    /// A priority: an integer argument (see [`Call::int_or`]) that fits the
+    /// registry's `i32`, else a `TypeError` naming the range.
     fn priority(&self, i: usize) -> Result<i32, Fail> {
         let priority = self.int_or(i, "priority", 10)?;
         i32::try_from(priority).map_err(|_| {
-            Fail::Value(format!(
-                "{}(): Argument #{} ($priority) must be between {} and {}",
+            Fail::Type(format!(
+                "{}(): Argument #{} ($priority) must be an integer between {} and {}, {priority} given",
                 self.name,
                 i + 1,
                 i32::MIN,
@@ -667,6 +724,13 @@ impl<'a> Call<'a> {
     }
 }
 
+/// `d` as an i64 when it is a whole number within the 64-bit range.
+fn integral(d: f64) -> Option<i64> {
+    // 2^63 is exactly representable; i64::MAX is not.
+    const LIMIT: f64 = 9_223_372_036_854_775_808.0;
+    (d.is_finite() && d.fract() == 0.0 && (-LIMIT..LIMIT).contains(&d)).then_some(d as i64)
+}
+
 /// A zval in a `static`; only ever read, on the engine's thread.
 struct SyncZval(Zval);
 // SAFETY: the value is an immutable null zval that owns nothing; sharing a
@@ -680,7 +744,7 @@ fn type_name(zv: *const zval) -> &'static str {
         IS_UNDEF | IS_NULL => "null",
         ext_php_rs::ffi::IS_FALSE | ext_php_rs::ffi::IS_TRUE => "bool",
         IS_LONG => "int",
-        ext_php_rs::ffi::IS_DOUBLE => "float",
+        IS_DOUBLE => "float",
         IS_STRING => "string",
         IS_ARRAY => "array",
         IS_OBJECT => "object",

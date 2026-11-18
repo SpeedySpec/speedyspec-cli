@@ -45,6 +45,7 @@ const CASES: &[(&str, Case)] = &[
         case_remove_closure_by_identity,
     ),
     ("has_with_callback", case_has_with_callback),
+    ("numeric_priority", case_numeric_priority),
     ("object_identity_survives", case_object_identity_survives),
     ("rust_callback_seen_by_php", case_rust_callback_seen_by_php),
     ("rust_fires_into_php", case_rust_fires_into_php),
@@ -165,6 +166,18 @@ fn case_has_with_callback(ctx: &Ctx) -> Result<(), String> {
     // has($c) for the registered closure, another closure, an unregistered
     // function name, then has() with no callback.
     eq(&require_out(ctx, "has_with_callback.php")?, "ynny")
+}
+
+fn case_numeric_priority(ctx: &Ctx) -> Result<(), String> {
+    // From a strict_types=1 file: ordering by a string priority, removal
+    // across string and int spellings, integral floats, a string
+    // acceptedArgs, then TypeError for 'abc', '20abc', 20.5, null, '20.5',
+    // '', true and [20]; ValueError for acceptedArgs -1; TypeError for a
+    // priority outside i32 and for acceptedArgs 'two'; nothing registered.
+    eq(
+        &require_out(ctx, "numeric_priority.php")?,
+        "ab|111|11|2|TTTTTTTT|VRAn",
+    )
 }
 
 fn case_object_identity_survives(ctx: &Ctx) -> Result<(), String> {
