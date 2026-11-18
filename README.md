@@ -9,6 +9,7 @@ speedyspec --version                   # speedyspec, php and contracts versions,
 speedyspec php <file> [args...]        # run a PHP file with hooks available; exit code is the script's
 speedyspec app list                    # id <TAB> label <TAB> drivers ("?" marks a driver this binary cannot run)
 speedyspec app installs                # the installs recorded on this machine: name <TAB> app <TAB> driver <TAB> location
+speedyspec app db … --install <name>   # an install's database: export, import, query, tables, size, check
 speedyspec app install <app> ...       # install an app a plugin provides (see "Installing an app")
 speedyspec app uninstall <name>        # remove a Kubernetes install (see "Installing into Kubernetes")
 speedyspec self plugin list            # name <TAB> version <TAB> directory
@@ -229,6 +230,34 @@ Hook::add('speedyspec_driver_zip', static function (array $sources, InstallReque
 `ZipSource` is `url` (https), `destination` (relative to the base; `.` is the base itself),
 `sha256` (optional, 64 hex characters) and `stripComponents` (leading path segments to drop,
 0 to 32). That plugin is `examples/install-wordpress`.
+
+## Working with an install's database
+
+```
+speedyspec app db export [--to <file>] [--force]   --install <name>
+speedyspec app db import <file|->       [--yes]     --install <name>
+speedyspec app db query <sql>                       --install <name>
+speedyspec app db tables | size | check             --install <name>
+```
+
+These find the install by name (`app installs`) and ask its app's plugin where the database is
+(`speedyspec_app_database`); speedyspec then does the work itself, so no `mysql` or `mysqldump`
+is needed on the machine. MySQL and MariaDB are supported. The password is never printed.
+
+- `export` writes a dump: each of the app's tables (those starting with its table prefix) is
+  dropped, created and filled, binary columns as hex. It goes to stdout, or to `--to <file>`,
+  which is created readable only by you and replaced only with `--force`. A dump holds the
+  site's data, so keep it private.
+- `import` runs a dump's statements in order and asks to confirm first (`--yes` skips the
+  question). It reads `mysqldump` files too. It refuses a dump that switches, creates or drops a
+  database, and stored routines (`DELIMITER`). It stops at the first statement that fails,
+  naming its line; the statements before it stay applied, because MySQL commits table changes
+  at once.
+- `query` runs one statement: rows come out tab-separated with a header line (`NULL` for null,
+  `0x...` for binary values); anything else prints how many rows it changed.
+- `tables` lists `name`, rows (the server's estimate), data bytes and index bytes; `size` prints
+  the data, index and total bytes; `check` runs `CHECK TABLE` and exits 1 when a table is not
+  `OK`.
 
 ## Installing into Kubernetes
 

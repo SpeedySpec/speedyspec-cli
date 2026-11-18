@@ -5,6 +5,7 @@ mod app_target;
 mod attribution;
 mod boot;
 mod commands;
+mod db_cmd;
 mod drivers;
 mod install;
 mod installs;
