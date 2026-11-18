@@ -203,7 +203,7 @@ fn failed_download_installs_nothing() {
 fn driver_is_chosen_when_only_one_is_usable() {
     let server = server();
     let base = TempDir::new().unwrap();
-    // Lists zip and kubernetes; only zip is compiled into this binary.
+    // Lists zip and sftp; only zip is compiled into this binary.
     let out = install(&server, &["zip-two-drivers"], base.path(), &["multi"]);
     assert_eq!(out.code, 0, "{}", out.stderr);
     assert_eq!(files(base.path()), vec!["readme.md"]);
@@ -215,7 +215,7 @@ fn unusable_driver_is_reported() {
     let base = TempDir::new().unwrap();
     let out = install(&server, &["zip-k8s-only"], base.path(), &["cluster"]);
     assert_eq!(out.code, 1);
-    assert!(out.stderr.contains("kubernetes"), "{}", out.stderr);
+    assert!(out.stderr.contains("sftp"), "{}", out.stderr);
 }
 
 #[test]
@@ -400,7 +400,7 @@ fn option_flags_need_a_known_driver() {
 fn app_list_marks_only_unimplemented_drivers() {
     let out = Speedyspec::new(&["zip-two-drivers"]).run(&["app", "list"]);
     assert_eq!(out.code, 0);
-    assert_eq!(out.stdout, "multi\tMulti\tzip,kubernetes?\n");
+    assert_eq!(out.stdout, "multi\tMulti\tzip,sftp?\n");
 }
 
 #[test]

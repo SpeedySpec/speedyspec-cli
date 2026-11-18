@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 speedyspec-driver = { path = "../speedyspec-driver" }
 speedyspec-driver-zip = { path = "../speedyspec-driver-zip" }
+speedyspec-driver-kubernetes = { path = "../speedyspec-driver-kubernetes" }
 speedyspec-hooks = { path = "../speedyspec-hooks" }
 speedyspec-hooks-memory = { path = "../speedyspec-hooks-memory" }
 speedyspec-php = { path = "../speedyspec-php" }

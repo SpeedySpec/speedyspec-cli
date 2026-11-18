@@ -63,6 +63,31 @@ impl Speedyspec {
         self
     }
 
+    /// As `run`, with `input` on the command's standard input.
+    pub fn run_with_stdin(mut self, args: &[&str], input: &str) -> Run {
+        use std::io::Write;
+        let mut child = self
+            .command
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("speedyspec runs");
+        child
+            .stdin
+            .take()
+            .expect("stdin is piped")
+            .write_all(input.as_bytes())
+            .expect("write stdin");
+        let output = child.wait_with_output().expect("speedyspec finishes");
+        Run {
+            code: output.status.code().expect("exited normally"),
+            stdout: String::from_utf8(output.stdout).expect("stdout is UTF-8"),
+            stderr: String::from_utf8(output.stderr).expect("stderr is UTF-8"),
+        }
+    }
+
     pub fn run(mut self, args: &[&str]) -> Run {
         let output = self.command.args(args).output().expect("speedyspec runs");
         Run {

@@ -3,6 +3,7 @@
 
 mod cluster;
 mod connect;
+mod driver;
 mod install;
 mod manifest;
 mod readiness;
@@ -10,6 +11,7 @@ mod record;
 
 pub use cluster::ClusterError;
 pub use connect::{ConnectError, ConnectFlags, Connection, connect};
+pub use driver::{KubernetesDriver, TOKEN_VARIABLE};
 pub use install::{Applied, InstallOptions, apply_install, wait_and_finish};
 pub use manifest::{
     InstallIdentity, ResourceId, identify, install_name_problem, namespace_problem,
