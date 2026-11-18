@@ -30,7 +30,7 @@ const GLOBAL_NAMES: &[&str] = &[
 /// before returning, so PHP shuts down cleanly and its output is flushed.
 pub fn run(args: &[String]) -> ExitCode {
     // `self` needs neither PHP nor plugins; a broken plugin must not stop an update.
-    if crate::self_cmd::is_self_command(args) {
+    if crate::self_cmd::is_self_update(args) {
         let code = run_without_plugins(args);
         let _ = std::io::stdout().flush();
         return ExitCode::from(exit_byte(i64::from(code)));
@@ -73,7 +73,7 @@ fn run_without_plugins(args: &[String]) -> i32 {
     {
         Ok(matches) => match matches.subcommand() {
             Some(("self", sub)) => crate::self_cmd::run(sub),
-            _ => unreachable!("is_self_command found self"),
+            _ => unreachable!("is_self_update found self update"),
         },
         Err(error) => {
             let code = error.exit_code();
@@ -127,18 +127,20 @@ fn dispatch(runtime: &Runtime, args: &[String]) -> i32 {
             2
         }
         Some(("php", sub)) => run_php(runtime, sub),
-        Some(("self", sub)) => crate::self_cmd::run(sub),
+        Some(("self", sub)) => match sub.subcommand() {
+            Some(("plugin", plugin)) => match plugin.subcommand() {
+                Some(("list", _)) => list_plugins(runtime),
+                Some(("install", install)) => crate::plugin_cmd::install(install),
+                Some(("remove", remove)) => crate::plugin_cmd::remove(remove),
+                _ => unreachable!("clap requires a plugin subcommand"),
+            },
+            _ => crate::self_cmd::run(sub),
+        },
         Some(("app", sub)) => match sub.subcommand() {
             Some(("list", _)) => crate::app::list(&runtime.apps),
             Some(("install", install)) => crate::app::install(runtime, install, prepass),
             Some(("uninstall", uninstall)) => crate::app::uninstall(uninstall),
             _ => unreachable!("clap requires an app subcommand"),
-        },
-        Some(("plugin", sub)) => match sub.subcommand() {
-            Some(("list", _)) => list_plugins(runtime),
-            Some(("install", install)) => crate::plugin_cmd::install(install),
-            Some(("remove", remove)) => crate::plugin_cmd::remove(remove),
-            _ => unreachable!("clap requires a plugin subcommand"),
         },
         Some((name, sub)) => {
             let command = plugin_commands
@@ -179,6 +181,37 @@ pub(crate) fn clap_problem(command: &PluginCommand) -> Option<String> {
         }
     }
     None
+}
+
+/// `self plugin`: the CLI's own plugins.
+fn self_plugin_clap() -> Clap {
+    Clap::new("plugin")
+        .about("Work with plugins")
+        .subcommand_required(true)
+        .arg_required_else_help(true)
+        .subcommand(Clap::new("list").about("List the loaded plugins"))
+        .subcommand(
+            Clap::new("install")
+                .about("Install a plugin from a zip URL or a GitHub release")
+                .arg(
+                    Arg::new("source")
+                        .required(true)
+                        .value_name("SOURCE")
+                        .help("https://... zip URL, owner/repo or owner/repo@tag"),
+                )
+                .arg(yes_flag()),
+        )
+        .subcommand(
+            Clap::new("remove")
+                .about("Remove an installed plugin")
+                .arg(
+                    Arg::new("name")
+                        .required(true)
+                        .value_name("NAME")
+                        .help("The plugin's name, as `self plugin list` shows it"),
+                )
+                .arg(yes_flag()),
+        )
 }
 
 fn build_tree(plugin_commands: &[PluginCommand], install_options: &[InstallOption]) -> Clap {
@@ -226,7 +259,7 @@ fn build_tree(plugin_commands: &[PluginCommand], install_options: &[InstallOptio
                         .help("Arguments for the script"),
                 ),
         )
-        .subcommand(crate::self_cmd::clap())
+        .subcommand(crate::self_cmd::clap().subcommand(self_plugin_clap()))
         .subcommand(
             Clap::new("app")
                 .about("Work with the apps plugins provide")
@@ -235,35 +268,6 @@ fn build_tree(plugin_commands: &[PluginCommand], install_options: &[InstallOptio
                 .subcommand(Clap::new("list").about("List the apps that can be installed"))
                 .subcommand(install_clap(install_options))
                 .subcommand(uninstall_clap()),
-        )
-        .subcommand(
-            Clap::new("plugin")
-                .about("Work with plugins")
-                .subcommand_required(true)
-                .arg_required_else_help(true)
-                .subcommand(Clap::new("list").about("List the loaded plugins"))
-                .subcommand(
-                    Clap::new("install")
-                        .about("Install a plugin from a zip URL or a GitHub release")
-                        .arg(
-                            Arg::new("source")
-                                .required(true)
-                                .value_name("SOURCE")
-                                .help("https://... zip URL, owner/repo or owner/repo@tag"),
-                        )
-                        .arg(yes_flag()),
-                )
-                .subcommand(
-                    Clap::new("remove")
-                        .about("Remove an installed plugin")
-                        .arg(
-                            Arg::new("name")
-                                .required(true)
-                                .value_name("NAME")
-                                .help("The plugin's name, as `plugin list` shows it"),
-                        )
-                        .arg(yes_flag()),
-                ),
         );
     for command in plugin_commands {
         tree = tree.subcommand(plugin_clap(command));

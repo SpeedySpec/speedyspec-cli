@@ -1,4 +1,4 @@
-//! `speedyspec plugin install` and `plugin remove`.
+//! `speedyspec self plugin install` and `self plugin remove`.
 //!
 //! Neither runs any PHP, so both work when an installed plugin is broken: they are how a broken
 //! plugin gets replaced or removed.
@@ -154,7 +154,7 @@ fn plugins_dir() -> Result<PathBuf, i32> {
     })
 }
 
-/// `plugin install <source> [--yes]`.
+/// `self plugin install <source> [--yes]`.
 pub fn install(matches: &ArgMatches) -> i32 {
     match try_install(matches) {
         Ok(()) => 0,
@@ -263,7 +263,7 @@ fn plugin_root(unpacked: &Path) -> Option<PathBuf> {
     (is_real_directory && only.join(MANIFEST_FILE).is_file()).then_some(only)
 }
 
-/// `plugin remove <name> [--yes]`.
+/// `self plugin remove <name> [--yes]`.
 pub fn remove(matches: &ArgMatches) -> i32 {
     match try_remove(matches) {
         Ok(()) => 0,

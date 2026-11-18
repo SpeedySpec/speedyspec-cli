@@ -55,7 +55,7 @@ fn installs_from_a_url_then_the_plugin_loads() {
     let home = TempDir::new().unwrap();
     let url = format!("{}/p.zip", server.url());
 
-    let out = speedyspec(home.path(), &["plugin", "install", &url, "--yes"]);
+    let out = speedyspec(home.path(), &["self", "plugin", "install", &url, "--yes"]);
     assert_eq!(out.code, 0, "{}", out.stderr);
     let target = plugins_dir(home.path()).join("speedyspec-fixture.good");
     assert_eq!(out.stdout, format!("{GOOD}\t1.0.0\t{}\n", target.display()));
@@ -77,7 +77,7 @@ fn archive_with_one_wrapping_directory_works() {
     )]);
     let home = TempDir::new().unwrap();
     let url = format!("{}/p.zip", server.url());
-    let out = speedyspec(home.path(), &["plugin", "install", &url, "--yes"]);
+    let out = speedyspec(home.path(), &["self", "plugin", "install", &url, "--yes"]);
     assert_eq!(out.code, 0, "{}", out.stderr);
     let installed = plugins_dir(home.path()).join("speedyspec-fixture.good");
     assert_eq!(
@@ -91,7 +91,7 @@ fn shows_the_warning_and_needs_yes() {
     let server = Server::start(vec![("/p.zip", Route::ok(good_zip("1.0.0", "")))]);
     let home = TempDir::new().unwrap();
     let url = format!("{}/p.zip", server.url());
-    let out = speedyspec(home.path(), &["plugin", "install", &url]);
+    let out = speedyspec(home.path(), &["self", "plugin", "install", &url]);
     assert_eq!(out.code, 2);
     assert!(out.stderr.contains(&url), "{}", out.stderr);
     assert!(
@@ -123,7 +123,7 @@ fn installs_from_owner_repo_through_the_api() {
     let home = TempDir::new().unwrap();
     let out = Speedyspec::with_home(&[], home.path())
         .env("SPEEDYSPEC_GITHUB_API", server.url())
-        .run(&["plugin", "install", "acme/good", "--yes"]);
+        .run(&["self", "plugin", "install", "acme/good", "--yes"]);
     assert_eq!(out.code, 0, "{}", out.stderr);
     assert!(
         out.stdout.starts_with(&format!("{GOOD}\t1.0.0\t")),
@@ -151,7 +151,7 @@ fn source_archive_of_a_release_is_unwrapped() {
     let home = TempDir::new().unwrap();
     let out = Speedyspec::with_home(&[], home.path())
         .env("SPEEDYSPEC_GITHUB_API", server.url())
-        .run(&["plugin", "install", "acme/good@v1.0.0", "--yes"]);
+        .run(&["self", "plugin", "install", "acme/good@v1.0.0", "--yes"]);
     assert_eq!(out.code, 0, "{}", out.stderr);
     let installed = plugins_dir(home.path()).join("speedyspec-fixture.good");
     assert_eq!(
@@ -168,7 +168,7 @@ fn archive_without_manifest_is_refused() {
     )]);
     let home = TempDir::new().unwrap();
     let url = format!("{}/p.zip", server.url());
-    let out = speedyspec(home.path(), &["plugin", "install", &url, "--yes"]);
+    let out = speedyspec(home.path(), &["self", "plugin", "install", &url, "--yes"]);
     assert_eq!(out.code, 1);
     assert!(
         out.stderr.contains("speedyspec-plugin.json"),
@@ -188,7 +188,7 @@ fn incompatible_contracts_are_refused() {
     )]);
     let home = TempDir::new().unwrap();
     let url = format!("{}/p.zip", server.url());
-    let out = speedyspec(home.path(), &["plugin", "install", &url, "--yes"]);
+    let out = speedyspec(home.path(), &["self", "plugin", "install", &url, "--yes"]);
     assert_eq!(out.code, 1);
     assert!(
         out.stderr.contains("^2.0") && out.stderr.contains("1.0.0"),
@@ -207,10 +207,10 @@ fn replaces_an_installed_plugin_of_the_same_name() {
     let home = TempDir::new().unwrap();
     for version in ["v1", "v2"] {
         let url = format!("{}/{version}.zip", server.url());
-        let out = speedyspec(home.path(), &["plugin", "install", &url, "--yes"]);
+        let out = speedyspec(home.path(), &["self", "plugin", "install", &url, "--yes"]);
         assert_eq!(out.code, 0, "{}", out.stderr);
     }
-    let out = speedyspec(home.path(), &["plugin", "list"]);
+    let out = speedyspec(home.path(), &["self", "plugin", "list"]);
     let lines: Vec<&str> = out.stdout.lines().collect();
     assert_eq!(lines.len(), 1, "{}", out.stdout);
     assert!(
@@ -236,16 +236,16 @@ fn bad_new_archive_leaves_the_old_plugin() {
     let home = TempDir::new().unwrap();
     let url = format!("{}/v1.zip", server.url());
     assert_eq!(
-        speedyspec(home.path(), &["plugin", "install", &url, "--yes"]).code,
+        speedyspec(home.path(), &["self", "plugin", "install", &url, "--yes"]).code,
         0
     );
 
     let url = format!("{}/bad.zip", server.url());
-    let out = speedyspec(home.path(), &["plugin", "install", &url, "--yes"]);
+    let out = speedyspec(home.path(), &["self", "plugin", "install", &url, "--yes"]);
     assert_eq!(out.code, 1);
     assert!(out.stderr.contains("missing.php"), "{}", out.stderr);
 
-    let out = speedyspec(home.path(), &["plugin", "list"]);
+    let out = speedyspec(home.path(), &["self", "plugin", "list"]);
     assert!(
         out.stdout.starts_with(&format!("{GOOD}\t1.0.0\t")),
         "{}",
@@ -275,7 +275,7 @@ fn works_when_an_installed_plugin_is_broken() {
     .unwrap();
 
     let url = format!("{}/p.zip", server.url());
-    let out = speedyspec(home.path(), &["plugin", "install", &url, "--yes"]);
+    let out = speedyspec(home.path(), &["self", "plugin", "install", &url, "--yes"]);
     assert_eq!(out.code, 0, "{}", out.stderr);
     assert!(
         out.stdout.starts_with(&format!("{GOOD}\t1.0.0\t")),
@@ -284,7 +284,10 @@ fn works_when_an_installed_plugin_is_broken() {
     );
 
     // And the broken one can be removed.
-    let out = speedyspec(home.path(), &["plugin", "remove", "acme/broken", "--yes"]);
+    let out = speedyspec(
+        home.path(),
+        &["self", "plugin", "remove", "acme/broken", "--yes"],
+    );
     assert_eq!(out.code, 0, "{}", out.stderr);
     assert_eq!(
         listing(&plugins_dir(home.path())),
@@ -298,11 +301,11 @@ fn remove_deletes_the_plugin() {
     let home = TempDir::new().unwrap();
     let url = format!("{}/p.zip", server.url());
     assert_eq!(
-        speedyspec(home.path(), &["plugin", "install", &url, "--yes"]).code,
+        speedyspec(home.path(), &["self", "plugin", "install", &url, "--yes"]).code,
         0
     );
 
-    let out = speedyspec(home.path(), &["plugin", "remove", GOOD]);
+    let out = speedyspec(home.path(), &["self", "plugin", "remove", GOOD]);
     assert_eq!(out.code, 2, "removal needs confirming");
     assert!(
         out.stderr.contains("speedyspec: confirm with --yes"),
@@ -310,18 +313,21 @@ fn remove_deletes_the_plugin() {
         out.stderr
     );
 
-    let out = speedyspec(home.path(), &["plugin", "remove", GOOD, "--yes"]);
+    let out = speedyspec(home.path(), &["self", "plugin", "remove", GOOD, "--yes"]);
     assert_eq!(out.code, 0, "{}", out.stderr);
     let target = plugins_dir(home.path()).join("speedyspec-fixture.good");
     assert_eq!(out.stdout, format!("{GOOD}\t{}\n", target.display()));
-    assert_eq!(speedyspec(home.path(), &["plugin", "list"]).stdout, "");
+    assert_eq!(
+        speedyspec(home.path(), &["self", "plugin", "list"]).stdout,
+        ""
+    );
 }
 
 #[test]
 fn remove_refuses_a_plugin_dir_plugin() {
     let home = TempDir::new().unwrap();
-    let out =
-        Speedyspec::with_home(&["good"], home.path()).run(&["plugin", "remove", GOOD, "--yes"]);
+    let out = Speedyspec::with_home(&["good"], home.path())
+        .run(&["self", "plugin", "remove", GOOD, "--yes"]);
     assert_eq!(out.code, 1);
     assert!(
         out.stderr
@@ -342,7 +348,7 @@ fn no_user_plugin_directory_is_reported() {
         .env_remove("XDG_DATA_HOME")
         .env("HOME", "rel")
         .cwd(cwd.path())
-        .run(&["plugin", "install", &url, "--yes"]);
+        .run(&["self", "plugin", "install", &url, "--yes"]);
     assert_eq!(out.code, 1);
     assert!(
         out.stderr
@@ -360,7 +366,10 @@ fn no_user_plugin_directory_is_reported() {
 #[test]
 fn bad_source_is_a_usage_error() {
     let home = TempDir::new().unwrap();
-    let out = speedyspec(home.path(), &["plugin", "install", "not a source", "--yes"]);
+    let out = speedyspec(
+        home.path(),
+        &["self", "plugin", "install", "not a source", "--yes"],
+    );
     assert_eq!(out.code, 2);
     assert!(out.stderr.contains("owner/repo"), "{}", out.stderr);
 }
@@ -373,6 +382,7 @@ fn remove_refuses_names_that_are_not_plugin_names() {
     for name in ["..", ".", "", "acme", "../x"] {
         let out = Speedyspec::with_home(&[], home.path()).run(&[
             "--no-plugins",
+            "self",
             "plugin",
             "remove",
             "--yes",

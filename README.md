@@ -5,17 +5,17 @@ nothing about any particular application: PHP plugins, loaded at start-up, add s
 installable "apps" through hooks. No PHP, Composer or `php.ini` is needed on the machine.
 
 ```
-speedyspec --version              # speedyspec, php and contracts versions, three lines
-speedyspec php <file> [args...]   # run a PHP file with hooks available; exit code is the script's
-speedyspec app list               # id <TAB> label <TAB> drivers ("?" marks a driver this binary cannot run)
-speedyspec app install <app> ...  # install an app a plugin provides (see "Installing an app")
-speedyspec app uninstall <name>   # remove a Kubernetes install (see "Installing into Kubernetes")
-speedyspec plugin list            # name <TAB> version <TAB> directory
-speedyspec plugin install <src>   # install a plugin from a zip URL or a GitHub release
-speedyspec plugin remove <name>   # remove an installed plugin
-speedyspec self update [--check]  # replace this binary with the latest release (see "Updating speedyspec")
-speedyspec <plugin command> ...   # whatever loaded plugins added
-speedyspec                        # no arguments: help on stderr, exit 2
+speedyspec --version                   # speedyspec, php and contracts versions, three lines
+speedyspec php <file> [args...]        # run a PHP file with hooks available; exit code is the script's
+speedyspec app list                    # id <TAB> label <TAB> drivers ("?" marks a driver this binary cannot run)
+speedyspec app install <app> ...       # install an app a plugin provides (see "Installing an app")
+speedyspec app uninstall <name>        # remove a Kubernetes install (see "Installing into Kubernetes")
+speedyspec self plugin list            # name <TAB> version <TAB> directory
+speedyspec self plugin install <src>   # install a plugin from a zip URL or a GitHub release
+speedyspec self plugin remove <name>   # remove an installed plugin
+speedyspec self update [--check]       # replace this binary with the latest release (see "Updating speedyspec")
+speedyspec <plugin command> ...        # whatever loaded plugins added
+speedyspec                             # no arguments: help on stderr, exit 2
 ```
 
 Global flags, accepted anywhere before a script's own arguments: `--no-plugins`,
@@ -321,9 +321,11 @@ The example plugin is `examples/install-demo-kubernetes`.
 ## Installing and removing plugins
 
 ```
-speedyspec plugin install <https://... zip URL | owner/repo | owner/repo@tag> [--yes]
-speedyspec plugin remove <name> [--yes]
+speedyspec self plugin install <https://... zip URL | owner/repo | owner/repo@tag> [--yes]
+speedyspec self plugin remove <name> [--yes]
 ```
+
+These manage speedyspec's own plugins, so they sit under `self`, beside `self update`.
 
 `owner/repo` is a GitHub release (the latest, or the tag given): the release asset named
 `speedyspec-plugin.zip` if there is one, otherwise the release's source archive. `GITHUB_TOKEN`,
