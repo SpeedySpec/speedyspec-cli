@@ -1,0 +1,18 @@
+[package]
+name = "speedyspec-driver-zip"
+version = "0.1.0"
+description = "The speedyspec zip driver: downloads, verifies and safely unpacks archives."
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+speedyspec-driver = { path = "../speedyspec-driver" }
+speedyspec-hooks = { path = "../speedyspec-hooks" }
+# Blocking HTTPS with the TLS roots compiled in: a bare server may have no certificate store.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+sha2 = "0.11"
+tempfile = "3"
+
+[dev-dependencies]
+speedyspec-testkit = { path = "../speedyspec-testkit" }

@@ -119,6 +119,12 @@ const CASES: &[(&str, Case)] = &[
     ("panic_inside_fiber", case_panic_inside_fiber),
     ("array_round_trip", case_array_round_trip),
     ("preload_is_available", case_preload_is_available),
+    (
+        "construct_builds_an_object",
+        case_construct_builds_an_object,
+    ),
+    ("construct_unknown_class", case_construct_unknown_class),
+    ("construct_wrong_args", case_construct_wrong_args),
     ("output_redirect", case_output_redirect),
     (
         "backend_error_is_exception",
@@ -1217,6 +1223,53 @@ fn case_preload_is_available(ctx: &Ctx) -> Result<(), String> {
         &stdout_of(|| ctx.php.eval("t", "echo class_exists('PreT');"))?,
         "1",
     )
+}
+
+fn case_construct_builds_an_object(ctx: &Ctx) -> Result<(), String> {
+    ctx.php
+        .eval(
+            "t",
+            "final class ConstructP { public function __construct(public string $a, public array $b) {} }",
+        )
+        .map_err(|e| e.to_string())?;
+    let pairs = Value::Array(vec![(Key::Str("k".to_owned()), Value::Str("v".to_owned()))]);
+    let object = ctx
+        .php
+        .construct("ConstructP", &[Value::Str("x".to_owned()), pairs.clone()])
+        .map_err(|e| e.to_string())?;
+    eq(
+        &format!("{:?}", ctx.php.class_of(&object)),
+        "Some(\"ConstructP\")",
+    )?;
+    let properties = ctx.php.properties_of(&object).ok_or("not an object")?;
+    if properties
+        != vec![
+            ("a".to_owned(), Value::Str("x".to_owned())),
+            ("b".to_owned(), pairs),
+        ]
+    {
+        return Err(format!("unexpected properties: {properties:?}"));
+    }
+    Ok(())
+}
+
+fn case_construct_unknown_class(ctx: &Ctx) -> Result<(), String> {
+    match ctx.php.construct("NopeNoSuchClass", &[]) {
+        Err(PhpError::Exception { message, .. }) if message.contains("NopeNoSuchClass") => {}
+        other => {
+            return Err(format!(
+                "expected an exception naming the class, got {other:?}"
+            ));
+        }
+    }
+    eq(&stdout_of(|| ctx.php.eval("t", "echo 'still';"))?, "still")
+}
+
+fn case_construct_wrong_args(ctx: &Ctx) -> Result<(), String> {
+    match ctx.php.construct("ConstructP", &[]) {
+        Err(PhpError::Exception { class, .. }) if class == "ArgumentCountError" => Ok(()),
+        other => Err(format!("expected ArgumentCountError, got {other:?}")),
+    }
 }
 
 fn case_output_redirect(ctx: &Ctx) -> Result<(), String> {

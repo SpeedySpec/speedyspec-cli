@@ -145,6 +145,135 @@ pub fn decode_command(value: &Value, reader: &dyn ObjectReader) -> Result<Comman
     .command(value, "")
 }
 
+/// A setting a plugin asks the user for during an install.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InstallOption {
+    pub name: String,
+    pub label: String,
+    pub default: Option<String>,
+    pub required: bool,
+    pub secret: bool,
+}
+
+/// One archive the zip driver downloads and where its contents go, already checked.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ZipSource {
+    pub url: String,
+    /// Relative to the base directory; `.` is the base itself.
+    pub destination: String,
+    /// Lower-case hex.
+    pub sha256: Option<String>,
+    pub strip_components: u32,
+}
+
+/// Decodes one `InstallOption` object. Fields are reported relative to it.
+pub fn decode_install_option(
+    value: &Value,
+    reader: &dyn ObjectReader,
+) -> Result<InstallOption, ContractError> {
+    let d = Decoder {
+        reader,
+        contract: "InstallOption",
+    };
+    let props = d.object(value, "InstallOption", "")?;
+    Ok(InstallOption {
+        name: d.id(&props, "name", "")?,
+        label: d.non_empty(&props, "label", "")?,
+        default: d.optional_string(&props, "default", "")?,
+        required: d.boolean(&props, "required", "")?,
+        secret: d.boolean(&props, "secret", "")?,
+    })
+}
+
+/// Decodes one `ZipSource` object. Fields are reported relative to it.
+pub fn decode_zip_source(
+    value: &Value,
+    reader: &dyn ObjectReader,
+) -> Result<ZipSource, ContractError> {
+    let d = Decoder {
+        reader,
+        contract: "ZipSource",
+    };
+    let props = d.object(value, "ZipSource", "")?;
+    let url = d.string(&props, "url", "")?;
+    if !is_fetchable_url(&url) {
+        return Err(d.err(
+            "url",
+            "must be an https:// URL (http:// is accepted only for localhost, 127.0.0.1 and [::1])",
+        ));
+    }
+    let destination = d.string(&props, "destination", "")?;
+    if let Some(problem) = destination_problem(&destination) {
+        return Err(d.err("destination", problem));
+    }
+    let sha256 = match d.optional_string(&props, "sha256", "") {
+        Ok(None) => None,
+        Ok(Some(sum)) if sum.len() == 64 && sum.bytes().all(|b| b.is_ascii_hexdigit()) => {
+            Some(sum.to_ascii_lowercase())
+        }
+        _ => return Err(d.err("sha256", "expected null or 64 hexadecimal characters")),
+    };
+    let strip_components = match d.get(&props, "stripComponents", "")? {
+        Value::Int(n) if (0..=32).contains(n) => u32::try_from(*n).expect("0..=32 fits a u32"),
+        _ => return Err(d.err("stripComponents", "expected an integer from 0 to 32")),
+    };
+    Ok(ZipSource {
+        url,
+        destination,
+        sha256,
+        strip_components,
+    })
+}
+
+/// Whether the CLI will download from `url`: any `https://` URL, and `http://` only to this
+/// machine (so tests and local mirrors work without weakening real installs).
+pub fn is_fetchable_url(url: &str) -> bool {
+    if let Some(rest) = url.strip_prefix("https://") {
+        return !authority(rest).is_empty();
+    }
+    let Some(rest) = url.strip_prefix("http://") else {
+        return false;
+    };
+    let authority = authority(rest);
+    if authority.contains('@') {
+        return false;
+    }
+    let host = match authority.strip_prefix('[') {
+        // An IPv6 literal: everything up to the closing bracket, brackets included.
+        Some(inner) => match inner.split_once(']') {
+            Some((address, _)) => format!("[{address}]"),
+            None => return false,
+        },
+        None => authority.split(':').next().unwrap_or("").to_owned(),
+    };
+    matches!(host.as_str(), "localhost" | "127.0.0.1" | "[::1]")
+}
+
+/// The `host[:port]` part of what follows the scheme.
+fn authority(after_scheme: &str) -> &str {
+    after_scheme.split(['/', '?', '#']).next().unwrap_or("")
+}
+
+/// Why `destination` cannot be used as a path under the base directory, if it cannot.
+fn destination_problem(destination: &str) -> Option<&'static str> {
+    if destination.is_empty() {
+        return Some("must not be empty (use \".\" for the base directory itself)");
+    }
+    if destination.contains('\0') || destination.contains('\\') {
+        return Some("must not contain a backslash or a NUL character");
+    }
+    if destination.starts_with('/') {
+        return Some("must be relative to the base directory");
+    }
+    if destination.as_bytes().get(1) == Some(&b':') {
+        return Some("must not start with a drive letter");
+    }
+    if destination.split('/').any(|segment| segment == "..") {
+        return Some("must not contain a \"..\" segment");
+    }
+    None
+}
+
 fn join(path: &str, name: &str) -> String {
     if path.is_empty() {
         name.to_string()
@@ -243,6 +372,19 @@ impl Decoder<'_> {
         match self.get(props, name, path)? {
             Value::Str(s) => Ok(s.clone()),
             _ => Err(self.err(&join(path, name), "expected a string")),
+        }
+    }
+
+    fn optional_string(
+        &self,
+        props: &Props,
+        name: &str,
+        path: &str,
+    ) -> Result<Option<String>, ContractError> {
+        match self.get(props, name, path)? {
+            Value::Null => Ok(None),
+            Value::Str(s) => Ok(Some(s.clone())),
+            _ => Err(self.err(&join(path, name), "expected a string or null")),
         }
     }
 
@@ -840,5 +982,192 @@ mod tests {
             ..e
         };
         assert_eq!(e.to_string(), "bad");
+    }
+
+    const OPTION: &str = "SpeedySpec\\Cli\\Contracts\\InstallOption";
+    const ZIP: &str = "SpeedySpec\\Cli\\Contracts\\ZipSource";
+
+    fn text(text: &str) -> Value {
+        Value::Str(text.to_owned())
+    }
+
+    fn option(reader: &FakeReader, name: &str, label: &str) -> Value {
+        reader.object(
+            OPTION,
+            vec![
+                ("name", text(name)),
+                ("label", text(label)),
+                ("default", Value::Null),
+                ("required", Value::Bool(false)),
+                ("secret", Value::Bool(false)),
+            ],
+        )
+    }
+
+    fn zip(reader: &FakeReader, url: Value, destination: Value, sha: Value, strip: Value) -> Value {
+        reader.object(
+            ZIP,
+            vec![
+                ("url", url),
+                ("destination", destination),
+                ("sha256", sha),
+                ("stripComponents", strip),
+            ],
+        )
+    }
+
+    fn plain_zip(reader: &FakeReader, url: &str, destination: &str) -> Value {
+        zip(
+            reader,
+            text(url),
+            text(destination),
+            Value::Null,
+            Value::Int(0),
+        )
+    }
+
+    #[test]
+    fn decodes_install_option_with_defaults() {
+        let reader = FakeReader::default();
+        let decoded =
+            decode_install_option(&option(&reader, "title", "Site title"), &reader).unwrap();
+        assert_eq!(decoded.name, "title");
+        assert_eq!(decoded.label, "Site title");
+        assert_eq!(decoded.default, None);
+        assert!(!decoded.required);
+        assert!(!decoded.secret);
+    }
+
+    #[test]
+    fn rejects_install_option_bad_name() {
+        let reader = FakeReader::default();
+        let error =
+            decode_install_option(&option(&reader, "Admin Email", "x"), &reader).unwrap_err();
+        assert_eq!(error.contract, "InstallOption");
+        assert_eq!(error.field, "name");
+    }
+
+    #[test]
+    fn rejects_install_option_wrong_class() {
+        let reader = FakeReader::default();
+        let value = reader.object("stdClass", vec![]);
+        let error = decode_install_option(&value, &reader).unwrap_err();
+        assert_eq!(error.field, "");
+        assert!(error.problem.contains(OPTION), "{}", error.problem);
+    }
+
+    #[test]
+    fn decodes_zip_source() {
+        let reader = FakeReader::default();
+        let sum = "ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789";
+        let value = zip(
+            &reader,
+            text("https://example.com/a.zip"),
+            text("site"),
+            text(sum),
+            Value::Int(1),
+        );
+        let decoded = decode_zip_source(&value, &reader).unwrap();
+        assert_eq!(decoded.url, "https://example.com/a.zip");
+        assert_eq!(decoded.destination, "site");
+        assert_eq!(decoded.sha256.as_deref(), Some(sum.to_lowercase().as_str()));
+        assert_eq!(decoded.strip_components, 1);
+    }
+
+    #[test]
+    fn zip_url_rules() {
+        let cases = [
+            ("https://example.com/a.zip", true),
+            ("http://127.0.0.1:8080/a.zip", true),
+            ("http://localhost/a.zip", true),
+            ("http://[::1]:9/a.zip", true),
+            ("http://example.com/a.zip", false),
+            ("ftp://x/a.zip", false),
+            ("a.zip", false),
+            ("http://127.0.0.1.evil.com/a.zip", false),
+            ("http://localhost@evil.com/a.zip", false),
+            ("https://", false),
+        ];
+        let reader = FakeReader::default();
+        for (url, ok) in cases {
+            let result = decode_zip_source(&plain_zip(&reader, url, "."), &reader);
+            assert_eq!(result.is_ok(), ok, "{url}");
+            if let Err(error) = result {
+                assert_eq!(error.field, "url", "{url}");
+                assert_eq!(error.contract, "ZipSource");
+            }
+        }
+    }
+
+    #[test]
+    fn zip_destination_rules() {
+        let cases = [
+            (".", true),
+            ("site", true),
+            ("a/b", true),
+            ("", false),
+            ("/abs", false),
+            ("../x", false),
+            ("a/../../x", false),
+            ("a\\b", false),
+            ("C:x", false),
+            ("a\0b", false),
+        ];
+        let reader = FakeReader::default();
+        for (destination, ok) in cases {
+            let value = plain_zip(&reader, "https://example.com/a.zip", destination);
+            let result = decode_zip_source(&value, &reader);
+            assert_eq!(result.is_ok(), ok, "{destination:?}");
+            if let Err(error) = result {
+                assert_eq!(error.field, "destination", "{destination:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn zip_sha256_rules() {
+        let reader = FakeReader::default();
+        let url = || text("https://example.com/a.zip");
+        let short = "a".repeat(63);
+        let not_hex = "g".repeat(64);
+        for bad in [text(&short), text(&not_hex), Value::Int(1)] {
+            let value = zip(&reader, url(), text("."), bad, Value::Int(0));
+            assert_eq!(
+                decode_zip_source(&value, &reader).unwrap_err().field,
+                "sha256"
+            );
+        }
+        let value = zip(&reader, url(), text("."), Value::Null, Value::Int(0));
+        assert_eq!(decode_zip_source(&value, &reader).unwrap().sha256, None);
+    }
+
+    #[test]
+    fn zip_strip_components_rules() {
+        let reader = FakeReader::default();
+        let make = |strip: Value| {
+            zip(
+                &reader,
+                text("https://example.com/a.zip"),
+                text("."),
+                Value::Null,
+                strip,
+            )
+        };
+        for bad in [Value::Int(-1), Value::Int(33), text("1")] {
+            let error = decode_zip_source(&make(bad), &reader).unwrap_err();
+            assert_eq!(error.field, "stripComponents");
+        }
+        assert_eq!(
+            decode_zip_source(&make(Value::Int(0)), &reader)
+                .unwrap()
+                .strip_components,
+            0
+        );
+        assert_eq!(
+            decode_zip_source(&make(Value::Int(32)), &reader)
+                .unwrap()
+                .strip_components,
+            32
+        );
     }
 }
