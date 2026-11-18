@@ -108,9 +108,39 @@ fn link(prefix: &Path) {
     // PHP's opcache JIT detects CPU features with GCC's `__cpu_model` and
     // friends, which live in libgcc. gcc links libgcc by default, so spc does
     // not list it, but rustc links with `-nodefaultlibs`.
-    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("linux") {
-        println!("cargo:rustc-link-lib=static:-bundle=gcc");
+    // On macOS the same symbols come from clang's runtime, libclang_rt.osx.a, which
+    // clang links by default and `-nodefaultlibs` drops too. Only x86_64 objects use
+    // them (the CPU checks are x86 only), but the library is the one clang itself
+    // would link on every Mac, so it is linked for both architectures.
+    match env::var("CARGO_CFG_TARGET_OS").as_deref() {
+        Ok("linux") => println!("cargo:rustc-link-lib=static:-bundle=gcc"),
+        Ok("macos") => {
+            let resource_dir = clang_resource_dir();
+            let darwin = resource_dir.join("lib/darwin");
+            if !darwin.join("libclang_rt.osx.a").is_file() {
+                fail(&format!(
+                    "clang's runtime library libclang_rt.osx.a is not in {}",
+                    darwin.display()
+                ));
+            }
+            println!("cargo:rustc-link-search=native={}", darwin.display());
+            println!("cargo:rustc-link-lib=static:-bundle=clang_rt.osx");
+        }
+        _ => {}
     }
+}
+
+/// Where clang keeps its own headers and runtime libraries (`cc -print-resource-dir`).
+fn clang_resource_dir() -> PathBuf {
+    let cc = env::var("CC").unwrap_or_else(|_| "cc".to_owned());
+    let output = Command::new(&cc)
+        .arg("-print-resource-dir")
+        .output()
+        .unwrap_or_else(|e| fail(&format!("running {cc} -print-resource-dir: {e}")));
+    if !output.status.success() {
+        fail(&format!("{cc} -print-resource-dir failed"));
+    }
+    PathBuf::from(String::from_utf8_lossy(&output.stdout).trim())
 }
 
 fn php_config_output(php_config: &Path, arg: &str) -> String {

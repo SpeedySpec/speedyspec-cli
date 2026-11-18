@@ -162,15 +162,38 @@ pub fn install(
     })
 }
 
+/// `ETXTBSY` on Linux and macOS: the file is open for writing somewhere.
+const TEXT_FILE_BUSY: i32 = 26;
+/// How long a file that is busy that way is waited for.
+const BUSY_WAIT: Duration = Duration::from_secs(2);
+
+/// Starts the new binary. This process closed its own write handle before, but a child that
+/// another thread forked and has not yet exec'd still holds a copy, and Linux refuses to run a
+/// file open for writing; that lasts only until the child execs, so it is tried again.
+fn spawn_when_not_busy(path: &Path) -> io::Result<std::process::Child> {
+    let started = Instant::now();
+    loop {
+        let spawned = Command::new(path)
+            .args(["--no-plugins", "--version"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn();
+        match spawned {
+            Err(error)
+                if error.raw_os_error() == Some(TEXT_FILE_BUSY)
+                    && started.elapsed() < BUSY_WAIT =>
+            {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            other => return other,
+        }
+    }
+}
+
 /// Runs the new binary with `--no-plugins --version` and checks its first line.
 fn smoke(path: &Path, wanted: &str) -> Result<(), String> {
-    let mut child = Command::new(path)
-        .args(["--no-plugins", "--version"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| e.to_string())?;
+    let mut child = spawn_when_not_busy(path).map_err(|e| e.to_string())?;
     let started = Instant::now();
     let status = loop {
         if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
@@ -201,4 +224,28 @@ fn smoke(path: &Path, wanted: &str) -> Result<(), String> {
         return Err(format!("it printed \"{first}\""));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    /// Another process (a child forked by another thread, not yet exec'd) can briefly hold a
+    /// copy of the file's write handle. Linux then refuses to run it ("Text file busy").
+    #[test]
+    fn a_briefly_busy_binary_still_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("new");
+        std::fs::write(&path, "#!/bin/sh\necho \"speedyspec 0.3.0\"\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let busy = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(150));
+            drop(busy);
+        });
+        let result = smoke(&path, "speedyspec 0.3.0");
+        release.join().unwrap();
+        assert_eq!(result, Ok(()));
+    }
 }
