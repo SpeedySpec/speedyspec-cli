@@ -613,6 +613,20 @@ for macOS 12 or later (`MACOSX_DEPLOYMENT_TARGET`), measured on 2026-11-18:
 | `speedyspec-linux-aarch64` (static, musl; native in Docker on Apple silicon) | 24.5 MB (24,542,960 bytes) | not measured |
 | `speedyspec-macos-x86_64` | built in CI only | |
 
+Plan 5 (2026-11-18) adds the extensions WordPress needs to run in the CLI's own PHP: `mysqli`,
+`mysqlnd`, `pdo`, `pdo_mysql`, `dom`, `xml`, `simplexml`, `xmlreader`, `xmlwriter`, `sodium`, `iconv`,
+`fileinfo` and `exif`. `libphp.a` on macOS grows from 51.3 MB to 71.7 MB, and the stripped release
+binaries grow:
+
+| Release asset | Before | After |
+| --- | --- | --- |
+| `speedyspec-macos-aarch64` | 22.9 MB (22,880,016 bytes) | 36.9 MB (36,884,928 bytes) |
+| `speedyspec-linux-x86_64` | 28.6 MB (28,561,424 bytes) | 43.1 MB (43,128,720 bytes) |
+| `speedyspec-linux-aarch64` | 24.5 MB (24,542,960 bytes) | 39.1 MB (39,112,704 bytes) |
+
+Rebuilding PHP with them took 2 min 45 s on macOS, 9 min 46 s for Linux x86_64 under emulation
+and 1 min 51 s for Linux aarch64 (libraries already built).
+
 A first Linux aarch64 PHP build through `scripts/linux.sh` on a Mac can fail with "Too many open
 files in system" while unpacking php-src: Docker Desktop's file sharing runs out of handles on
 the ~20,000 source files. Keeping that build directory on a Docker volume instead of the shared
