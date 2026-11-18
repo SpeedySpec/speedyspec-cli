@@ -6,6 +6,7 @@ mod boot;
 mod commands;
 mod drivers;
 mod install;
+mod plugin_cmd;
 mod prompt;
 
 use std::process::ExitCode;

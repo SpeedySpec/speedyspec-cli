@@ -22,6 +22,9 @@ clap = { version = "4", default-features = false, features = ["std", "help", "us
 semver = "1"
 # Reads a secret from the terminal without echoing it.
 rpassword = "7"
+# Reads the GitHub release description when installing a plugin from owner/repo.
+serde_json = "1"
+tempfile = "3"
 
 [build-dependencies]
 serde_json = "1"

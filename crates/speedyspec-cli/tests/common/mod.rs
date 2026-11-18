@@ -26,10 +26,17 @@ pub struct Speedyspec {
 impl Speedyspec {
     pub fn new(plugins: &[&str]) -> Speedyspec {
         let home = tempfile::tempdir().expect("temp home");
+        let mut run = Self::with_home(plugins, home.path());
+        run._home = Some(home);
+        run
+    }
+
+    /// As `new`, but with a `SPEEDYSPEC_HOME` the test keeps (to run several commands on it).
+    pub fn with_home(plugins: &[&str], home: &Path) -> Speedyspec {
         let mut command = Command::new(env!("CARGO_BIN_EXE_speedyspec"));
         command
             .current_dir(env!("CARGO_MANIFEST_DIR"))
-            .env("SPEEDYSPEC_HOME", home.path())
+            .env("SPEEDYSPEC_HOME", home)
             .env_remove("GITHUB_TOKEN")
             .stdin(Stdio::null());
         for plugin in plugins {
@@ -37,7 +44,7 @@ impl Speedyspec {
         }
         Speedyspec {
             command,
-            _home: Some(home),
+            _home: None,
         }
     }
 

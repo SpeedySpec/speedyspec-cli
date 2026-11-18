@@ -4,7 +4,9 @@
 mod discover;
 mod load;
 mod manifest;
+mod store;
 
 pub use discover::{SearchDir, UserPluginDir, discover, user_plugin_dir};
 pub use load::{LoadReport, Loader, load_all};
 pub use manifest::{MANIFEST_FILE, Manifest, Plugin, PluginError, parse_manifest};
+pub use store::{directory_name, find_installed, remove_installed};

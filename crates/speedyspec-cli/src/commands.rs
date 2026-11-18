@@ -111,6 +111,8 @@ fn dispatch(runtime: &Runtime, args: &[String]) -> i32 {
         },
         Some(("plugin", sub)) => match sub.subcommand() {
             Some(("list", _)) => list_plugins(runtime),
+            Some(("install", install)) => crate::plugin_cmd::install(install),
+            Some(("remove", remove)) => crate::plugin_cmd::remove(remove),
             _ => unreachable!("clap requires a plugin subcommand"),
         },
         Some((name, sub)) => {
@@ -212,12 +214,42 @@ fn build_tree(plugin_commands: &[PluginCommand], install_options: &[InstallOptio
                 .about("Work with plugins")
                 .subcommand_required(true)
                 .arg_required_else_help(true)
-                .subcommand(Clap::new("list").about("List the loaded plugins")),
+                .subcommand(Clap::new("list").about("List the loaded plugins"))
+                .subcommand(
+                    Clap::new("install")
+                        .about("Install a plugin from a zip URL or a GitHub release")
+                        .arg(
+                            Arg::new("source")
+                                .required(true)
+                                .value_name("SOURCE")
+                                .help("https://... zip URL, owner/repo or owner/repo@tag"),
+                        )
+                        .arg(yes_flag()),
+                )
+                .subcommand(
+                    Clap::new("remove")
+                        .about("Remove an installed plugin")
+                        .arg(
+                            Arg::new("name")
+                                .required(true)
+                                .value_name("NAME")
+                                .help("The plugin's name, as `plugin list` shows it"),
+                        )
+                        .arg(yes_flag()),
+                ),
         );
     for command in plugin_commands {
         tree = tree.subcommand(plugin_clap(command));
     }
     tree
+}
+
+fn yes_flag() -> Arg {
+    Arg::new("yes")
+        .long("yes")
+        .short('y')
+        .action(ArgAction::SetTrue)
+        .help("Do not ask for confirmation")
 }
 
 /// `app install`: its own flags, every compiled-in driver's flags, and one flag per install
