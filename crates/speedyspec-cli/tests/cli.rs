@@ -389,3 +389,46 @@ fn start_up_hook_output_goes_to_stderr() {
     assert_eq!(out.stdout.lines().count(), 3, "{:?}", out.stdout);
     assert!(!out.stdout.contains("noise"), "{}", out.stdout);
 }
+
+#[test]
+fn fatal_in_handler_is_reported_once_and_keeps_stdout_clean() {
+    let out = run(&["fatal-handler"], &["crash"]);
+    assert_eq!(out.code, 1, "{}", out.stderr);
+    assert_eq!(out.stdout, "");
+    let ours: Vec<&str> = out
+        .stderr
+        .lines()
+        .filter(|line| line.starts_with("speedyspec: crash:"))
+        .collect();
+    assert_eq!(ours.len(), 1, "{}", out.stderr);
+    assert!(
+        ours[0].contains("Cannot redeclare function declared_twice()"),
+        "{}",
+        ours[0]
+    );
+}
+
+#[test]
+fn warnings_in_handler_go_to_stderr() {
+    let out = run(&["warns"], &["grumble"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.stdout, "done");
+    assert!(out.stderr.contains("careful now"), "{}", out.stderr);
+    assert!(out.stderr.contains("old way"), "{}", out.stderr);
+}
+
+#[test]
+fn fatal_in_php_script_keeps_stdout_clean() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("fatal.php");
+    std::fs::write(&script, "<?php\nfunction twice() {}\nfunction twice() {}\n").unwrap();
+    let out = run(&[], &["php", script.to_str().unwrap()]);
+    // The php built-in reports any failure of the script as exit 1.
+    assert_eq!(out.code, 1, "{}", out.stderr);
+    assert_eq!(out.stdout, "");
+    assert!(
+        out.stderr.contains("Cannot redeclare function twice()"),
+        "{}",
+        out.stderr
+    );
+}
