@@ -385,6 +385,15 @@ uploaded (in the minutes after it is published) is reported as such; try again s
 | `speedyspec_driver_zip` | filter | Receives `[]` and the `InstallRequest`; append `ZipSource` objects. Register with 2 accepted arguments. |
 | `speedyspec_driver_kubernetes` | filter | Receives `null` (or an earlier plugin's answer) and the `InstallRequest`; return a `KubernetesResources`. Register with 2 accepted arguments. |
 | `speedyspec_install_after` | action | Receives the `InstallRequest` and the result. For zip: a list of `['url' => ..., 'destination' => ..., 'path' => ...]`. For kubernetes: a list of `['apiVersion' => ..., 'kind' => ..., 'namespace' => ..., 'name' => ...]`. Register with 2 accepted arguments. |
+| `speedyspec_app_runtime` | filter | Receives `null` (or an earlier plugin's answer) and the `Install` being worked on; return an `AppRuntime` saying how to load the app (its entry file, `ini` settings, `$_SERVER` entries). Register with 2 accepted arguments. |
+| `speedyspec_app_database` | filter | Receives `null` (or an earlier plugin's answer) and the `Install`; return a `DatabaseConnection`, or an `AppTask` whose callable returns the connection as an array (`host`, `database`, `user`, `password`, optionally `port`, `socket`, `tablePrefix`, `charset`). Register with 2 accepted arguments. |
+
+The `Install` carries `name`, `app`, `parts`, `driver` and `root` (the install's directory on
+this machine, or `null` when its files are elsewhere). An `AppTask` runs in a separate process:
+speedyspec starts itself again, loads the app's entry file at PHP's top level when `loadsApp` is
+true, and calls what the task file returns with the input. It inherits speedyspec's environment,
+so an app config that reads `getenv()` sees the same values. Warnings, errors, `exit()` and the
+app's output are reported, and a task past its `timeoutSeconds` is stopped.
 
 The `InstallRequest` carries `app`, `parts` (the selected part ids), `driver`, `options` (the
 install option values by name) and `settings` (for zip: `base`, the absolute base directory;

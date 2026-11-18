@@ -119,6 +119,11 @@ pub fn find(name: &str) -> Result<Option<Record>, String> {
     }
 }
 
+/// The record of install `name`, or a message saying there is none.
+pub fn read(name: &str) -> Result<Record, String> {
+    find(name)?.ok_or_else(|| format!("no install named {name}; app installs lists them"))
+}
+
 /// Why installing `local` would clash with an existing record, if it would: same name, but another
 /// app or another place. The same name, app and place is a re-install.
 pub fn clash(local: &LocalInstall, app: &str) -> Result<Option<String>, String> {

@@ -256,7 +256,7 @@ fn string_map(pairs: &[(String, String)]) -> Value {
     )
 }
 
-fn string_list(items: &[String]) -> Value {
+pub(crate) fn string_list(items: &[String]) -> Value {
     Value::Array(
         items
             .iter()

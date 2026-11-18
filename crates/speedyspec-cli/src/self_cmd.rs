@@ -37,6 +37,12 @@ pub fn clap() -> Clap {
                 .arg(Arg::new("request").long("request").required(true))
                 .arg(Arg::new("result").long("result").required(true)),
         )
+        // The database connection a plugin gives for an install, without its password: for the tests.
+        .subcommand(
+            Clap::new("database")
+                .hide(true)
+                .arg(Arg::new("install").long("install").required(true)),
+        )
         // Runs one task through the runner and prints what came back: for the tests.
         .subcommand(
             Clap::new("task")
