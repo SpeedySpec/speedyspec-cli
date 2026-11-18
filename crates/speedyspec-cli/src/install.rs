@@ -139,7 +139,7 @@ pub fn resolve_choices(
             )));
         }
         None if usable.len() == 1 => usable[0].to_owned(),
-        None => match prompter.as_deref_mut() {
+        None => match prompter {
             Some(prompter) => {
                 let choices: Vec<(String, String)> = usable
                     .iter()
