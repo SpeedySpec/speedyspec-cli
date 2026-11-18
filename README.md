@@ -188,19 +188,32 @@ it from standard input). It is never printed, recorded, or shown to plugins.
 An install, in order:
 
 1. The plugin's answer is checked. Nothing in the cluster changes if it is wrong.
-2. `--namespace`, and any other namespace a resource names, is created if it is missing.
-3. The install record is written: a Secret `speedyspec-install-<install>` (type
+2. Each resource is looked up. One that is already in the cluster and was not put there by an
+   earlier install under this name stops the install, naming it: an install never takes over
+   what it did not create (it would be deleted with the install). That covers a `Namespace`
+   the plugin returns for a namespace that already exists, and a second install whose
+   resources have the same names as the first.
+3. `--namespace`, and any other namespace a resource names, is created if it is missing.
+4. The install record is written: a Secret `speedyspec-install-<install>` (type
    `speedyspec.com/install`) in `--namespace`, listing everything about to be applied. It is
    written first so that an install that fails part-way can still be removed.
-4. Each resource is applied in the order the plugin gave, with server-side apply (field manager
+5. Each resource is applied in the order the plugin gave, with server-side apply (field manager
    `speedyspec`) and the labels `app.kubernetes.io/managed-by=speedyspec`,
    `speedyspec.com/app=<app>` and `speedyspec.com/install=<install>`. A resource that names no
-   namespace gets `--namespace`.
-5. The install waits, up to `--timeout`, for its workloads: every Deployment, StatefulSet,
-   DaemonSet and Job, or what the plugin's `waitFor` names.
-6. The record is marked `installed`.
+   namespace gets `--namespace`. A CustomResourceDefinition may be followed by resources of
+   the kind it defines: the definition is applied first and the cluster is given up to 30
+   seconds to start serving the kind.
+6. The install waits, up to `--timeout`, for its workloads: every Deployment, StatefulSet,
+   DaemonSet and Job, or what the plugin's `waitFor` names. A Deployment is ready when every
+   replica is of the new version and available and no old one is left; one whose rollout has
+   stopped (`ProgressDeadlineExceeded`) fails the install at once.
+7. The record is marked `installed`.
 
-`<install>` defaults to the app's id; give `--name` to install the same app twice. Installing
+A request the cluster does not answer within 30 seconds is given up and reported, so a
+connection that goes silent cannot hold the command past `--timeout` for long.
+
+`<install>` defaults to the app's id; give `--name` to install the same app twice (the plugin must then
+name its resources differently for each, or they go in different namespaces). Installing
 again under the same name re-applies. A resource the plugin no longer returns is left running,
 reported, and kept in the record so that uninstall removes it. On failure the command says
 which resource and why, marks the record `failed`, and leaves what was applied in place:

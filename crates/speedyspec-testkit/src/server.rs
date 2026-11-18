@@ -179,6 +179,7 @@ impl Server {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
         let address = listener.local_addr().expect("local address").to_string();
         let stop = Arc::new(AtomicBool::new(false));
+        let handler = Arc::new(handler);
         let thread = {
             let stop = stop.clone();
             std::thread::spawn(move || {
@@ -187,7 +188,12 @@ impl Server {
                         break;
                     }
                     if let Ok(stream) = stream {
-                        let _ = handle(stream, &handler);
+                        // Each connection on its own thread: one slow answer does not hold up
+                        // the others.
+                        let handler = Arc::clone(&handler);
+                        std::thread::spawn(move || {
+                            let _ = handle(stream, &*handler);
+                        });
                     }
                 }
             })

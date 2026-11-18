@@ -318,7 +318,9 @@ impl Driver for KubernetesDriver {
             return Err(DriverError(format!("the install name {problem}")));
         }
         let timeout = timeout_of(input.flags)?;
-        let connection = open(input.flags)?;
+        let mut connection = open(input.flags)?;
+        // Nothing is being defined here: a kind the cluster does not have is simply gone.
+        connection.set_discovery_wait(Duration::ZERO);
         let removal = find_install(&connection, input.name, &namespace).map_err(DriverError)?;
         Ok(UninstallPlan {
             summary: summarise(&removal),

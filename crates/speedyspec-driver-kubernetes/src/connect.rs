@@ -37,6 +37,8 @@ pub struct Connection {
     pub(crate) kinds: RefCell<HashMap<(String, String), (ApiResource, bool)>>,
     /// How long an unknown kind is retried before it is reported.
     pub(crate) discovery_wait: Duration,
+    /// How long one request may go unanswered before it is given up.
+    pub(crate) request_wait: Duration,
 }
 
 /// Builds a connection from the flags, the token in the environment, and stdin (for
@@ -102,6 +104,7 @@ pub fn connect(
         client,
         kinds: RefCell::default(),
         discovery_wait: Duration::from_secs(30),
+        request_wait: Duration::from_secs(30),
     })
 }
 
@@ -179,6 +182,12 @@ impl Connection {
     /// definition applied a moment ago takes a little while to be served.
     pub fn set_discovery_wait(&mut self, wait: Duration) {
         self.discovery_wait = wait;
+    }
+
+    /// How long one request may go unanswered before it is given up. Without this a connection
+    /// that goes silent would hold the command past any `--timeout`.
+    pub fn set_request_wait(&mut self, wait: Duration) {
+        self.request_wait = wait;
     }
 
     /// The cluster's version, for example `v1.34.1`.

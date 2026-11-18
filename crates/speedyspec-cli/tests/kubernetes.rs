@@ -606,3 +606,47 @@ fn uninstall_reports_what_it_skipped() {
             .is_some()
     );
 }
+
+#[test]
+fn uninstall_does_not_wait_for_a_kind_the_cluster_no_longer_has() {
+    use speedyspec_driver_kubernetes::{Record, Recorded, ResourceId, SCHEMA, Status};
+
+    let cluster = FakeCluster::start();
+    cluster.put(json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "shop"}}));
+    // An install whose custom resource went away with its definition.
+    let record = Record {
+        schema: SCHEMA,
+        name: "shop".to_owned(),
+        app: "shop".to_owned(),
+        parts: Vec::new(),
+        status: Status::Installed,
+        message: None,
+        cli_version: "0.1.0".to_owned(),
+        plugins: Vec::new(),
+        created_namespaces: Vec::new(),
+        resources: vec![Recorded {
+            id: ResourceId {
+                api_version: "example.test/v1".to_owned(),
+                kind: "Widget".to_owned(),
+                namespace: Some("shop".to_owned()),
+                name: "w".to_owned(),
+            },
+            retained: false,
+        }],
+    };
+    cluster.put(record.to_secret("shop"));
+
+    let started = std::time::Instant::now();
+    let out = uninstall(&cluster, &[], &["shop", "--yes"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(
+        cluster
+            .object("v1", "Secret", Some("shop"), "speedyspec-install-shop")
+            .is_none()
+    );
+}

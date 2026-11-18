@@ -46,6 +46,23 @@ fn service() -> serde_json::Value {
            "spec": {"selector": {"app": "web"}, "ports": [{"port": 80}]}})
 }
 
+/// A kind of its own, and one of them: the cluster serves the kind only after the definition
+/// has been applied.
+fn widget_definition() -> serde_json::Value {
+    json!({"apiVersion": "apiextensions.k8s.io/v1", "kind": "CustomResourceDefinition",
+           "metadata": {"name": "widgets.e2e.speedyspec.test"},
+           "spec": {"group": "e2e.speedyspec.test", "scope": "Namespaced",
+                    "names": {"kind": "Widget", "plural": "widgets", "singular": "widget"},
+                    "versions": [{"name": "v1", "served": true, "storage": true,
+                                  "schema": {"openAPIV3Schema": {"type": "object",
+                                             "x-kubernetes-preserve-unknown-fields": true}}}]}})
+}
+
+fn widget() -> serde_json::Value {
+    json!({"apiVersion": "e2e.speedyspec.test/v1", "kind": "Widget", "metadata": {"name": "w"},
+           "spec": {"size": 1}})
+}
+
 fn namespace(name: &str) -> ResourceId {
     ResourceId {
         api_version: "v1".to_owned(),
@@ -68,7 +85,13 @@ fn installs_reinstalls_and_uninstalls_on_a_real_cluster() {
 
     let applied = apply_install(
         &connection,
-        &answer(vec![settings(), web(), service()]),
+        &answer(vec![
+            settings(),
+            web(),
+            service(),
+            widget_definition(),
+            widget(),
+        ]),
         &options(identity, &plugins),
         &mut Steps::default(),
     )
@@ -90,7 +113,7 @@ fn installs_reinstalls_and_uninstalls_on_a_real_cluster() {
     // Again, without the Service: it is left running and stays in the record.
     let applied = apply_install(
         &connection,
-        &answer(vec![settings(), web()]),
+        &answer(vec![settings(), web(), widget_definition(), widget()]),
         &options(identity, &plugins),
         &mut Steps::default(),
     )
@@ -117,7 +140,7 @@ fn installs_reinstalls_and_uninstalls_on_a_real_cluster() {
         &mut Steps::default(),
     )
     .unwrap();
-    assert_eq!(removed.deleted.len(), 3, "{removed:?}");
+    assert_eq!(removed.deleted.len(), 5, "{removed:?}");
     assert_eq!(removed.namespaces, vec!["speedyspec-e2e"]);
     assert!(
         connection.get(&namespace("speedyspec-e2e")).is_err(),
@@ -190,4 +213,35 @@ fn conflict_with_another_manager_on_a_real_cluster() {
         &mut Steps::default(),
     )
     .unwrap();
+}
+
+#[test]
+#[ignore = "needs the cluster from scripts/k3s.sh up"]
+fn a_namespace_the_cluster_already_has_is_not_taken_over() {
+    let connection = connection();
+    let identity = InstallIdentity {
+        app: "shop",
+        name: "takeover",
+        namespace: "default",
+    };
+    let plugins = plugins();
+    let existing =
+        json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "default"}});
+    let error = apply_install(
+        &connection,
+        &answer(vec![existing, settings()]),
+        &options(identity, &plugins),
+        &mut Steps::default(),
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("Namespace/default already exists"),
+        "{error}"
+    );
+    let namespace = connection.get(&namespace("default")).unwrap();
+    assert!(
+        namespace["metadata"]["labels"]["speedyspec.com/install"].is_null(),
+        "the namespace was not labelled"
+    );
+    assert!(find_install(&connection, "takeover", "default").is_err());
 }

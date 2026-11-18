@@ -93,6 +93,22 @@ fn group_version(api_version: &str) -> (&str, &str) {
 }
 
 impl Connection {
+    /// Runs one request, giving it up when the cluster does not answer in time: a connection
+    /// that goes silent must not hold the command for ever.
+    fn call<T>(
+        &self,
+        request: impl Future<Output = Result<T, kube::Error>>,
+    ) -> Result<Result<T, kube::Error>, ClusterError> {
+        self.runtime
+            .block_on(async { tokio::time::timeout(self.request_wait, request).await })
+            .map_err(|_| {
+                ClusterError::Other(format!(
+                    "no answer from the cluster within {}s",
+                    self.request_wait.as_secs_f32().ceil()
+                ))
+            })
+    }
+
     /// What the cluster says about a kind: how to address it, and whether it is namespaced.
     /// A kind the cluster does not know is asked for again for a while before giving up.
     fn kind(&self, api_version: &str, kind: &str) -> Result<(ApiResource, bool), ClusterError> {
@@ -104,20 +120,18 @@ impl Connection {
         let gvk = GroupVersionKind::gvk(group, version, kind);
         let started = Instant::now();
         loop {
-            match self
-                .runtime
-                .block_on(discovery::pinned_kind(&self.client, &gvk))
-            {
+            match self.call(discovery::pinned_kind(&self.client, &gvk))? {
                 Ok((resource, capabilities)) => {
                     let known = (resource, capabilities.scope == Scope::Namespaced);
                     self.kinds.borrow_mut().insert(key, known.clone());
                     return Ok(known);
                 }
-                Err(kube::Error::Api(status)) if status.code == 401 || status.code == 403 => {
+                // An unknown group is a 404; an unknown kind in a known group is a discovery
+                // error. Either may be a definition that has not settled yet. Anything else
+                // the cluster says is a failure, never "no such kind".
+                Err(kube::Error::Api(status)) if status.code != 404 => {
                     return Err(convert(kube::Error::Api(status), kind));
                 }
-                // An unknown group is a 404; an unknown kind in a known group is a discovery
-                // error. Either may be a definition that has not settled yet.
                 Err(kube::Error::Api(_) | kube::Error::Discovery(_)) => {
                     if started.elapsed() >= self.discovery_wait {
                         return Err(ClusterError::UnknownKind(format!("{api_version} {kind}")));
@@ -149,8 +163,7 @@ impl Connection {
     pub fn get(&self, id: &ResourceId) -> Result<Json, ClusterError> {
         let api = self.api(id)?;
         let object = self
-            .runtime
-            .block_on(api.get(&id.name))
+            .call(api.get(&id.name))?
             .map_err(|e| convert(e, &id.display()))?;
         serde_json::to_value(object).map_err(|e| ClusterError::Other(e.to_string()))
     }
@@ -163,8 +176,7 @@ impl Connection {
         if force {
             parameters = parameters.force();
         }
-        self.runtime
-            .block_on(api.patch(&id.name, &parameters, &Patch::Apply(manifest)))
+        self.call(api.patch(&id.name, &parameters, &Patch::Apply(manifest)))?
             .map(drop)
             .map_err(|e| convert(e, &id.display()))
     }
@@ -172,8 +184,7 @@ impl Connection {
     /// Deletes the object; `NotFound` if it is not there.
     pub fn delete(&self, id: &ResourceId) -> Result<(), ClusterError> {
         let api = self.api(id)?;
-        self.runtime
-            .block_on(api.delete(&id.name, &DeleteParams::default()))
+        self.call(api.delete(&id.name, &DeleteParams::default()))?
             .map(drop)
             .map_err(|e| convert(e, &id.display()))
     }

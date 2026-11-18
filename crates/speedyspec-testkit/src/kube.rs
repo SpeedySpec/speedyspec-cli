@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use serde_json::{Value as Json, json};
 
@@ -46,6 +47,11 @@ struct State {
     owned: Vec<(ObjectKey, String, String)>,
     requests: Vec<Received>,
     versions: u64,
+    /// `(method, part of the path, how long)`: the next matching request is answered only
+    /// after that long.
+    stalls: Vec<(String, String, Duration)>,
+    /// `(status, message)`: the next discovery request fails this way.
+    discovery_failures: Vec<(u16, String)>,
 }
 
 /// The fake cluster; it stops when dropped.
@@ -75,6 +81,13 @@ impl FakeCluster {
             ("apps", "v1", "StatefulSet", "statefulsets", true),
             ("apps", "v1", "DaemonSet", "daemonsets", true),
             ("batch", "v1", "Job", "jobs", true),
+            (
+                "apiextensions.k8s.io",
+                "v1",
+                "CustomResourceDefinition",
+                "customresourcedefinitions",
+                false,
+            ),
         ] {
             state.kinds.push(Kind {
                 group: group.to_owned(),
@@ -97,6 +110,16 @@ impl FakeCluster {
         let shared = Arc::clone(&state);
         let server = Server::handling(move |request| {
             let mut state = shared.lock().expect("fake cluster state");
+            let stall = state.stalls.iter().position(|(method, part, _)| {
+                *method == request.method && request.path.contains(part.as_str())
+            });
+            if let Some(at) = stall {
+                // Only this request waits; the cluster goes on answering the others.
+                let (_, _, delay) = state.stalls.remove(at);
+                drop(state);
+                std::thread::sleep(delay);
+                state = shared.lock().expect("fake cluster state");
+            }
             state.requests.push(request.clone());
             respond(&mut state, request)
         });
@@ -231,6 +254,21 @@ impl FakeCluster {
     }
 
     /// Every request received so far, in order.
+    /// The next `method` request whose path contains `path_part` (`/configmaps/`, say) is
+    /// answered only after `delay`.
+    pub fn stall_next(&self, method: &str, path_part: &str, delay: Duration) {
+        self.lock()
+            .stalls
+            .push((method.to_owned(), path_part.to_owned(), delay));
+    }
+
+    /// The next discovery request (the list of a group's kinds) fails with `status`.
+    pub fn fail_next_discovery(&self, status: u16, message: &str) {
+        self.lock()
+            .discovery_failures
+            .push((status, message.to_owned()));
+    }
+
     pub fn requests(&self) -> Vec<Received> {
         self.lock().requests.clone()
     }
@@ -320,6 +358,10 @@ fn respond(state: &mut State, request: &Received) -> Reply {
                 200,
                 json!({"kind": "APIGroupList", "apiVersion": "v1", "groups": groups}).to_string(),
             )
+        }
+        ["api", "v1"] | ["apis", _, _] if !state.discovery_failures.is_empty() => {
+            let (code, message) = state.discovery_failures.remove(0);
+            status(code, "ServiceUnavailable", &message)
         }
         ["api", "v1"] => resource_list(state, "", "v1"),
         ["apis", group, version] => resource_list(state, group, version),
@@ -538,7 +580,41 @@ fn apply(
     object["metadata"]["uid"] = json!(format!("uid-{}-{name}", kind.plural));
     let code = if previous.is_some() { 200 } else { 201 };
     state.objects.insert(object_key, object.clone());
+    if kind.kind == "CustomResourceDefinition" {
+        serve_definition(state, &object);
+    }
     Reply::json(code, object.to_string())
+}
+
+/// A resource definition that has been applied is served from then on, as on a real cluster.
+fn serve_definition(state: &mut State, definition: &Json) {
+    let spec = &definition["spec"];
+    let (Some(group), Some(kind), Some(plural)) = (
+        spec["group"].as_str(),
+        spec["names"]["kind"].as_str(),
+        spec["names"]["plural"].as_str(),
+    ) else {
+        return;
+    };
+    let namespaced = spec["scope"].as_str() != Some("Cluster");
+    for version in spec["versions"].as_array().into_iter().flatten() {
+        let Some(version) = version["name"].as_str() else {
+            continue;
+        };
+        let known = state
+            .kinds
+            .iter()
+            .any(|k| k.group == group && k.version == version && k.kind == kind);
+        if !known {
+            state.kinds.push(Kind {
+                group: group.to_owned(),
+                version: version.to_owned(),
+                kind: kind.to_owned(),
+                plural: plural.to_owned(),
+                namespaced,
+            });
+        }
+    }
 }
 
 #[cfg(test)]

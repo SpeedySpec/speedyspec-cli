@@ -43,10 +43,27 @@ pub fn readiness(kind: &str, object: &Json, condition: Option<&str>) -> Readines
                 count(&status["updatedReplicas"]),
                 count(&status["availableReplicas"]),
             );
+            let total = count(&status["replicas"]);
+            let stopped = status["conditions"].as_array().and_then(|conditions| {
+                conditions.iter().find(|condition| {
+                    condition["type"] == "Progressing"
+                        && condition["reason"] == "ProgressDeadlineExceeded"
+                })
+            });
             if !seen {
                 unseen()
+            } else if let Some(stopped) = stopped {
+                Readiness::Failed(
+                    stopped["message"]
+                        .as_str()
+                        .unwrap_or("the rollout stopped progressing")
+                        .to_owned(),
+                )
             } else if updated < want {
                 short(updated, want, "updated")
+            } else if total > updated {
+                // Old pods count as available too; the rollout is over when they are gone.
+                Readiness::NotYet(format!("{} old replicas still running", total - updated))
             } else if available < want {
                 short(available, want, "available")
             } else {
@@ -180,6 +197,32 @@ mod tests {
             Readiness::Failed(reason) => reason,
             other => panic!("expected Failed, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn deployment_being_replaced_is_not_ready_while_old_replicas_remain() {
+        // Two new pods exist, one is available; the second available pod is an old one.
+        let rolling = json!({"metadata": {"generation": 3}, "spec": {"replicas": 2},
+            "status": {"observedGeneration": 3, "replicas": 3, "updatedReplicas": 2,
+                       "availableReplicas": 2}});
+        assert_eq!(
+            not_yet(readiness("Deployment", &rolling, None)),
+            "1 old replicas still running"
+        );
+    }
+
+    #[test]
+    fn deployment_that_stopped_progressing_has_failed() {
+        let stuck = json!({"metadata": {"generation": 3}, "spec": {"replicas": 2},
+            "status": {"observedGeneration": 3, "replicas": 3, "updatedReplicas": 2,
+                       "availableReplicas": 2,
+                       "conditions": [{"type": "Progressing", "status": "False",
+                                       "reason": "ProgressDeadlineExceeded",
+                                       "message": "ReplicaSet \"web-5d\" has timed out progressing."}]}});
+        assert_eq!(
+            failed(readiness("Deployment", &stuck, None)),
+            "ReplicaSet \"web-5d\" has timed out progressing."
+        );
     }
 
     #[test]

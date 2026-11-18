@@ -95,6 +95,10 @@ pub fn apply_install(
 
     // Everything is checked before the cluster is changed.
     let mut manifests: Vec<(ResourceId, Json)> = Vec::with_capacity(answer.resources.len());
+    // Kinds defined earlier in this same answer: the cluster cannot say anything about them
+    // until their definition has been applied, so the definition is read instead.
+    let mut defined: Vec<(String, String, bool)> = Vec::new();
+    let mut late: Vec<ResourceId> = Vec::new();
     for resource in &answer.resources {
         let mut manifest = resource.clone();
         let api_version = manifest["apiVersion"]
@@ -102,11 +106,39 @@ pub fn apply_install(
             .unwrap_or_default()
             .to_owned();
         let kind = manifest["kind"].as_str().unwrap_or_default().to_owned();
-        let namespaced = connection
-            .scope(&api_version, &kind)
-            .map_err(|error| error.message(&kind))?;
+        let group = api_version.split_once('/').map_or("", |(group, _)| group);
+        let from_definition = defined
+            .iter()
+            .find(|(defined_group, defined_kind, _)| {
+                defined_group == group && *defined_kind == kind
+            })
+            .map(|(_, _, namespaced)| *namespaced);
+        let namespaced = match from_definition {
+            Some(namespaced) => namespaced,
+            None => connection
+                .scope(&api_version, &kind)
+                .map_err(|error| error.message(&kind))?,
+        };
+        if let Some(definition) = definition(&manifest) {
+            defined.push(definition);
+        }
         let id = prepare_manifest(&mut manifest, namespaced, identity)?;
+        if from_definition.is_some() {
+            late.push(id.clone());
+        }
         manifests.push((id, manifest));
+    }
+
+    // Nothing that is already in the cluster and is not this install's is taken over: it would
+    // be labelled as the install's and deleted with it.
+    let mut taken = Vec::new();
+    for (id, _) in manifests.iter().filter(|(id, _)| !late.contains(id)) {
+        if let Some(problem) = someone_elses(connection, id, previous.as_ref())? {
+            taken.push(problem);
+        }
+    }
+    if !taken.is_empty() {
+        return Err(taken.join("\n"));
     }
 
     let mut record = Record::superseding(
@@ -131,7 +163,14 @@ pub fn apply_install(
         },
     );
 
-    let outcome = place(connection, &manifests, &mut record, options, progress);
+    let outcome = place(
+        connection,
+        &manifests,
+        (&late, previous.as_ref()),
+        &mut record,
+        options,
+        progress,
+    );
     if let Err(problem) = outcome {
         record.status = Status::Failed;
         record.message = Some(problem.clone());
@@ -148,10 +187,55 @@ pub fn apply_install(
     })
 }
 
+/// The group, kind and scope a CustomResourceDefinition defines.
+fn definition(manifest: &Json) -> Option<(String, String, bool)> {
+    let is_definition = manifest["kind"] == "CustomResourceDefinition"
+        && manifest["apiVersion"]
+            .as_str()
+            .is_some_and(|version| version.starts_with("apiextensions.k8s.io/"));
+    if !is_definition {
+        return None;
+    }
+    let spec = &manifest["spec"];
+    Some((
+        spec["group"].as_str()?.to_owned(),
+        spec["names"]["kind"].as_str()?.to_owned(),
+        spec["scope"].as_str() != Some("Cluster"),
+    ))
+}
+
+/// Why `id` cannot be installed over, when it is in the cluster already and no earlier install
+/// under this name put it there.
+fn someone_elses(
+    connection: &Connection,
+    id: &ResourceId,
+    previous: Option<&Record>,
+) -> Result<Option<String>, String> {
+    let ours = previous.is_some_and(|record| {
+        record.resources.iter().any(|recorded| recorded.id == *id)
+            || (id.kind == "Namespace"
+                && id.api_version == "v1"
+                && record.created_namespaces.contains(&id.name))
+    });
+    if ours {
+        return Ok(None);
+    }
+    match connection.get(id) {
+        Ok(_) => Ok(Some(format!(
+            "{} already exists and is not part of this install; it is left as it is. Delete \
+             it, or have the plugin leave it out",
+            id.display()
+        ))),
+        Err(ClusterError::NotFound) => Ok(None),
+        Err(error) => Err(error.message(&id.display())),
+    }
+}
+
 /// Makes the namespaces, writes the record, applies the resources.
 fn place(
     connection: &Connection,
     manifests: &[(ResourceId, Json)],
+    (late, previous): (&[ResourceId], Option<&Record>),
     record: &mut Record,
     options: &InstallOptions<'_>,
     progress: &mut dyn Progress,
@@ -185,6 +269,12 @@ fn place(
     write_record(connection, record, identity.namespace)?;
 
     for (id, manifest) in manifests {
+        // A kind defined by this install could only be asked about now.
+        if late.contains(id)
+            && let Some(problem) = someone_elses(connection, id, previous)?
+        {
+            return Err(problem);
+        }
         progress.step(&format!("applying {}", id.display()));
         connection
             .apply(manifest, options.force_conflicts)

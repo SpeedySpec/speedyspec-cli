@@ -307,3 +307,27 @@ fn uninstall_after_a_failed_install_cleans_up() {
     );
     assert!(cluster.object("v1", "Namespace", None, "shop").is_none());
 }
+
+#[test]
+fn a_cluster_that_cannot_say_what_it_has_is_not_taken_for_gone() {
+    let cluster = FakeCluster::start();
+    install(&cluster, SHOP, vec![settings(), web()]);
+    let connection = connection(&cluster);
+    let removal = find_install(&connection, "shop", "shop").unwrap();
+    // The record was read through the core group; the Deployment's group is asked for next.
+    cluster.fail_next_discovery(500, "the server is currently unable to handle the request");
+    let error =
+        remove_install(&connection, &removal, TIMEOUT, QUICK, &mut Steps::default()).unwrap_err();
+    assert!(error.contains("unable to handle the request"), "{error}");
+    assert!(
+        cluster
+            .object("apps/v1", "Deployment", Some("shop"), "web")
+            .is_some()
+    );
+    assert!(
+        cluster
+            .object("v1", "Secret", Some("shop"), "speedyspec-install-shop")
+            .is_some(),
+        "the record stays so the uninstall can be run again"
+    );
+}
