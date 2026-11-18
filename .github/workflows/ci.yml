@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: test (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macos-arm64
+            os: macos-latest
+            run: ""
+            php-build: .php-build
+          - name: linux-x86_64-musl
+            os: ubuntu-latest
+            run: scripts/linux.sh
+            php-build: .php-build-linux
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust 1.99
+        if: matrix.run == ''
+        run: rustup toolchain install 1.99 --profile minimal && rustup default 1.99
+
+      - name: Cache static PHP
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ matrix.php-build }}/spc
+            ${{ matrix.php-build }}/buildroot
+          key: php-${{ matrix.name }}-${{ hashFiles('php-version', 'scripts/build-php.sh') }}
+
+      - name: Build static PHP
+        run: ${{ matrix.run }} scripts/build-php.sh
+
+      - name: Test
+        run: ${{ matrix.run }} cargo test --workspace

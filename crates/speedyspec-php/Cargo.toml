@@ -1,0 +1,17 @@
+[package]
+name = "speedyspec-php"
+version = "0.1.0"
+description = "Embedded, statically linked PHP interpreter for speedyspec."
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# The `embed` feature links libphp and exposes the SAPI and engine entry points.
+ext-php-rs = { version = "=0.16.5", features = ["embed"] }
+
+[dev-dependencies]
+libc = "0.2"
+
+[[test]]
+name = "php"
+harness = false
