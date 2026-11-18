@@ -1,0 +1,9 @@
+[package]
+name = "speedyspec-driver"
+version = "0.1.0"
+description = "Rust mirror of the speedyspec PHP contracts: decodes and validates the values plugins return."
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+speedyspec-hooks = { path = "../speedyspec-hooks" }
