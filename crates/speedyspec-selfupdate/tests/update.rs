@@ -271,3 +271,26 @@ fn unwritable_directory_is_reported_before_downloading() {
     assert!(server.requests().is_empty(), "nothing was downloaded");
     assert_unchanged(&exe);
 }
+
+#[test]
+fn release_sums_script_output_is_read_back() {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("speedyspec-linux-x86_64"), "a").unwrap();
+    fs::write(dir.path().join("speedyspec-macos-aarch64"), "bb").unwrap();
+    fs::write(dir.path().join("notes.txt"), "not a binary").unwrap();
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/release-sums.sh");
+    let status = std::process::Command::new(&script)
+        .arg(dir.path())
+        .status()
+        .unwrap();
+    assert!(status.success(), "{status}");
+    let text = fs::read_to_string(dir.path().join(SUMS)).unwrap();
+    let sums = speedyspec_selfupdate::parse_sums(&text).unwrap();
+    assert_eq!(sums.len(), 2, "{text}");
+    assert_eq!(sums["speedyspec-linux-x86_64"], sha256(b"a"));
+    assert_eq!(sums["speedyspec-macos-aarch64"], sha256(b"bb"));
+    let names: Vec<&str> = text.lines().map(|line| &line[66..]).collect();
+    let mut sorted = names.clone();
+    sorted.sort_unstable();
+    assert_eq!(names, sorted);
+}

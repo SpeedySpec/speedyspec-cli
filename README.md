@@ -27,6 +27,32 @@ PHP's log form (`PHP Warning:  ...`, `PHP Fatal error:  ...`), and usage errors 
 the argument parser (`error: ...`, `Usage: ...`). Help asked for with `--help` goes to stdout;
 help shown because no command was given goes to stderr, with exit code 2.
 
+## Download
+
+Each release has one binary per platform, and a `SHA256SUMS` file listing their checksums. The
+latest release's files are always at these addresses:
+
+| Platform | Binary |
+| --- | --- |
+| Linux x86_64 (static) | https://github.com/SpeedySpec/speedyspec-cli/releases/latest/download/speedyspec-linux-x86_64 |
+| Linux aarch64 (static) | https://github.com/SpeedySpec/speedyspec-cli/releases/latest/download/speedyspec-linux-aarch64 |
+| macOS Apple silicon (12 or later) | https://github.com/SpeedySpec/speedyspec-cli/releases/latest/download/speedyspec-macos-aarch64 |
+| macOS Intel (12 or later) | https://github.com/SpeedySpec/speedyspec-cli/releases/latest/download/speedyspec-macos-x86_64 |
+
+Download the binary under its own name, check it, then make it executable:
+
+```
+base=https://github.com/SpeedySpec/speedyspec-cli/releases/latest/download
+curl -fsSLO "$base/speedyspec-linux-x86_64" -O "$base/SHA256SUMS"
+grep ' speedyspec-linux-x86_64$' SHA256SUMS | sha256sum -c     # macOS: shasum -a 256 -c
+chmod +x speedyspec-linux-x86_64 && mv speedyspec-linux-x86_64 /usr/local/bin/speedyspec
+```
+
+The macOS binaries are not notarized. `curl` downloads run as they are; a file downloaded with a
+browser is quarantined by macOS, which then refuses to open it until you clear the flag
+(`xattr -d com.apple.quarantine speedyspec-macos-aarch64`). After that, `speedyspec self update`
+keeps it current (see "Updating speedyspec").
+
 ## Building
 
 The PHP contracts the plugins program against are a separate package. `build.rs` embeds them
@@ -42,6 +68,17 @@ scripts/linux.sh cargo test --workspace   # the same, in a Linux (musl) containe
 ```
 
 See `docs/php-embed.md` for how PHP is built, linked and embedded.
+
+### Releasing
+
+Releases are cut by release-please. It keeps a pull request titled `chore: release <version>`
+open on `main`, with the changelog and `version.txt` (the version `--version` prints) updated
+from the Conventional Commits merged since the last release. Merging it tags the version and
+publishes the GitHub release; the Release workflow then builds, tests and smoke-runs the four
+binaries at that tag and uploads them with `SHA256SUMS`, about half an hour later. Until they
+are there, `self update` reports that the files are still being uploaded and the download
+addresses above return 404. If the build fails, fix it and run the Release workflow by hand
+(*Run workflow*) with the tag: it rebuilds and re-uploads that release's binaries.
 
 ## Plugins
 

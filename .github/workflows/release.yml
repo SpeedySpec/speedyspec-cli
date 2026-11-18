@@ -1,0 +1,90 @@
+name: Release
+
+# release-please keeps a release pull request open on main. Merging it tags the
+# version and publishes the GitHub release; this workflow then builds the four
+# binaries at that tag and uploads them with SHA256SUMS. Run it by hand with a
+# tag to rebuild and re-upload the binaries of a release that already exists.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The existing release tag to build and upload binaries for (for example v0.1.0)
+        required: true
+        type: string
+
+# One release at a time; a second push waits rather than racing the first.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  release-please:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - name: Release Please
+        id: release
+        uses: googleapis/release-please-action@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  build:
+    needs: release-please
+    # Runs for a new release, and for a dispatch (when release-please is skipped).
+    if: >-
+      always() && !cancelled() &&
+      (needs.release-please.outputs.release_created == 'true' || github.event_name == 'workflow_dispatch')
+    uses: ./.github/workflows/build.yml
+    with:
+      ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || needs.release-please.outputs.tag_name }}
+    permissions:
+      contents: read
+
+  publish:
+    needs: [release-please, build]
+    if: always() && !cancelled() && needs.build.result == 'success'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || needs.release-please.outputs.tag_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: speedyspec-*
+          merge-multiple: true
+          path: dist
+
+      - name: Check there are four binaries
+        run: |
+          count="$(find dist -maxdepth 1 -type f -name 'speedyspec-*' | wc -l)"
+          if [ "$count" -ne 4 ]; then
+            echo "expected 4 binaries in dist/, found $count" >&2
+            ls -l dist >&2
+            exit 1
+          fi
+
+      - name: Write SHA256SUMS
+        run: scripts/release-sums.sh dist
+
+      - name: Upload to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" dist/speedyspec-* dist/SHA256SUMS --clobber --repo "$GITHUB_REPOSITORY"
