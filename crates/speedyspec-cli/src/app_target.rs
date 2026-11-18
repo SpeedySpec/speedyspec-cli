@@ -29,6 +29,9 @@ pub struct Target {
 impl Target {
     pub fn find(name: &str) -> Result<Target, String> {
         let record = installs::read(name)?;
+        if let Some(problem) = installs::gone(&record) {
+            return Err(problem);
+        }
         let root = (record.driver == "zip").then(|| PathBuf::from(&record.location));
         let install = Install {
             name: record.name.clone(),

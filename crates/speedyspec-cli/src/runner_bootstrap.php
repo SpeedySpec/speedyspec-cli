@@ -89,7 +89,18 @@ foreach ($__speedyspec_runner['request']['server'] as $__speedyspec_name => $__s
     $_SERVER[$__speedyspec_name] = $__speedyspec_value;
 }
 unset($__speedyspec_name, $__speedyspec_value);
-chdir($__speedyspec_runner['request']['root']);
+// A fatal error's backtrace would otherwise show the first bytes of each string argument, such
+// as the database password an app passes to its connection. Set after the app's own settings,
+// so they cannot turn it back on.
+ini_set('zend.exception_ignore_args', '1');
+if (!is_dir($__speedyspec_runner['request']['root']) || !chdir($__speedyspec_runner['request']['root']))
+{
+    ($__speedyspec_runner['write'])([
+        'ok' => false,
+        'error' => sprintf('cannot enter the app\'s directory %s', $__speedyspec_runner['request']['root']),
+    ]);
+    exit(1);
+}
 
 try
 {

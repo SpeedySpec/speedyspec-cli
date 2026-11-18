@@ -247,10 +247,10 @@ fn is_alive(pid: &str) -> bool {
 /// Waits briefly for a pid file a shell writes in the background.
 fn read_pid(marker: &Path) -> String {
     for _ in 0..100 {
-        if let Ok(pid) = fs::read_to_string(marker) {
-            if !pid.trim().is_empty() {
-                return pid;
-            }
+        if let Ok(pid) = fs::read_to_string(marker)
+            && !pid.trim().is_empty()
+        {
+            return pid;
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
@@ -368,6 +368,48 @@ fn interrupting_the_cli_stops_the_task_too() {
             "{signal}: the task's sleep {pid} is still running"
         );
     }
+}
+
+#[test]
+fn a_root_that_cannot_be_entered_fails_the_task() {
+    let root = app(ENTRY);
+    let file = task(
+        root.path(),
+        "task.php",
+        "return static fn (array $input): string => getcwd();",
+    );
+    let missing = root.path().join("not-here");
+    let mut args = vec![
+        "self",
+        "task",
+        "--root",
+        missing.to_str().unwrap(),
+        "--file",
+        &file,
+    ];
+    args.push("--no-app");
+    let out = Speedyspec::new(&[]).run(&args);
+    assert_eq!(out.code, 1, "{}", out.stdout);
+    assert!(out.stderr.contains("not-here"), "{}", out.stderr);
+}
+
+#[test]
+fn fatal_error_backtraces_leave_argument_values_out() {
+    let root = app(ENTRY);
+    let file = task(
+        root.path(),
+        "task.php",
+        "function connect_with(string $password): string { trigger_error('refuses', E_USER_ERROR); return ''; }\n\
+         return static fn (array $input): string => connect_with('hunter2-secret-pw');",
+    );
+    let out = run_task(root.path(), &file, &[]);
+    assert_eq!(out.code, 1, "{}", out.stdout);
+    assert!(out.stderr.contains("connect_with("), "{}", out.stderr);
+    assert!(
+        !out.stderr.contains("hunter2") && !out.stdout.contains("hunter2"),
+        "{}",
+        out.stderr
+    );
 }
 
 #[test]

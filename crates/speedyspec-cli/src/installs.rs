@@ -119,6 +119,23 @@ pub fn find(name: &str) -> Result<Option<Record>, String> {
     }
 }
 
+/// Why a zip install's directory cannot be used, if it is gone.
+pub fn gone(record: &Record) -> Option<String> {
+    if record.driver != "zip" || Path::new(&record.location).is_dir() {
+        return None;
+    }
+    let path = dir().map_or_else(String::new, |dir| {
+        format!(
+            "; remove {} if it is not coming back",
+            path_in(&dir, &record.name).display()
+        )
+    });
+    Some(format!(
+        "install {}'s directory {} is gone{path}",
+        record.name, record.location
+    ))
+}
+
 /// The record of install `name`, or a message saying there is none.
 pub fn read(name: &str) -> Result<Record, String> {
     find(name)?.ok_or_else(|| format!("no install named {name}; app installs lists them"))
@@ -232,6 +249,9 @@ pub fn print_list() -> i32 {
             "{}\t{}\t{}\t{}",
             record.name, record.app, record.driver, record.location
         );
+        if let Some(problem) = gone(&record) {
+            eprintln!("speedyspec: {problem}");
+        }
     }
     eprintln!(
         "speedyspec: Kubernetes installs are kept in their cluster; app uninstall finds them there"

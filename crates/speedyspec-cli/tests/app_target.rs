@@ -129,3 +129,33 @@ fn unknown_install() {
         out.stderr
     );
 }
+
+#[test]
+fn an_install_whose_directory_is_gone_is_named() {
+    let (home, root) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+    let gone = root.path().join("site");
+    record(home.path(), "gone", "db-app", &gone);
+    let out = database(home.path(), &["db-app"], "gone", &[]);
+    assert_eq!(out.code, 1, "{}", out.stdout);
+    assert!(
+        out.stderr.contains(&format!(
+            "install gone's directory {} is gone",
+            gone.display()
+        )),
+        "{}",
+        out.stderr
+    );
+    assert!(!out.stderr.contains("JsonException"), "{}", out.stderr);
+
+    let listed = Speedyspec::with_home(&[], home.path()).run(&["app", "installs"]);
+    assert_eq!(listed.code, 0, "{}", listed.stderr);
+    assert!(listed.stdout.starts_with("gone\t"), "{}", listed.stdout);
+    assert!(
+        listed.stderr.contains(&format!(
+            "install gone's directory {} is gone",
+            gone.display()
+        )),
+        "{}",
+        listed.stderr
+    );
+}
