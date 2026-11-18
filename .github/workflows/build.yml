@@ -10,10 +10,6 @@ on:
         description: The commit, branch or tag of speedyspec-cli to build (default the triggering one)
         type: string
         default: ""
-      contracts-ref:
-        description: The ref of speedyspec-cli-contracts to embed
-        type: string
-        default: main
 
 permissions:
   contents: read
@@ -51,26 +47,20 @@ jobs:
             binary: target-linux-arm64/aarch64-unknown-linux-musl/release/speedyspec
     runs-on: ${{ matrix.os }}
     env:
-      # crates/speedyspec-cli/build.rs embeds the PHP contracts from this checkout;
-      # scripts/linux.sh mounts it into its container.
-      SPEEDYSPEC_CONTRACTS_DIR: ${{ github.workspace }}/speedyspec-cli-contracts
       # Which container platform scripts/linux.sh runs (Linux rows only).
       SPEEDYSPEC_LINUX_PLATFORM: ${{ matrix.platform }}
     defaults:
       run:
         working-directory: speedyspec-cli
     steps:
-      # Both repositories side by side, as in local development.
       - uses: actions/checkout@v4
         with:
           path: speedyspec-cli
           ref: ${{ inputs.ref }}
 
-      - uses: actions/checkout@v4
-        with:
-          repository: SpeedySpec/speedyspec-cli-contracts
-          path: speedyspec-cli-contracts
-          ref: ${{ inputs.contracts-ref }}
+      # The contracts release pinned in contracts-version, checked against its SHA-256.
+      - name: Fetch the pinned contracts
+        run: scripts/fetch-contracts.sh
 
       - name: Install Rust 1.99
         if: matrix.run == ''

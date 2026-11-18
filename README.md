@@ -55,16 +55,24 @@ keeps it current (see "Updating speedyspec").
 
 ## Building
 
-The PHP contracts the plugins program against are a separate package. `build.rs` embeds them
-from a sibling checkout, `../speedyspec-cli-contracts` relative to this repository (override with
-`SPEEDYSPEC_CONTRACTS_DIR`), and fails with a clear message if it is missing.
+The PHP contracts the plugins program against are a separate package,
+[`speedyspec-cli-contracts`](https://github.com/SpeedySpec/speedyspec-cli-contracts). The binary
+embeds one release of it, pinned in `contracts-version` (its version, the archive's URL and its
+SHA-256). `scripts/fetch-contracts.sh` downloads that archive, checks it and unpacks it into
+`.contracts/<version>/`, where `build.rs` reads it; the build stops with a message saying so if
+it has not been fetched. To work on the contracts themselves, set `SPEEDYSPEC_CONTRACTS_DIR` to a
+checkout instead (the build warns when its version is not the pinned one). To move the pin,
+change all three lines of `contracts-version` (`curl -fsSL <url> | shasum -a 256` gives the
+hash) and run the script again.
 
 ```
+scripts/fetch-contracts.sh          # once per pin: the contracts into .contracts/
 scripts/build-php.sh                # once: builds the static PHP into .php-build/ (slow)
 cargo build --release -p speedyspec-cli
 ./target/release/speedyspec --version
 cargo test --workspace
 scripts/linux.sh cargo test --workspace   # the same, in a Linux (musl) container
+scripts/smoke.sh target/release/speedyspec  # the checks a release binary must pass
 ```
 
 See `docs/php-embed.md` for how PHP is built, linked and embedded.

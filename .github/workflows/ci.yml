@@ -21,15 +21,9 @@ jobs:
       run:
         working-directory: speedyspec-cli
     steps:
-      # Both repositories side by side, as in local development.
       - uses: actions/checkout@v4
         with:
           path: speedyspec-cli
-
-      - uses: actions/checkout@v4
-        with:
-          repository: SpeedySpec/speedyspec-cli-contracts
-          path: speedyspec-cli-contracts
 
       - name: Install Rust 1.99
         run: rustup toolchain install 1.99 --profile minimal && rustup default 1.99

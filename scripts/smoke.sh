@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Checks a built speedyspec binary before it is published:
 #   scripts/smoke.sh <binary>
-# - `--version` names the version in version.txt and a contracts version;
+# - `--version` names the version in version.txt and the contracts version
+#   pinned in contracts-version;
 # - it runs a PHP file;
 # - on macOS, neither the binary nor the static PHP in it demands a macOS newer
 #   than the deployment target in .cargo/config.toml.
@@ -22,7 +23,9 @@ version="$(tr -d '[:space:]' < "$repo/version.txt")"
 output="$("$binary" --no-plugins --version)" || fail "$binary --version failed"
 first="$(printf '%s\n' "$output" | sed -n 1p)"
 [ "$first" = "speedyspec $version" ] || fail "--version says \"$first\", not \"speedyspec $version\""
-printf '%s\n' "$output" | grep -q '^contracts [0-9]' || fail "--version names no contracts version"
+pinned="$(sed -n 's/^version=//p' "$repo/contracts-version")"
+contracts="$(printf '%s\n' "$output" | sed -n 's/^contracts //p')"
+[ "$contracts" = "$pinned" ] || fail "--version says contracts \"$contracts\", not the pinned \"$pinned\""
 
 "$binary" --no-plugins php "$repo/examples/install-wordpress/plugin.php" >/dev/null \
     || fail "$binary could not run a PHP file"
