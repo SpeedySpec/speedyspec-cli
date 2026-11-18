@@ -107,6 +107,7 @@ fn dispatch(runtime: &Runtime, args: &[String]) -> i32 {
         Some(("app", sub)) => match sub.subcommand() {
             Some(("list", _)) => crate::app::list(&runtime.apps),
             Some(("install", install)) => crate::app::install(runtime, install, prepass),
+            Some(("uninstall", uninstall)) => crate::app::uninstall(uninstall),
             _ => unreachable!("clap requires an app subcommand"),
         },
         Some(("plugin", sub)) => match sub.subcommand() {
@@ -207,7 +208,8 @@ fn build_tree(plugin_commands: &[PluginCommand], install_options: &[InstallOptio
                 .subcommand_required(true)
                 .arg_required_else_help(true)
                 .subcommand(Clap::new("list").about("List the apps that can be installed"))
-                .subcommand(install_clap(install_options)),
+                .subcommand(install_clap(install_options))
+                .subcommand(uninstall_clap()),
         )
         .subcommand(
             Clap::new("plugin")
@@ -242,6 +244,46 @@ fn build_tree(plugin_commands: &[PluginCommand], install_options: &[InstallOptio
         tree = tree.subcommand(plugin_clap(command));
     }
     tree
+}
+
+/// `app uninstall`: the flags of every compiled-in driver that can uninstall.
+fn uninstall_clap() -> Clap {
+    let mut clap = Clap::new("uninstall")
+        .about("Remove an install")
+        .arg(
+            Arg::new("install-name")
+                .required(true)
+                .value_name("NAME")
+                .help("The install's name (the app's id unless --name was given)"),
+        )
+        .arg(
+            Arg::new("driver")
+                .long("driver")
+                .value_name("ID")
+                .help("The driver that installed it"),
+        )
+        .arg(yes_flag());
+    let mut seen: Vec<&str> = Vec::new();
+    for driver in drivers::all() {
+        for flag in driver.uninstall_flags() {
+            if seen.contains(&flag.name) {
+                continue;
+            }
+            seen.push(flag.name);
+            let arg = Arg::new(flag.name).long(flag.name).help(format!(
+                "{} [{}]",
+                flag.help,
+                driver.id()
+            ));
+            clap = clap.arg(if flag.takes_value {
+                arg.action(ArgAction::Set)
+                    .value_name(flag.name.to_uppercase())
+            } else {
+                arg.action(ArgAction::SetTrue)
+            });
+        }
+    }
+    clap
 }
 
 fn yes_flag() -> Arg {

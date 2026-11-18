@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use speedyspec_driver::{
     ContractError, Driver, DriverError, DriverFlag, DriverInput, KubernetesResources, ObjectReader,
-    PluginRef, Prepared, Progress, decode_kubernetes_resources,
+    PluginRef, Prepared, Progress, UninstallInput, UninstallPlan, decode_kubernetes_resources,
 };
 use speedyspec_hooks::{Key, Value};
 
@@ -13,6 +13,7 @@ use crate::connect::{ConnectError, ConnectFlags, Connection, connect};
 use crate::install::{InstallOptions, apply_install, wait_and_finish};
 use crate::manifest::{InstallIdentity, install_name_problem, namespace_problem};
 use crate::readiness::{KNOWN_KINDS, parse_timeout};
+use crate::uninstall::{Removal, find_install, remove_install, summarise};
 
 /// The environment variable a token may be given in.
 pub const TOKEN_VARIABLE: &str = "SPEEDYSPEC_KUBE_TOKEN";
@@ -22,6 +23,13 @@ const POLL: Duration = Duration::from_millis(500);
 /// Applies the resources a plugin returns to a cluster, waits for them and records the install.
 #[derive(Default)]
 pub struct KubernetesDriver;
+
+/// What `plan_uninstall` found.
+struct Uninstalling {
+    connection: Connection,
+    removal: Removal,
+    timeout: Duration,
+}
 
 /// What `prepare` settled for one install.
 struct Settings {
@@ -290,6 +298,86 @@ impl Driver for KubernetesDriver {
                 Some(format!("{namespace}\t{}/{}", text("kind")?, text("name")?))
             })
             .collect()
+    }
+
+    fn uninstall_flags(&self) -> Vec<DriverFlag> {
+        let mut flags = connection_flags();
+        flags.extend([
+            value_flag("namespace", "Namespace the install's record is in"),
+            value_flag(
+                "timeout",
+                "How long to wait for things to be gone, e.g. 90s, 10m (default 10m)",
+            ),
+        ]);
+        flags
+    }
+
+    fn plan_uninstall(&self, input: &UninstallInput<'_>) -> Result<UninstallPlan, DriverError> {
+        let namespace = namespace_of(input.flags)?;
+        if let Some(problem) = install_name_problem(input.name) {
+            return Err(DriverError(format!("the install name {problem}")));
+        }
+        let timeout = timeout_of(input.flags)?;
+        let connection = open(input.flags)?;
+        let removal = find_install(&connection, input.name, &namespace).map_err(DriverError)?;
+        Ok(UninstallPlan {
+            summary: summarise(&removal),
+            state: Box::new(Uninstalling {
+                connection,
+                removal,
+                timeout,
+            }),
+        })
+    }
+
+    fn uninstall(
+        &self,
+        plan: &UninstallPlan,
+        progress: &mut dyn Progress,
+    ) -> Result<Vec<String>, DriverError> {
+        let state = plan.state.downcast_ref::<Uninstalling>().ok_or_else(|| {
+            DriverError("the kubernetes driver was handed another driver's plan".to_owned())
+        })?;
+        let removed = remove_install(
+            &state.connection,
+            &state.removal,
+            state.timeout,
+            POLL,
+            progress,
+        )
+        .map_err(DriverError)?;
+        for (id, why) in &removed.skipped {
+            progress.step(&format!("{} was left alone: {why}", id.display()));
+        }
+        for (namespace, why) in &removed.kept_namespaces {
+            progress.step(&format!("namespace {namespace} was kept: {why}"));
+        }
+
+        // In the order they were handled: the record's resources, last first.
+        let mut lines = Vec::new();
+        for recorded in state.removal.record.resources.iter().rev() {
+            let id = &recorded.id;
+            let outcome = if removed.deleted.contains(id) {
+                "deleted"
+            } else if removed.already_gone.contains(id) {
+                "gone"
+            } else {
+                "skipped"
+            };
+            lines.push(format!(
+                "{}\t{}/{}\t{outcome}",
+                id.namespace.as_deref().unwrap_or("-"),
+                id.kind,
+                id.name
+            ));
+        }
+        for namespace in &removed.namespaces {
+            lines.push(format!("-\tNamespace/{namespace}\tdeleted"));
+        }
+        for (namespace, _) in &removed.kept_namespaces {
+            lines.push(format!("-\tNamespace/{namespace}\tkept"));
+        }
+        Ok(lines)
     }
 }
 

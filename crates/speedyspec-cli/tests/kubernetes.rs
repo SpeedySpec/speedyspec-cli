@@ -460,3 +460,149 @@ fn reinstall_reports_what_is_left_running() {
         second.stdout
     );
 }
+
+// ---- uninstall ----------------------------------------------------------------------------
+
+fn uninstall(cluster: &FakeCluster, plugins: &[&str], args: &[&str]) -> Run {
+    let url = cluster.url();
+    let mut all = vec!["--no-interaction", "app", "uninstall"];
+    all.extend_from_slice(args);
+    all.extend_from_slice(&["--server", &url, "--namespace", "shop"]);
+    speedyspec(cluster, plugins).run(&all)
+}
+
+fn installed(cluster: &FakeCluster) {
+    let out = with_controllers(cluster, || {
+        install(cluster, &["k8s-app"], &["shop", "--title", "Hi"])
+    });
+    assert_eq!(out.code, 0, "{}", out.stderr);
+}
+
+#[test]
+fn uninstall_removes_the_install() {
+    let cluster = FakeCluster::start();
+    installed(&cluster);
+    let out = uninstall(&cluster, &["k8s-app"], &["shop", "--yes"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(
+        cluster
+            .object("v1", "ConfigMap", Some("shop"), "settings")
+            .is_none()
+    );
+    assert!(
+        cluster
+            .object("apps/v1", "Deployment", Some("shop"), "web")
+            .is_none()
+    );
+    assert!(cluster.object("v1", "Namespace", None, "shop").is_none());
+    assert_eq!(
+        out.stdout,
+        "shop\tDeployment/web\tdeleted\nshop\tConfigMap/settings\tdeleted\n-\tNamespace/shop\tdeleted\n"
+    );
+}
+
+#[test]
+fn uninstall_needs_confirmation() {
+    let cluster = FakeCluster::start();
+    installed(&cluster);
+    let writes = cluster.writes().len();
+    let out = uninstall(&cluster, &["k8s-app"], &["shop"]);
+    assert_eq!(out.code, 2);
+    assert!(
+        out.stderr
+            .contains("uninstalling shop (app shop) from namespace shop"),
+        "{}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("speedyspec: confirm with --yes"),
+        "{}",
+        out.stderr
+    );
+    assert_eq!(out.stdout, "");
+    assert_eq!(cluster.writes().len(), writes, "nothing was deleted");
+}
+
+#[test]
+fn uninstall_works_without_plugins() {
+    let cluster = FakeCluster::start();
+    installed(&cluster);
+    let url = cluster.url();
+    let out = speedyspec(&cluster, &[]).run(&[
+        "--no-plugins",
+        "--no-interaction",
+        "app",
+        "uninstall",
+        "shop",
+        "--yes",
+        "--server",
+        &url,
+        "--namespace",
+        "shop",
+    ]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(
+        cluster
+            .object("apps/v1", "Deployment", Some("shop"), "web")
+            .is_none()
+    );
+}
+
+#[test]
+fn uninstall_of_nothing_is_reported() {
+    let cluster = FakeCluster::start();
+    cluster.put(json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "shop"}}));
+    let out = uninstall(&cluster, &[], &["nope", "--yes"]);
+    assert_eq!(out.code, 1);
+    assert!(
+        out.stderr
+            .contains("speedyspec: no install named nope in namespace shop"),
+        "{}",
+        out.stderr
+    );
+}
+
+#[test]
+fn uninstall_driver_may_be_named_and_zip_cannot() {
+    let cluster = FakeCluster::start();
+    installed(&cluster);
+    let out = uninstall(&cluster, &[], &["shop", "--yes", "--driver", "zip"]);
+    assert_eq!(out.code, 2, "{}", out.stderr);
+    assert!(
+        out.stderr.contains("the zip driver cannot uninstall"),
+        "{}",
+        out.stderr
+    );
+    let out = uninstall(&cluster, &[], &["shop", "--yes", "--driver", "kubernetes"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+}
+
+#[test]
+fn uninstall_reports_what_it_skipped() {
+    let cluster = FakeCluster::start();
+    installed(&cluster);
+    cluster.put(json!({"apiVersion": "v1", "kind": "ConfigMap",
+                       "metadata": {"name": "settings", "namespace": "shop"}, "data": {"theirs": "yes"}}));
+    let out = uninstall(&cluster, &[], &["shop", "--yes"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(
+        out.stdout.contains("shop\tConfigMap/settings\tskipped\n"),
+        "{}",
+        out.stdout
+    );
+    assert!(
+        out.stdout.contains("-\tNamespace/shop\tkept\n"),
+        "{}",
+        out.stdout
+    );
+    assert!(
+        out.stderr.contains("no longer part of this install"),
+        "{}",
+        out.stderr
+    );
+    assert!(
+        cluster
+            .object("v1", "ConfigMap", Some("shop"), "settings")
+            .is_some()
+    );
+}
