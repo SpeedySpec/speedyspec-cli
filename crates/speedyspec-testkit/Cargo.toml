@@ -1,0 +1,7 @@
+[package]
+name = "speedyspec-testkit"
+version = "0.1.0"
+description = "Test support shared by the workspace: a loopback HTTP server and a zip archive builder."
+edition.workspace = true
+rust-version.workspace = true
+publish = false
