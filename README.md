@@ -388,4 +388,5 @@ callback returned it, as `speedyspec: <plugin>: <hook>: <field>: <problem>` (for
 dropped whole and the list as it was before that callback continues to the next one, so other
 plugins' commands and apps are unaffected. A callback added from inside another callback (say
 from `speedyspec_init`) belongs to the plugin that added it.
-`Hook::add` and WordPress-style `add_filter` / `add_action` register to the same store.
+There are no global `add_action` / `add_filter` functions: use `SpeedySpec\Hooks\Hook`. That
+leaves those names free for code that declares its own, such as WordPress.

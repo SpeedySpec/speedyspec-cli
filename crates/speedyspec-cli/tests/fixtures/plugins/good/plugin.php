@@ -21,7 +21,7 @@ Hook::add('speedyspec_apps', static function (array $apps): array
     return $apps;
 });
 
-add_filter('speedyspec_commands', static function (array $commands): array
+Hook::add('speedyspec_commands', static function (array $commands): array
 {
     $commands[] = new Command(
         'hello',

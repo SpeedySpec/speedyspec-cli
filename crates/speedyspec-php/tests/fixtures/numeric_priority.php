@@ -12,13 +12,13 @@ echo '|';
 
 // '20', ' 20', '-5' and 20, -5 name the same priorities.
 $c = static fn () => print('x');
-add_filter('numeric.remove', $c, '20');
-echo remove_filter('numeric.remove', $c, 20) ? '1' : '0';
+Hook::add('numeric.remove', $c, '20');
+echo Hook::remove('numeric.remove', $c, 20) ? '1' : '0';
 $d = static fn () => print('y');
-add_filter('numeric.remove', $d, 20);
-echo remove_filter('numeric.remove', $d, ' 20') ? '1' : '0';
-add_action('numeric.remove', $d, '-5');
-echo remove_action('numeric.remove', $d, -5) ? '1' : '0';
+Hook::add('numeric.remove', $d, 20);
+echo Hook::remove('numeric.remove', $d, ' 20') ? '1' : '0';
+Hook::add('numeric.remove', $d, '-5');
+echo Hook::remove('numeric.remove', $d, -5) ? '1' : '0';
 Hook::run('numeric.remove');
 echo '|';
 
