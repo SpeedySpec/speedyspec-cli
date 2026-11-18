@@ -77,7 +77,7 @@ pub fn prescan(args: &[String]) -> Prescan {
 
 /// `Php` as the driver crate's object reader. A wrapper, because neither the trait nor `Php` is
 /// local to this crate.
-struct PhpReader<'a>(&'a Php);
+pub(crate) struct PhpReader<'a>(pub(crate) &'a Php);
 
 impl ObjectReader for PhpReader<'_> {
     fn class_of(&self, value: &Value) -> Option<String> {
@@ -143,7 +143,9 @@ pub struct Runtime {
     pub loaded: Vec<Plugin>,
     pub apps: Vec<App>,
     pub commands: Vec<Command>,
-    /// Shared only while start-up runs the contract checks; the only reference afterwards.
+    /// The hook registry plugins registered on, for the hooks commands fire later.
+    pub hooks: Rc<AttributedHooks>,
+    /// Shared with contract checks while they are installed; the only reference otherwise.
     pub php: Rc<Php>,
 }
 
@@ -204,6 +206,7 @@ pub fn boot(args: &[String]) -> Result<Runtime, String> {
         loaded,
         apps,
         commands,
+        hooks,
         php,
     })
 }
@@ -267,7 +270,7 @@ impl Drop for Checks<'_> {
 /// Checks a list one callback returned: every item must pass `check` (given the item, its index
 /// and the keys accepted before it), and failing items are dropped. A value that is not a list
 /// is dropped whole, and what the callback was given continues instead.
-fn check_list(
+pub(crate) fn check_list(
     given: &Value,
     returned: Value,
     check: impl Fn(&Value, usize, &mut Vec<String>) -> Result<(), String>,
@@ -304,7 +307,7 @@ fn check_list(
 }
 
 /// A single item's contract error as `[index].field: problem`.
-fn at_index(index: usize, error: &ContractError) -> String {
+pub(crate) fn at_index(index: usize, error: &ContractError) -> String {
     if error.field.is_empty() {
         format!("[{index}]: {}", error.problem)
     } else {
@@ -346,7 +349,7 @@ fn collect<T>(
 }
 
 /// One line per problem the contract checks found, naming the plugin.
-fn report_rejections(hooks: &AttributedHooks) {
+pub(crate) fn report_rejections(hooks: &AttributedHooks) {
     for rejection in hooks.take_rejections() {
         let who = rejection.owner.as_deref().unwrap_or("a plugin");
         eprintln!(
@@ -356,7 +359,7 @@ fn report_rejections(hooks: &AttributedHooks) {
     }
 }
 
-fn report_hook_error(error: &HookError) {
+pub(crate) fn report_hook_error(error: &HookError) {
     let who = error.owner.as_deref().unwrap_or("a plugin");
     eprintln!("speedyspec: {who}: {}: {}", error.hook, error.message);
 }

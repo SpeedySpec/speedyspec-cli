@@ -126,6 +126,27 @@ impl Driver for ZipDriver {
             .collect();
         Ok(Value::Array(items))
     }
+
+    fn report(&self, result: &Value) -> Vec<String> {
+        let Value::Array(items) = result else {
+            return Vec::new();
+        };
+        items
+            .iter()
+            .filter_map(|(_, item)| {
+                let Value::Array(fields) = item else {
+                    return None;
+                };
+                let text = |name: &str| {
+                    fields.iter().find_map(|(key, value)| match (key, value) {
+                        (Key::Str(key), Value::Str(value)) if key == name => Some(value.as_str()),
+                        _ => None,
+                    })
+                };
+                Some(format!("{}\t{}", text("destination")?, text("path")?))
+            })
+            .collect()
+    }
 }
 
 /// The answer as checked sources: a list of `ZipSource`, no two for the same destination.

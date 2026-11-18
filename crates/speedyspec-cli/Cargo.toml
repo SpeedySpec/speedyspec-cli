@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 speedyspec-driver = { path = "../speedyspec-driver" }
+speedyspec-driver-zip = { path = "../speedyspec-driver-zip" }
 speedyspec-hooks = { path = "../speedyspec-hooks" }
 speedyspec-hooks-memory = { path = "../speedyspec-hooks-memory" }
 speedyspec-php = { path = "../speedyspec-php" }
@@ -28,3 +29,4 @@ serde_json = "1"
 [dev-dependencies]
 speedyspec-hooks = { path = "../speedyspec-hooks", features = ["conformance"] }
 tempfile = "3"
+speedyspec-testkit = { path = "../speedyspec-testkit" }

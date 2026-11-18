@@ -4,10 +4,8 @@ mod app;
 mod attribution;
 mod boot;
 mod commands;
-// Used by `app install`, which the next commit wires into the command tree.
-#[allow(dead_code)]
+mod drivers;
 mod install;
-#[allow(dead_code)]
 mod prompt;
 
 use std::process::ExitCode;

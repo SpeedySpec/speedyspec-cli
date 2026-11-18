@@ -78,4 +78,7 @@ pub trait Driver {
         reader: &dyn ObjectReader,
         progress: &mut dyn Progress,
     ) -> Result<Value, DriverError>;
+
+    /// What `install` returned, as lines of command output for the user.
+    fn report(&self, result: &Value) -> Vec<String>;
 }

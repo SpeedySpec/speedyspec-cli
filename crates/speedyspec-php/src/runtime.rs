@@ -33,7 +33,7 @@ use ext_php_rs::ffi::{
     zend_get_executed_scope, zend_op_array, zend_string, zval,
 };
 use ext_php_rs::types::Zval;
-use speedyspec_hooks::{SharedHooks, Value};
+use speedyspec_hooks::{Key, SharedHooks, Value};
 
 use crate::boundary::{
     CallError, ENGINE, call_php, class_name, discard_exception, drain, fatal_error, find_function,
@@ -341,6 +341,24 @@ impl Php {
         // this call's.
         settle_stray();
         outcome.map_err(CallError::into_php_error)
+    }
+
+    /// Creates a PHP object: `new $class(...$args)`. An unknown class or a
+    /// constructor that throws is the exception PHP raised.
+    pub fn construct(&self, class: &str, args: &[Value]) -> Result<Value, PhpError> {
+        // Built in PHP rather than through the object API, so the constructor
+        // runs exactly as it would for a plugin's own `new`.
+        let factory = self.eval(
+            "speedyspec:construct",
+            "return static fn (string $class, array $arguments) => new $class(...$arguments);",
+        )?;
+        let arguments = Value::Array(
+            args.iter()
+                .enumerate()
+                .map(|(index, value)| (Key::Int(index as i64), value.clone()))
+                .collect(),
+        );
+        self.call(&factory, &[Value::Str(class.to_owned()), arguments])
     }
 
     /// The class of a PHP object (`Value::Opaque` from PHP); `None` for

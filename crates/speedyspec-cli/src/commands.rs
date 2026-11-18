@@ -5,12 +5,14 @@ use std::io::Write;
 use std::path::Path;
 use std::process::ExitCode;
 
+use clap::error::ErrorKind;
 use clap::{Arg, ArgAction, ArgMatches, Command as Clap};
-use speedyspec_driver::Command as PluginCommand;
+use speedyspec_driver::{Command as PluginCommand, InstallOption};
 use speedyspec_hooks::{Key, Value};
 use speedyspec_php::{PHP_VERSION, PhpError};
 
 use crate::boot::{CONTRACTS_VERSION, Runtime, boot};
+use crate::drivers;
 
 /// Names a plugin command may not take. `self` has no subcommands yet but is reserved for the
 /// plan that adds them; `help` is clap's own.
@@ -61,7 +63,11 @@ fn exit_byte(status: i64) -> u8 {
 fn dispatch(runtime: &Runtime, args: &[String]) -> i32 {
     // Start-up has already dropped (and reported) every command that cannot be offered.
     let plugin_commands = &runtime.commands;
-    let tree = build_tree(plugin_commands);
+    // Install options depend on the app and driver, so plugins are asked for them before the
+    // tree is built whenever the arguments already say which those are.
+    let prepass = crate::app::prepass(runtime, args);
+    let install_options = prepass.as_ref().map_or(&[][..], |p| &p.options[..]);
+    let tree = build_tree(plugin_commands, install_options);
     let matches = match tree
         .clone()
         .try_get_matches_from(std::iter::once("speedyspec".to_owned()).chain(args.iter().cloned()))
@@ -70,6 +76,14 @@ fn dispatch(runtime: &Runtime, args: &[String]) -> i32 {
         Err(error) => {
             let code = error.exit_code();
             let _ = error.print();
+            if error.kind() == ErrorKind::UnknownArgument
+                && prepass.is_none()
+                && crate::app::is_install(args)
+            {
+                eprintln!(
+                    "speedyspec: install options can be given as flags once --driver is known"
+                );
+            }
             return code;
         }
     };
@@ -92,6 +106,7 @@ fn dispatch(runtime: &Runtime, args: &[String]) -> i32 {
         Some(("php", sub)) => run_php(runtime, sub),
         Some(("app", sub)) => match sub.subcommand() {
             Some(("list", _)) => crate::app::list(&runtime.apps),
+            Some(("install", install)) => crate::app::install(runtime, install, prepass),
             _ => unreachable!("clap requires an app subcommand"),
         },
         Some(("plugin", sub)) => match sub.subcommand() {
@@ -139,7 +154,7 @@ pub(crate) fn clap_problem(command: &PluginCommand) -> Option<String> {
     None
 }
 
-fn build_tree(plugin_commands: &[PluginCommand]) -> Clap {
+fn build_tree(plugin_commands: &[PluginCommand], install_options: &[InstallOption]) -> Clap {
     let mut tree = Clap::new("speedyspec")
         .about("Installs apps that plugins describe.")
         .disable_version_flag(true)
@@ -189,7 +204,8 @@ fn build_tree(plugin_commands: &[PluginCommand]) -> Clap {
                 .about("Work with the apps plugins provide")
                 .subcommand_required(true)
                 .arg_required_else_help(true)
-                .subcommand(Clap::new("list").about("List the apps that can be installed")),
+                .subcommand(Clap::new("list").about("List the apps that can be installed"))
+                .subcommand(install_clap(install_options)),
         )
         .subcommand(
             Clap::new("plugin")
@@ -202,6 +218,64 @@ fn build_tree(plugin_commands: &[PluginCommand]) -> Clap {
         tree = tree.subcommand(plugin_clap(command));
     }
     tree
+}
+
+/// `app install`: its own flags, every compiled-in driver's flags, and one flag per install
+/// option the plugins declared for the app and driver the arguments name.
+fn install_clap(install_options: &[InstallOption]) -> Clap {
+    let mut clap = Clap::new("install")
+        .about("Install an app")
+        .arg(Arg::new("app").value_name("APP").help("The app to install"))
+        .arg(
+            Arg::new("part")
+                .long("part")
+                .value_name("ID")
+                .action(ArgAction::Append)
+                .help("A part of the app to install (repeatable; default: its default parts)"),
+        )
+        .arg(
+            Arg::new("driver")
+                .long("driver")
+                .value_name("ID")
+                .help("How to install it"),
+        );
+    let mut seen: Vec<&str> = Vec::new();
+    for driver in drivers::all() {
+        for flag in driver.flags() {
+            if seen.contains(&flag.name) {
+                continue;
+            }
+            seen.push(flag.name);
+            let help = match flag.default {
+                Some(default) => format!("{} [{}: default {default}]", flag.help, driver.id()),
+                None => format!("{} [{}]", flag.help, driver.id()),
+            };
+            let arg = Arg::new(flag.name).long(flag.name).help(help);
+            clap = clap.arg(if flag.takes_value {
+                arg.action(ArgAction::Set)
+                    .value_name(flag.name.to_uppercase())
+            } else {
+                arg.action(ArgAction::SetTrue)
+            });
+        }
+    }
+    for option in install_options {
+        let help = match (&option.default, option.required) {
+            (Some(default), _) if !option.secret => {
+                format!("{} [default: {default}]", option.label)
+            }
+            (None, true) => format!("{} [required]", option.label),
+            _ => option.label.clone(),
+        };
+        clap = clap.arg(
+            Arg::new(option.name.clone())
+                .long(option.name.clone())
+                .action(ArgAction::Set)
+                .value_name("VALUE")
+                .help(help),
+        );
+    }
+    clap
 }
 
 fn plugin_clap(command: &PluginCommand) -> Clap {

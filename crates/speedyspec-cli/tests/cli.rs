@@ -132,7 +132,7 @@ fn php_command_missing_file_fails_with_one_line() {
 fn plugin_app_is_listed() {
     let out = run(&["good"], &["app", "list"]);
     assert_eq!(out.code, 0, "{}", out.stderr);
-    assert_eq!(out.stdout, "demo\tDemo\tzip?\n");
+    assert_eq!(out.stdout, "demo\tDemo\tzip\n");
 }
 
 #[test]
@@ -349,12 +349,8 @@ fn contract_errors_name_exactly_the_plugin_with_all_fixtures_loaded() {
         out.stderr
     );
     // The good plugins' apps survive the bad ones.
-    assert!(out.stdout.contains("demo\tDemo\tzip?\n"), "{}", out.stdout);
-    assert!(
-        out.stdout.contains("quiet\tQuiet\tzip?\n"),
-        "{}",
-        out.stdout
-    );
+    assert!(out.stdout.contains("demo\tDemo\tzip\n"), "{}", out.stdout);
+    assert!(out.stdout.contains("quiet\tQuiet\tzip\n"), "{}", out.stdout);
 }
 
 #[test]
@@ -362,7 +358,7 @@ fn one_bad_app_does_not_hide_the_others() {
     for plugins in [["bad-app-field", "good"], ["good", "bad-app-field"]] {
         let out = run(&plugins, &["app", "list"]);
         assert_eq!(out.code, 0, "{}", out.stderr);
-        assert_eq!(out.stdout, "demo\tDemo\tzip?\n", "{}", out.stderr);
+        assert_eq!(out.stdout, "demo\tDemo\tzip\n", "{}", out.stderr);
         let apps = contract_lines(&out.stderr, "speedyspec_apps");
         assert_eq!(apps.len(), 1, "{}", out.stderr);
         assert!(
@@ -380,7 +376,7 @@ fn one_bad_app_does_not_hide_the_others() {
 fn throwing_destructor_of_a_rejected_value_does_not_blame_the_next_plugin() {
     let out = run(&["dtor-bad", "good"], &["app", "list"]);
     assert_eq!(out.code, 0, "{}", out.stderr);
-    assert_eq!(out.stdout, "demo\tDemo\tzip?\n", "{}", out.stderr);
+    assert_eq!(out.stdout, "demo\tDemo\tzip\n", "{}", out.stderr);
     assert!(!out.stderr.contains("fixture/good"), "{}", out.stderr);
     assert_eq!(
         contract_lines(&out.stderr, "speedyspec_apps"),
@@ -396,7 +392,7 @@ fn throwing_destructor_of_a_rejected_value_does_not_blame_the_next_plugin() {
 fn callback_added_from_init_is_attributed_to_its_plugin() {
     let out = run(&["good", "late-bad"], &["app", "list"]);
     assert_eq!(out.code, 0, "{}", out.stderr);
-    assert_eq!(out.stdout, "demo\tDemo\tzip?\n");
+    assert_eq!(out.stdout, "demo\tDemo\tzip\n");
     assert_eq!(
         contract_lines(&out.stderr, "speedyspec_apps"),
         [
@@ -576,7 +572,7 @@ fn memory_exhaustion_at_load_is_survived() {
 
     let out = run(&["oom", "good"], &["app", "list"]);
     assert_eq!(out.code, 0, "{}", out.stderr);
-    assert_eq!(out.stdout, "demo\tDemo\tzip?\n");
+    assert_eq!(out.stdout, "demo\tDemo\tzip\n");
 }
 
 #[test]
@@ -714,7 +710,7 @@ fn real_fatal_error_at_load_is_survived() {
 fn start_up_hook_output_goes_to_stderr() {
     let out = run(&["noisy-hooks"], &["app", "list"]);
     assert_eq!(out.code, 0, "{}", out.stderr);
-    assert_eq!(out.stdout, "quiet\tQuiet\tzip?\n");
+    assert_eq!(out.stdout, "quiet\tQuiet\tzip\n");
     for noise in ["noise from init", "noise from commands", "noise from apps"] {
         assert!(out.stderr.contains(noise), "{}", out.stderr);
     }
