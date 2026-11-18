@@ -82,6 +82,16 @@ const CASES: &[(&str, Case)] = &[
     ("not_poisoned_before_fatal", case_not_poisoned_before_fatal),
     ("fatal_is_caught", case_fatal_is_caught),
     ("poisoned_after_fatal", case_poisoned_after_fatal),
+    ("warning_goes_to_stderr", case_warning_goes_to_stderr),
+    (
+        "deprecation_goes_to_stderr",
+        case_deprecation_goes_to_stderr,
+    ),
+    ("fatal_goes_to_stderr", case_fatal_goes_to_stderr),
+    (
+        "uncaught_in_run_file_not_on_stdout",
+        case_uncaught_in_run_file_not_on_stdout,
+    ),
     ("fatal_while_fiber_parked", case_fatal_while_fiber_parked),
     ("fatal_inside_callback", case_fatal_inside_callback),
     ("exit_inside_callback", case_exit_inside_callback),
@@ -382,8 +392,10 @@ fn case_fatal_is_caught(ctx: &Ctx) -> Result<(), String> {
     }
 
     // Declaring a function twice is a compile-time engine fatal (a bailout).
-    let (out, result) = capture(1, || ctx.php.require(&fixture("redeclare.php")));
-    let out = out?;
+    let (out, (err, result)) = capture(1, || {
+        capture(2, || ctx.php.require(&fixture("redeclare.php")))
+    });
+    let (out, err) = (out?, err?);
     match result {
         Err(PhpError::Fatal {
             message,
@@ -394,8 +406,12 @@ fn case_fatal_is_caught(ctx: &Ctx) -> Result<(), String> {
             && line > 0 => {}
         other => return Err(format!("redeclare: unexpected {other:?}")),
     }
-    if !out.contains("Fatal error") {
-        return Err(format!("PHP did not report the fatal error: {out:?}"));
+    // PHP reports it on stderr, never on stdout.
+    eq(&out, "")?;
+    if !err.contains("PHP Fatal error:") || !err.contains("speedyspec_fixture_twice") {
+        return Err(format!(
+            "PHP did not report the fatal error on stderr: {err:?}"
+        ));
     }
 
     // The engine is still usable after the bailout.
@@ -574,7 +590,7 @@ fn case_fatal_while_fiber_parked(ctx: &Ctx) -> Result<(), String> {
         })?,
         "xparked",
     )?;
-    let (_, result) = capture(1, || ctx.php.require(&fixture("redeclare.php")));
+    let (_, result) = capture(1, || quiet(|| ctx.php.require(&fixture("redeclare.php"))));
     match result {
         Err(PhpError::Fatal { .. }) => {}
         other => return Err(format!("expected a fatal error, got {other:?}")),
@@ -654,10 +670,80 @@ fn case_poisoned_after_fatal(ctx: &Ctx) -> Result<(), String> {
     }
 }
 
+/// Runs `code` with output on stdout; returns (stdout, stderr, result).
+fn diagnose(ctx: &Ctx, code: &str) -> Result<(String, String, Result<Value, PhpError>), String> {
+    ctx.php.redirect_output(Output::Stdout);
+    let (out, (err, result)) = capture(1, || capture(2, || ctx.php.eval("diag", code)));
+    Ok((out?, err?, result))
+}
+
+fn case_warning_goes_to_stderr(ctx: &Ctx) -> Result<(), String> {
+    let (out, err, result) = diagnose(ctx, "$a = []; $v = $a['missing']; echo 'x';")?;
+    result.map_err(|e| e.to_string())?;
+    eq(&out, "x")?;
+    if err.contains("PHP Warning:") && err.contains("Undefined array key \"missing\"") {
+        Ok(())
+    } else {
+        Err(format!("stderr: {err:?}"))
+    }
+}
+
+fn case_deprecation_goes_to_stderr(ctx: &Ctx) -> Result<(), String> {
+    let (out, err, result) = diagnose(
+        ctx,
+        "trigger_error('speedyspec old api', E_USER_DEPRECATED); echo 'x';",
+    )?;
+    result.map_err(|e| e.to_string())?;
+    eq(&out, "x")?;
+    if err.contains("PHP Deprecated:") && err.contains("speedyspec old api") {
+        Ok(())
+    } else {
+        Err(format!("stderr: {err:?}"))
+    }
+}
+
+fn case_fatal_goes_to_stderr(ctx: &Ctx) -> Result<(), String> {
+    let (out, err, result) = diagnose(
+        ctx,
+        "echo 'x'; function speedyspec_diag_twice(): void {} function speedyspec_diag_twice(): void {}",
+    )?;
+    eq(&out, "")?;
+    match result {
+        Err(PhpError::Fatal { message, line, .. })
+            if message.contains("speedyspec_diag_twice") && line > 0 => {}
+        other => return Err(format!("expected a fatal error, got {other:?}")),
+    }
+    if err.contains("PHP Fatal error:") && err.contains("speedyspec_diag_twice") {
+        Ok(())
+    } else {
+        Err(format!("stderr: {err:?}"))
+    }
+}
+
+fn case_uncaught_in_run_file_not_on_stdout(ctx: &Ctx) -> Result<(), String> {
+    ctx.php.redirect_output(Output::Stdout);
+    let (out, (err, result)) = capture(1, || {
+        capture(2, || ctx.php.run_file(&fixture("uncaught.php"), &[]))
+    });
+    // Only the script's own output; the exception comes back as an error.
+    eq(&out?, "before;")?;
+    err?;
+    match result {
+        Err(PhpError::Exception { class, message, .. })
+            if class == "RuntimeException" && message == "uncaught here" =>
+        {
+            Ok(())
+        }
+        other => Err(format!("expected the exception, got {other:?}")),
+    }
+}
+
 fn case_fatal_inside_callback(ctx: &Ctx) -> Result<(), String> {
     // A fatal error in a callback fired from PHP abandons the PHP caller too,
     // after the Rust frames in between have returned normally.
-    let (out, result) = capture(1, || ctx.php.require(&fixture("nested_fatal.php")));
+    let (out, result) = capture(1, || {
+        quiet(|| ctx.php.require(&fixture("nested_fatal.php")))
+    });
     let out = out?;
     match result {
         Err(PhpError::Fatal { message, .. }) if message.contains("speedyspec_fixture_twice") => {}
@@ -669,7 +755,7 @@ fn case_fatal_inside_callback(ctx: &Ctx) -> Result<(), String> {
 
     // A fatal error in a destructor that runs when Rust releases its last
     // reference, at the end of a native call, unwinds that call's PHP caller.
-    let (out, result) = capture(1, || ctx.php.require(&fixture("drain_fatal.php")));
+    let (out, result) = capture(1, || quiet(|| ctx.php.require(&fixture("drain_fatal.php"))));
     let out = out?;
     match result {
         Err(PhpError::Fatal { message, .. }) if message.contains("speedyspec_fixture_twice") => {}
@@ -680,7 +766,7 @@ fn case_fatal_inside_callback(ctx: &Ctx) -> Result<(), String> {
     }
 
     // Fired from Rust, the same fatal error is that callback's error.
-    let (_, result) = capture(1, || ctx.hooks.run("nested.fatal", &[]));
+    let (_, result) = capture(1, || quiet(|| ctx.hooks.run("nested.fatal", &[])));
     match result {
         Err(err)
             if err.kind == HookErrorKind::Callback
@@ -1050,6 +1136,12 @@ fn capture<T>(fd: i32, f: impl FnOnce() -> T) -> (Result<String, String>, T) {
         .map(|_| out)
         .map_err(|e| e.to_string());
     (read, result)
+}
+
+/// Runs `f` with stderr captured and discarded: for cases where PHP
+/// legitimately reports a diagnostic that the case does not check.
+fn quiet<T>(f: impl FnOnce() -> T) -> T {
+    capture(2, f).1
 }
 
 fn flush(fd: i32) {

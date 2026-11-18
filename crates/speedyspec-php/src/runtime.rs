@@ -90,12 +90,22 @@ unsafe extern "C" {
 }
 
 /// INI settings the CLI needs regardless of any php.ini, which is never read.
-/// These follow what PHP's own CLI SAPI forces, except `register_argc_argv`:
-/// outside the CLI SAPI PHP 8.5 would derive `$argv` from the query string
-/// (deprecated), so `run_file` sets `$argv` and `$argc` itself.
+/// These follow what PHP's own CLI SAPI forces, with two exceptions:
+///
+/// - PHP's diagnostics (errors, warnings, notices, deprecations) must never
+///   reach stdout, which carries only command output. `display_errors=stderr`
+///   is honoured only by SAPIs named cli, cgi, phpdbg or micro, so instead
+///   nothing is displayed and everything is logged: with `error_log` unset,
+///   PHP hands each message ("PHP Warning:  ... in f on line n") to the
+///   SAPI's `log_message`, which writes it to stderr whatever
+///   `redirect_output` says.
+/// - `register_argc_argv=0`: outside the CLI SAPI PHP 8.5 would derive
+///   `$argv` from the query string (deprecated), so `run_file` sets `$argv`
+///   and `$argc` itself.
 const INI_ENTRIES: &CStr = c"html_errors=0
-display_errors=1
-log_errors=0
+display_errors=0
+display_startup_errors=0
+log_errors=1
 register_argc_argv=0
 implicit_flush=1
 output_buffering=0
@@ -1345,5 +1355,11 @@ extern "C" fn log_message(message: *const c_char, _syslog_type: c_int) {
     }
     // SAFETY: PHP passes a NUL-terminated string that outlives the call.
     let message = unsafe { CStr::from_ptr(message) };
-    eprintln!("{}", message.to_string_lossy());
+    // Never panic here (an extern "C" function): a failed write, such as
+    // EPIPE on a closed stderr, is ignored.
+    let mut stderr = std::io::stderr().lock();
+    let _ = stderr
+        .write_all(message.to_bytes())
+        .and_then(|()| stderr.write_all(b"\n"))
+        .and_then(|()| stderr.flush());
 }

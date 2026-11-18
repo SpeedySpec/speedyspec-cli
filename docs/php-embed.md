@@ -205,7 +205,7 @@ the same sequence ext-php-rs's own SAPI tests use (`src/runtime.rs`):
 let sapi = SapiBuilder::new("speedyspec", "SpeedySpec")
     .ub_write_function(ub_write)        // PHP output -> stdout, or stderr (Php::redirect_output)
     .flush_function(flush)
-    .log_message_function(log_message)  // PHP log -> stderr
+    .log_message_function(log_message)  // PHP diagnostics and error_log() -> stderr
     .php_ini_ignore(1)                  // never read php.ini, PHPRC or PHP_INI_SCAN_DIR
     .build()?;
 ext_php_rs_sapi_startup();
@@ -287,12 +287,26 @@ Constraints of this mechanism:
 `PHP_INI_SCAN_DIR`. Verified: with `PHPRC` and `PHP_INI_SCAN_DIR` pointing at
 a directory holding a `php.ini`, the static `php` CLI loads it but the test
 binary still sees `php_ini_loaded_file() === false`. The SAPI's fixed INI
-entries mirror PHP's CLI SAPI (`display_errors=1`, `html_errors=0`,
-`implicit_flush=1`, `output_buffering=0`, `max_execution_time=0`,
-`log_errors=0`) except `register_argc_argv=0`: under any SAPI other than
-`cli`, PHP 8.5 would derive `$_SERVER['argv']` from the query string and
-emit a deprecation, so `Php::run_file` sets `$argv`, `$argc`,
-`$_SERVER['argv']` and `$_SERVER['argc']` itself.
+entries mirror PHP's CLI SAPI (`html_errors=0`, `implicit_flush=1`,
+`output_buffering=0`, `max_execution_time=0`) with two exceptions:
+
+- **Diagnostics never reach stdout**, which carries only command output.
+  `display_errors=0`, `display_startup_errors=0`, `log_errors=1`, with
+  `error_log` unset: PHP then hands every diagnostic (fatal, parse and
+  compile errors, warnings, notices, deprecations, its own uncaught-exception
+  reports) to the SAPI's `log_message`, in PHP's usual log form
+  (`PHP Warning:  Undefined array key "missing" in f on line 1`, with a stack
+  trace on following lines for fatal errors), and that writes it to stderr,
+  whatever `Php::redirect_output` says. `display_errors=stderr` would have
+  been simpler, but PHP honours it only for SAPIs named cli, cgi, phpdbg or
+  micro; under ours it prints to stdout. `log_message` writes without
+  panicking (a failed write, such as EPIPE, is ignored) since it is
+  `extern "C"`. A plugin that sets `error_log` itself sends its diagnostics
+  there instead.
+- `register_argc_argv=0`: under any SAPI other than `cli`, PHP 8.5 would
+  derive `$_SERVER['argv']` from the query string and emit a deprecation, so
+  `Php::run_file` sets `$argv`, `$argc`, `$_SERVER['argv']` and
+  `$_SERVER['argc']` itself.
 
 **Running code.** All of these compile and execute in the open request and
 return PHP's errors as `PhpError` values:
@@ -314,9 +328,10 @@ return PHP's errors as `PhpError` values:
 An uncaught exception is `PhpError::Exception { class, message, file, line }`
 (read from the Throwable's properties); `exit()`/`die()` is `Exit(status)`; a
 fatal error (a bailout) is `Fatal { message, file, line }` from PHP's last
-recorded error. PHP itself still displays fatal errors on the output, as the
-CLI does with `display_errors=1`; exceptions it does not see as uncaught, so
-it prints nothing for them. The engine keeps working after a fatal error, as
+recorded error. PHP itself also reports a fatal error on stderr (see "INI");
+exceptions it does not see as uncaught, so it reports nothing for them, and
+a script's uncaught exception from `run_file` leaves only the script's own
+output on stdout. The engine keeps working after a fatal error, as
 PHP's interactive shell does after catching one (a bailout leaves the VM
 frames of the abandoned code allocated until the request ends, and PHP
 disables the cycle collector after a bailout; both are per fatal error, not
@@ -495,8 +510,8 @@ x86_64 CI runner should be faster.
 
 ## Verification
 
-`cargo test -p speedyspec-php --test php` prints an `ok` line per check (48
-since Task 3's third fix round) and exits 0 on both targets.
+`cargo test -p speedyspec-php --test php` prints an `ok` line per check (52
+since Task 3's fourth fix round) and exits 0 on both targets.
 
 - **macOS arm64**, native: `otool -L` on the test binary lists only
   `libSystem`, `libresolv` and the CoreFoundation, CoreServices and
