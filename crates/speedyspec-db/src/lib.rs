@@ -139,10 +139,21 @@ fn is_numeric(column: &Column) -> bool {
     )
 }
 
-/// Whether a column holds raw bytes rather than text.
+/// Whether a column holds raw bytes rather than text: a BLOB, BINARY or VARBINARY (the
+/// binary character set on a string type), a BIT or a GEOMETRY. Dates, times and JSON also
+/// arrive with the binary character set but are text.
 fn is_binary(column: &Column) -> bool {
-    column.character_set() == BINARY_CHARSET && !is_numeric(column)
-        || column.column_type() == ColumnType::MYSQL_TYPE_BIT
+    match column.column_type() {
+        ColumnType::MYSQL_TYPE_BIT | ColumnType::MYSQL_TYPE_GEOMETRY => true,
+        ColumnType::MYSQL_TYPE_TINY_BLOB
+        | ColumnType::MYSQL_TYPE_MEDIUM_BLOB
+        | ColumnType::MYSQL_TYPE_LONG_BLOB
+        | ColumnType::MYSQL_TYPE_BLOB
+        | ColumnType::MYSQL_TYPE_STRING
+        | ColumnType::MYSQL_TYPE_VAR_STRING
+        | ColumnType::MYSQL_TYPE_VARCHAR => column.character_set() == BINARY_CHARSET,
+        _ => false,
+    }
 }
 
 /// The text form of a value from the text protocol, which sends everything but NULL as bytes.
@@ -188,19 +199,34 @@ fn tsv_value(value: &Value, column: &Column, out: &mut Vec<u8>) {
     }
 }
 
-fn starts_with_words(statement: &[u8], words: &[&str]) -> bool {
-    let text = String::from_utf8_lossy(&statement[..statement.len().min(64)]).to_ascii_uppercase();
-    let mut rest = text.split_ascii_whitespace();
-    words.iter().all(|word| rest.next() == Some(*word))
+/// The first words of a statement, upper-cased. A leading conditional comment (`/*!40000 …*/`,
+/// `/*M!100101 …*/`), which the server runs as part of the statement, is looked inside, and a
+/// backquote ends a word as whitespace does (`USE`shop``).
+fn first_words(statement: &[u8]) -> Vec<String> {
+    let text = String::from_utf8_lossy(&statement[..statement.len().min(128)]).to_ascii_uppercase();
+    let mut rest = text.trim_start();
+    for opener in ["/*M!", "/*!"] {
+        if let Some(inner) = rest.strip_prefix(opener) {
+            rest = inner.trim_start_matches(|c: char| c.is_ascii_digit());
+            break;
+        }
+    }
+    rest.split(|c: char| c.is_ascii_whitespace() || c == '`')
+        .filter(|word| !word.is_empty())
+        .take(2)
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Whether a statement leaves the database the import was asked to fill.
 fn switches_database(statement: &[u8]) -> bool {
-    starts_with_words(statement, &["USE"])
-        || starts_with_words(statement, &["CREATE", "DATABASE"])
-        || starts_with_words(statement, &["CREATE", "SCHEMA"])
-        || starts_with_words(statement, &["DROP", "DATABASE"])
-        || starts_with_words(statement, &["DROP", "SCHEMA"])
+    let words = first_words(statement);
+    let word = |i: usize| words.get(i).map(String::as_str);
+    match word(0) {
+        Some("USE") => true,
+        Some("CREATE" | "DROP") => matches!(word(1), Some("DATABASE" | "SCHEMA")),
+        _ => false,
+    }
 }
 
 /// A statement as the text the server is sent. A quoted string that is not valid UTF-8 (raw
@@ -425,6 +451,11 @@ impl Connection {
             Some(tables) => tables.clone(),
             None => self.tables()?.into_iter().map(|t| t.name).collect(),
         };
+        // The dump says utf8mb4, so read it in utf8mb4 whatever the app's own connection uses: a
+        // utf8 (utf8mb3) or latin1 connection would turn four-byte characters into '?'.
+        self.conn
+            .query_drop("SET NAMES utf8mb4")
+            .map_err(|e| self.failed("could not set the character set", e))?;
         let server: Option<String> = self
             .conn
             .query_first("SELECT VERSION()")
@@ -448,10 +479,26 @@ impl Connection {
             let (_, create) = create.ok_or_else(|| DbError(format!("table {table} vanished")))?;
             writeln!(out, "DROP TABLE IF EXISTS {quoted};\n{create};\n").map_err(write_failed)?;
 
+            // Generated columns are computed by the server and refuse a value on insert.
+            let stored: Vec<String> = self
+                .conn
+                .exec(
+                    "SELECT COLUMN_NAME FROM information_schema.COLUMNS \
+                     WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ? \
+                     AND EXTRA NOT REGEXP '(VIRTUAL|STORED|PERSISTENT) GENERATED' \
+                     ORDER BY ORDINAL_POSITION",
+                    (self.database.clone(), table.clone()),
+                )
+                .map_err(|e| self.failed(&format!("could not read the columns of {table}"), e))?;
+            let column_list = stored
+                .iter()
+                .map(|c| quote_identifier(c))
+                .collect::<Vec<_>>()
+                .join(",");
             let database = self.database.clone();
             let mut result = self
                 .conn
-                .query_iter(format!("SELECT * FROM {quoted}"))
+                .query_iter(format!("SELECT {column_list} FROM {quoted}"))
                 .map_err(|e| {
                     DbError(format!(
                         "database {database}: table {table}: {}",
@@ -471,7 +518,9 @@ impl Connection {
                     ))
                 })?;
                 if insert.is_empty() {
-                    insert.extend_from_slice(format!("INSERT INTO {quoted} VALUES\n(").as_bytes());
+                    insert.extend_from_slice(
+                        format!("INSERT INTO {quoted} ({column_list}) VALUES\n(").as_bytes(),
+                    );
                 } else {
                     insert.extend_from_slice(b",\n(");
                 }
@@ -564,6 +613,12 @@ mod tests {
         assert!(switches_database(b"DROP SCHEMA x"));
         assert!(!switches_database(b"CREATE TABLE users (id int)"));
         assert!(!switches_database(b"USERS"));
+        assert!(switches_database(b"USE`x`"));
+        assert!(switches_database(
+            b"/*!40000 DROP DATABASE IF EXISTS `shop`*/"
+        ));
+        assert!(switches_database(b"/*!32312 USE `shop`*/"));
+        assert!(!switches_database(b"/*!40101 SET NAMES utf8mb4 */"));
     }
 
     #[test]

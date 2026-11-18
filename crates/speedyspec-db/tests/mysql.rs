@@ -381,3 +381,126 @@ fn rss_kib() -> u64 {
         .unwrap();
     String::from_utf8_lossy(&out.stdout).trim().parse().unwrap()
 }
+
+#[test]
+#[ignore = "needs scripts/mysql.sh up"]
+fn export_over_a_utf8_connection_keeps_four_byte_characters() {
+    for (label, url) in servers() {
+        let mut source = Scratch::new(&url, "");
+        fill(&mut source);
+        // Many wp-config.php files say DB_CHARSET 'utf8', which is utf8mb3 on the server.
+        source.connection.charset = "utf8".to_owned();
+        let mut dump = Vec::new();
+        Connection::open(&source.connection)
+            .unwrap()
+            .export(&mut dump, &ExportOptions::default())
+            .unwrap();
+        let mut target = Scratch::new(&url, "");
+        Connection::open(&target.connection)
+            .unwrap()
+            .import(&dump[..])
+            .unwrap_or_else(|e| panic!("{label}: {e}"));
+        assert_eq!(source.checksums(), target.checksums(), "{label}");
+    }
+}
+
+#[test]
+#[ignore = "needs scripts/mysql.sh up"]
+fn round_trip_keeps_json_and_generated_columns() {
+    for (label, url) in servers() {
+        let mut source = Scratch::new(&url, "");
+        source.exec(
+            "CREATE TABLE t_json (
+               id int NOT NULL PRIMARY KEY,
+               doc json NULL,
+               doubled int AS (id * 2) VIRTUAL,
+               stored_name varchar(20) AS (CONCAT('n', id)) STORED
+             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4",
+        );
+        source.exec(
+            "INSERT INTO t_json (id, doc) VALUES (1, '{\"a\": [1, \"🙂\"]}'), (2, NULL), (3, '\"text\"')",
+        );
+        let mut dump = Vec::new();
+        Connection::open(&source.connection)
+            .unwrap()
+            .export(&mut dump, &ExportOptions::default())
+            .unwrap();
+        let mut target = Scratch::new(&url, "");
+        Connection::open(&target.connection)
+            .unwrap()
+            .import(&dump[..])
+            .unwrap_or_else(|e| panic!("{label}: {e}"));
+        assert_eq!(source.checksums(), target.checksums(), "{label}");
+        let doubled: Option<i64> = target
+            .admin
+            .query_first(format!(
+                "SELECT doubled FROM `{}`.t_json WHERE id = 3",
+                target.name
+            ))
+            .unwrap();
+        assert_eq!(doubled, Some(6), "{label}");
+    }
+}
+
+#[test]
+#[ignore = "needs scripts/mysql.sh up"]
+fn query_prints_dates_times_and_json_as_text() {
+    for (label, url) in servers() {
+        let mut scratch = Scratch::new(&url, "");
+        scratch.exec(
+            "CREATE TABLE t_when (d date, dt datetime, ts timestamp NULL, tm time, y year, doc json)",
+        );
+        scratch.exec(
+            "INSERT INTO t_when VALUES ('2026-11-18', '2026-11-18 09:30:00', '2026-11-18 09:30:00', '09:30:00', 2026, '{\"a\": 1}')",
+        );
+        let mut out = Vec::new();
+        Connection::open(&scratch.connection)
+            .unwrap()
+            .query("SELECT d, dt, ts, tm, y, doc FROM t_when", &mut out)
+            .unwrap();
+        let out = String::from_utf8(out).unwrap();
+        let row = out.lines().nth(1).unwrap_or_default();
+        let fields: Vec<&str> = row.split('\t').collect();
+        assert_eq!(
+            &fields[..5],
+            &[
+                "2026-11-18",
+                "2026-11-18 09:30:00",
+                "2026-11-18 09:30:00",
+                "09:30:00",
+                "2026"
+            ],
+            "{label}: {out}"
+        );
+        assert!(fields[5].contains("\"a\""), "{label}: {out}");
+    }
+}
+
+#[test]
+#[ignore = "needs scripts/mysql.sh up"]
+fn a_conditional_drop_database_is_refused_before_it_runs() {
+    for (label, url) in servers() {
+        let mut target = Scratch::new(&url, "");
+        target.exec("CREATE TABLE keep_me (id int)");
+        // What mysqldump --databases --add-drop-database writes.
+        let dump = format!(
+            "/*!40000 DROP DATABASE IF EXISTS `{0}`*/;\nCREATE DATABASE `{0}`;\nUSE `{0}`;\n",
+            target.name
+        );
+        let error = Connection::open(&target.connection)
+            .unwrap()
+            .import(dump.as_bytes())
+            .unwrap_err();
+        assert!(
+            error.to_string().contains("switches to another database"),
+            "{label}: {error}"
+        );
+        assert_eq!((error.statement, error.applied), (1, 0), "{label}");
+        let tables: Vec<String> = target.checksums().into_iter().map(|(t, _)| t).collect();
+        assert_eq!(
+            tables,
+            vec!["keep_me"],
+            "{label}: the database is still there"
+        );
+    }
+}
