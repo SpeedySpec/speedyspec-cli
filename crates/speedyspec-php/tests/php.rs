@@ -60,6 +60,10 @@ const CASES: &[(&str, Case)] = &[
     ("run_file_argv", case_run_file_argv),
     ("fiber_fires_hook", case_fiber_fires_hook),
     ("fiber_without_hooks", case_fiber_without_hooks),
+    (
+        "execution_context_per_fiber",
+        case_execution_context_per_fiber,
+    ),
     ("fiber_in_callback", case_fiber_in_callback),
     ("fiber_suspends_in_hook", case_fiber_suspends_in_hook),
     ("fiber_filter_suspends", case_fiber_filter_suspends),
@@ -846,6 +850,41 @@ fn case_fiber_fires_hook(ctx: &Ctx) -> Result<(), String> {
 
 fn case_fiber_without_hooks(ctx: &Ctx) -> Result<(), String> {
     eq(&require_out(ctx, "fiber_without_hooks.php")?, "1,2,done:3")
+}
+
+fn case_execution_context_per_fiber(ctx: &Ctx) -> Result<(), String> {
+    // A Rust callback sees which context fired it: the main one, then a fiber,
+    // then the same fiber again after it was suspended and resumed.
+    let seen: Rc<RefCell<Vec<usize>>> = Rc::default();
+    let record = seen.clone();
+    add_rust(ctx, "ctx.where", move |_| {
+        record
+            .borrow_mut()
+            .push(speedyspec_php::execution_context());
+        Ok(Value::Null)
+    })?;
+    stdout_of(|| {
+        ctx.php.eval(
+            "t",
+            "\\SpeedySpec\\Hooks\\Hook::run('ctx.where');
+             $fiber = new Fiber(static function (): void
+             {
+                 \\SpeedySpec\\Hooks\\Hook::run('ctx.where');
+                 Fiber::suspend();
+                 \\SpeedySpec\\Hooks\\Hook::run('ctx.where');
+             });
+             $fiber->start();
+             \\SpeedySpec\\Hooks\\Hook::run('ctx.where');
+             $fiber->resume();",
+        )
+    })?;
+    let main = speedyspec_php::execution_context();
+    match seen.borrow().as_slice() {
+        [a, f1, b, f2] if *a == main && *b == main && f1 == f2 && *f1 != main && main != 0 => {
+            Ok(())
+        }
+        other => Err(format!("contexts seen: {other:?}, main {main}")),
+    }
 }
 
 fn case_not_poisoned_before_fatal(ctx: &Ctx) -> Result<(), String> {

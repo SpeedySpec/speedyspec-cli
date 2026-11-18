@@ -282,6 +282,14 @@ pub(crate) fn fiber_records() -> usize {
     ENGINE.with(|e| e.contexts.borrow().len())
 }
 
+/// The running `zend_fiber_context` (main or a fiber), by address; 0 before
+/// the engine starts and after it shuts down.
+pub(crate) fn execution_context() -> usize {
+    // SAFETY: a plain read of a pointer in the executor globals on the
+    // engine's thread; it is never dereferenced.
+    unsafe { (*ext_php_rs_executor_globals()).current_fiber_context as usize }
+}
+
 /// True from boot until the request ends in `Php::drop`.
 pub(crate) fn alive() -> bool {
     ENGINE.with(|e| e.alive.get())

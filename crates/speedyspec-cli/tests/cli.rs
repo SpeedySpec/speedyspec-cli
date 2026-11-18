@@ -269,8 +269,9 @@ fn builtin_wins_over_plugin_command() {
     assert_eq!(out.stdout, "");
     assert!(out.stderr.contains("No apps"), "{}", out.stderr);
     assert!(
-        out.stderr
-            .contains(r#"command "app" from a plugin ignored"#),
+        out.stderr.contains(
+            r#"speedyspec: speedyspec-fixture/clash: speedyspec_commands: [0].name: "app" is a built-in command"#
+        ),
         "{}",
         out.stderr
     );
@@ -282,8 +283,87 @@ fn first_plugin_wins_duplicate_command() {
     assert_eq!(out.code, 0, "{}", out.stderr);
     assert_eq!(out.stdout, "hello Ada\n");
     assert!(
+        out.stderr.contains(
+            r#"speedyspec: speedyspec-fixture/clash: speedyspec_commands: [2].name: duplicate name "hello" (the first one wins)"#
+        ),
+        "{}",
         out.stderr
-            .contains(r#"command "hello" from a plugin ignored"#),
+    );
+    assert!(!out.stderr.contains("fixture/good"), "{}", out.stderr);
+}
+
+/// Every fixture plugin directory, in name order.
+fn all_fixtures() -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(fixture(""))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    names
+}
+
+/// The lines of `stderr` that report a contract problem on `hook`.
+fn contract_lines<'a>(stderr: &'a str, hook: &str) -> Vec<&'a str> {
+    stderr
+        .lines()
+        .filter(|line| line.starts_with("speedyspec: ") && line.contains(&format!(": {hook}: ")))
+        .collect()
+}
+
+#[test]
+fn contract_errors_name_exactly_the_plugin_with_all_fixtures_loaded() {
+    let names = all_fixtures();
+    let plugins: Vec<&str> = names.iter().map(String::as_str).collect();
+    let out = run(&plugins, &["app", "list"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let apps = contract_lines(&out.stderr, "speedyspec_apps");
+    for line in &apps {
+        assert!(!line.contains("fixture/good"), "{}", out.stderr);
+        assert!(!line.contains("one of"), "{}", out.stderr);
+    }
+    assert!(
+        apps.iter().any(|line| line.starts_with(
+            "speedyspec: speedyspec-fixture/bad-apps: speedyspec_apps: expected a list"
+        )),
+        "{}",
+        out.stderr
+    );
+    // The good plugins' apps survive the bad ones.
+    assert!(out.stdout.contains("demo\tDemo\tzip?\n"), "{}", out.stdout);
+    assert!(
+        out.stdout.contains("quiet\tQuiet\tzip?\n"),
+        "{}",
+        out.stdout
+    );
+}
+
+#[test]
+fn one_bad_app_does_not_hide_the_others() {
+    for plugins in [["bad-app-field", "good"], ["good", "bad-app-field"]] {
+        let out = run(&plugins, &["app", "list"]);
+        assert_eq!(out.code, 0, "{}", out.stderr);
+        assert_eq!(out.stdout, "demo\tDemo\tzip?\n", "{}", out.stderr);
+        let apps = contract_lines(&out.stderr, "speedyspec_apps");
+        assert_eq!(apps.len(), 1, "{}", out.stderr);
+        assert!(
+            apps[0].starts_with("speedyspec: speedyspec-fixture/bad-app-field: speedyspec_apps: ["),
+            "{}",
+            apps[0]
+        );
+        assert!(apps[0].contains("].id: must match"), "{}", apps[0]);
+    }
+}
+
+#[test]
+fn callback_added_from_init_is_attributed_to_its_plugin() {
+    let out = run(&["good", "late-bad"], &["app", "list"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.stdout, "demo\tDemo\tzip?\n");
+    assert_eq!(
+        contract_lines(&out.stderr, "speedyspec_apps"),
+        [
+            "speedyspec: speedyspec-fixture/late-bad: speedyspec_apps: expected a list (an array keyed 0, 1, 2, ...)"
+        ],
         "{}",
         out.stderr
     );

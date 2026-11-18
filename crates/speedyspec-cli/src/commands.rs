@@ -14,7 +14,7 @@ use crate::boot::{CONTRACTS_VERSION, Runtime, boot};
 
 /// Names a plugin command may not take. `self` has no subcommands yet but is reserved for the
 /// plan that adds them; `help` is clap's own.
-const RESERVED: &[&str] = &["app", "plugin", "self", "php", "help"];
+pub(crate) const RESERVED: &[&str] = &["app", "plugin", "self", "php", "help"];
 
 /// Names no plugin argument or option may take: they would clash with the global flags.
 const GLOBAL_NAMES: &[&str] = &[
@@ -50,8 +50,9 @@ fn exit_byte(status: i64) -> u8 {
 }
 
 fn dispatch(runtime: &Runtime, args: &[String]) -> i32 {
-    let plugin_commands = accept_plugin_commands(&runtime.commands);
-    let tree = build_tree(&plugin_commands);
+    // Start-up has already dropped (and reported) every command that cannot be offered.
+    let plugin_commands = &runtime.commands;
+    let tree = build_tree(plugin_commands);
     let matches = match tree
         .clone()
         .try_get_matches_from(std::iter::once("speedyspec".to_owned()).chain(args.iter().cloned()))
@@ -94,31 +95,8 @@ fn dispatch(runtime: &Runtime, args: &[String]) -> i32 {
     }
 }
 
-/// Drops plugin commands that cannot be offered, each with a stderr line saying why. A built-in
-/// or an earlier plugin's command keeps its name.
-fn accept_plugin_commands(commands: &[PluginCommand]) -> Vec<PluginCommand> {
-    let mut accepted: Vec<PluginCommand> = Vec::new();
-    for command in commands {
-        let problem = if RESERVED.contains(&command.name.as_str())
-            || accepted.iter().any(|c| c.name == command.name)
-        {
-            Some("name already taken".to_owned())
-        } else {
-            clap_problem(command)
-        };
-        match problem {
-            Some(problem) => eprintln!(
-                "speedyspec: command \"{}\" from a plugin ignored: {problem}",
-                command.name
-            ),
-            None => accepted.push(command.clone()),
-        }
-    }
-    accepted
-}
-
 /// What would make clap refuse or panic on this command's declared arguments and options.
-fn clap_problem(command: &PluginCommand) -> Option<String> {
+pub(crate) fn clap_problem(command: &PluginCommand) -> Option<String> {
     let mut names: Vec<&str> = Vec::new();
     let names_in_use = command
         .arguments

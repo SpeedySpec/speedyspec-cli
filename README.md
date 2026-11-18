@@ -76,8 +76,8 @@ Hook::add('speedyspec_commands', static fn (array $commands): array => [...$comm
 A handler receives the arguments and options keyed by name (a flag option is `true` or `false`,
 a value option its string, its default or `null`) and returns the exit code. An uncaught exception
 exits 1 with `speedyspec: <command>: <class>: <message>`. A command may not reuse `app`, `plugin`,
-`self`, `php` or `help`, or the name of a command an earlier plugin added; it is ignored with a
-message.
+`self`, `php` or `help`, or the name of a command an earlier plugin added (the first one wins);
+it is dropped with a message naming the plugin.
 
 ## Hooks fired in this version
 
@@ -87,6 +87,11 @@ message.
 | `speedyspec_commands` | filter | Receives `[]`; append `Command` objects. |
 | `speedyspec_apps` | filter | Receives `[]`; append `App` objects. |
 
-`speedyspec_commands` and `speedyspec_apps` must return a list of those objects. Anything else is
-reported by plugin, hook and field (for example `[0].id`), and that contribution is dropped.
+`speedyspec_commands` and `speedyspec_apps` must return a list of those objects. Each callback's
+return value is checked as it comes back and every problem is reported against the plugin whose
+callback returned it, as `speedyspec: <plugin>: <hook>: <field>: <problem>` (for example
+`[1].id: must match ...`). A bad item is dropped on its own; a value that is not a list is
+dropped whole and the list as it was before that callback continues to the next one, so other
+plugins' commands and apps are unaffected. A callback added from inside another callback (say
+from `speedyspec_init`) belongs to the plugin that added it.
 `Hook::add` and WordPress-style `add_filter` / `add_action` register to the same store.

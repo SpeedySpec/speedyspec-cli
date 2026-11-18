@@ -17,6 +17,16 @@ pub use runtime::{BootOptions, Output, Php, PhpError};
 /// `php-version` file.
 pub const PHP_VERSION: &str = env!("SPEEDYSPEC_PHP_VERSION");
 
+/// Identifies the execution context PHP is running in now: the main context or one fiber
+/// (the address of its `zend_fiber_context`, `EG(current_fiber_context)`), 0 when PHP is not
+/// running. Within one context calls nest strictly, also while other contexts are suspended
+/// mid-call, so per-context bookkeeping that is saved and restored around a call stays correct
+/// when a fiber suspends inside it. An address can be reused by a later fiber once its context
+/// is destroyed.
+pub fn execution_context() -> usize {
+    boundary::execution_context()
+}
+
 /// How many times this process has entered the PHP engine. Every entry the
 /// bridge makes (running code, calling a callable, firing a PHP callback,
 /// releasing a PHP value) is counted; tests use it to show when PHP was not

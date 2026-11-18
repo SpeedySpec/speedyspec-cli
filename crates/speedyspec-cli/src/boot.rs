@@ -4,18 +4,18 @@
 //! plugin does while loading may reach stdout, break a built-in command or stop another plugin,
 //! so every failure here becomes one `speedyspec: ...` line on stderr naming the plugin.
 
-use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 
 use semver::Version;
-use speedyspec_driver::{App, Command, ContractError, ObjectReader, decode_apps, decode_commands};
-use speedyspec_hooks::{
-    AddOptions, Callback, CallbackId, HookError, Hooks, Key, SharedHooks, Value,
-};
+use speedyspec_driver::{App, Command, ContractError, ObjectReader, decode_app, decode_command};
+use speedyspec_hooks::{HookError, Hooks, Key, Value};
 use speedyspec_hooks_memory::MemoryHooks;
-use speedyspec_php::{BootOptions, Output, Php, PhpError};
+use speedyspec_php::{BootOptions, Output, Php, PhpError, execution_context};
 use speedyspec_plugin::{Loader, Plugin, PluginError, discover, load_all, user_plugin_dir};
+
+use crate::attribution::{AttributedHooks, Checked, Validator};
+use crate::commands::{RESERVED, clap_problem};
 
 include!(concat!(env!("OUT_DIR"), "/contracts.rs"));
 
@@ -71,77 +71,6 @@ pub fn prescan(args: &[String]) -> Prescan {
         }
     }
     found
-}
-
-/// Wraps the real hook store to remember which plugin registered a callback for which hook.
-///
-/// A contract error (a filter returned the wrong thing) cannot say whose callback returned it,
-/// because the hook contract only reports owners for callbacks that fail. The names recorded
-/// here let the message point at the plugins that took part.
-struct OwnerTracking {
-    inner: SharedHooks,
-    adds: RefCell<Vec<(String, String)>>,
-}
-
-impl OwnerTracking {
-    /// "a plugin" when no owner is known, the name when one is, "one of a, b" otherwise.
-    fn describe_owners(&self, hook: &str) -> String {
-        let mut owners: Vec<String> = Vec::new();
-        for (name, owner) in self.adds.borrow().iter() {
-            if name == hook && !owners.contains(owner) {
-                owners.push(owner.clone());
-            }
-        }
-        match owners.len() {
-            0 => "a plugin".to_owned(),
-            1 => owners.remove(0),
-            _ => format!("one of {}", owners.join(", ")),
-        }
-    }
-}
-
-impl Hooks for OwnerTracking {
-    fn add(
-        &self,
-        hook: &str,
-        callback: Rc<Callback>,
-        options: AddOptions,
-    ) -> Result<CallbackId, HookError> {
-        if let Some(owner) = &options.owner {
-            self.adds
-                .borrow_mut()
-                .push((hook.to_owned(), owner.clone()));
-        }
-        self.inner.add(hook, callback, options)
-    }
-
-    fn remove(&self, hook: &str, id: CallbackId) -> Result<bool, HookError> {
-        self.inner.remove(hook, id)
-    }
-
-    fn remove_keyed(&self, hook: &str, key: &str, priority: i64) -> Result<bool, HookError> {
-        self.inner.remove_keyed(hook, key, priority)
-    }
-
-    fn has(&self, hook: &str) -> Result<bool, HookError> {
-        self.inner.has(hook)
-    }
-
-    fn has_keyed(&self, hook: &str, key: &str) -> Result<bool, HookError> {
-        self.inner.has_keyed(hook, key)
-    }
-
-    fn run(&self, hook: &str, args: &[Value]) -> Result<(), HookError> {
-        self.inner.run(hook, args)
-    }
-
-    fn filter(&self, hook: &str, value: Value, args: &[Value]) -> Result<Value, HookError> {
-        self.inner.filter(hook, value, args)
-    }
-
-    fn ran(&self, hook: &str) -> Result<u64, HookError> {
-        self.inner.ran(hook)
-    }
 }
 
 /// `Php` as the driver crate's object reader. A wrapper, because neither the trait nor `Php` is
@@ -211,7 +140,8 @@ pub struct Runtime {
     pub loaded: Vec<Plugin>,
     pub apps: Vec<App>,
     pub commands: Vec<Command>,
-    pub php: Php,
+    /// Shared only while start-up runs the contract checks; the only reference afterwards.
+    pub php: Rc<Php>,
 }
 
 /// Runs the start-up sequence. An error is a reason the binary cannot run at all (PHP did not
@@ -221,15 +151,17 @@ pub fn boot(args: &[String]) -> Result<Runtime, String> {
     let bundled = Version::parse(CONTRACTS_VERSION)
         .map_err(|e| format!("bundled contracts version {CONTRACTS_VERSION:?} is invalid: {e}"))?;
 
-    let hooks = Rc::new(OwnerTracking {
-        inner: Rc::new(MemoryHooks::new()),
-        adds: RefCell::new(Vec::new()),
-    });
-    let php = Php::boot(BootOptions {
-        hooks: hooks.clone(),
-        preload: CONTRACTS,
-    })
-    .map_err(|e| e.to_string())?;
+    let hooks = Rc::new(AttributedHooks::new(
+        Rc::new(MemoryHooks::new()),
+        execution_context,
+    ));
+    let php = Rc::new(
+        Php::boot(BootOptions {
+            hooks: hooks.clone(),
+            preload: CONTRACTS,
+        })
+        .map_err(|e| e.to_string())?,
+    );
 
     // Everything plugin code prints from here until dispatch (while loading, and from the init
     // hook and both filters) is noise, never command output, so it goes to stderr. Nothing
@@ -247,13 +179,18 @@ pub fn boot(args: &[String]) -> Result<Runtime, String> {
     }
 
     if let Err(error) = hooks.run(HOOK_INIT, &[]) {
-        report_hook_error(&hooks, &error);
+        report_hook_error(&error);
     }
-    let reader = PhpReader(&php);
-    let commands = collect(&hooks, HOOK_COMMANDS, |v| {
-        decode_each_command(v, &reader, &hooks)
-    });
-    let apps = collect(&hooks, HOOK_APPS, |v| decode_apps(v, &reader));
+    let (commands, apps) = {
+        // Each plugin callback's return value is checked as it comes back, so a bad value is
+        // blamed on exactly that plugin and dropped before the next plugin sees it. The
+        // validators share `php`; the guard drops them (and those references) on every path.
+        let _checks = Checks::install(&hooks, &php);
+        let reader = PhpReader(&php);
+        let commands = collect(&hooks, HOOK_COMMANDS, |v| decode_command(v, &reader));
+        let apps = collect(&hooks, HOOK_APPS, |v| decode_app(v, &reader));
+        (commands, apps)
+    };
     php.redirect_output(Output::Stdout);
 
     Ok(Runtime {
@@ -264,68 +201,156 @@ pub fn boot(args: &[String]) -> Result<Runtime, String> {
     })
 }
 
-/// Decodes commands one at a time. `decode_commands` refuses a whole list that repeats a name, but
-/// two plugins adding the same name is expected here (the first one wins, in `commands`), and one
-/// plugin's bad command should not take the others down with it. A problem is reported against
-/// the command's index in the full list.
-fn decode_each_command(
-    value: &Value,
-    reader: &dyn ObjectReader,
-    hooks: &OwnerTracking,
-) -> Result<Vec<Command>, ContractError> {
-    let Value::Array(items) = value else {
-        return decode_commands(value, reader);
+/// The contract checks on `speedyspec_commands` and `speedyspec_apps`, for as long as it lives.
+struct Checks<'a>(&'a AttributedHooks);
+
+impl<'a> Checks<'a> {
+    fn install(hooks: &'a AttributedHooks, php: &Rc<Php>) -> Self {
+        let commands_php = Rc::clone(php);
+        let commands: Rc<Validator> = Rc::new(move |given, returned| {
+            check_list(given, returned, |item, index, seen| {
+                let command = decode_command(item, &PhpReader(&commands_php))
+                    .map_err(|e| at_index(index, &e))?;
+                if RESERVED.contains(&command.name.as_str()) {
+                    return Err(format!(
+                        "[{index}].name: \"{}\" is a built-in command",
+                        command.name
+                    ));
+                }
+                if seen.contains(&command.name) {
+                    return Err(format!(
+                        "[{index}].name: duplicate name \"{}\" (the first one wins)",
+                        command.name
+                    ));
+                }
+                if let Some(problem) = clap_problem(&command) {
+                    return Err(format!("[{index}]: {problem}"));
+                }
+                seen.push(command.name);
+                Ok(())
+            })
+        });
+        let apps_php = Rc::clone(php);
+        let apps: Rc<Validator> = Rc::new(move |given, returned| {
+            check_list(given, returned, |item, index, seen| {
+                let app =
+                    decode_app(item, &PhpReader(&apps_php)).map_err(|e| at_index(index, &e))?;
+                if seen.contains(&app.id) {
+                    return Err(format!(
+                        "[{index}].id: duplicate id \"{}\" (the first one wins)",
+                        app.id
+                    ));
+                }
+                seen.push(app.id);
+                Ok(())
+            })
+        });
+        hooks.validate(HOOK_COMMANDS, commands);
+        hooks.validate(HOOK_APPS, apps);
+        Self(hooks)
+    }
+}
+
+impl Drop for Checks<'_> {
+    fn drop(&mut self) {
+        self.0.clear_validators();
+    }
+}
+
+/// Checks a list one callback returned: every item must pass `check` (given the item, its index
+/// and the keys accepted before it), and failing items are dropped. A value that is not a list
+/// is dropped whole, and what the callback was given continues instead.
+fn check_list(
+    given: &Value,
+    returned: Value,
+    check: impl Fn(&Value, usize, &mut Vec<String>) -> Result<(), String>,
+) -> Checked {
+    let items = match returned {
+        Value::Array(items)
+            if items
+                .iter()
+                .enumerate()
+                .all(|(i, (key, _))| *key == Key::Int(i as i64)) =>
+        {
+            items
+        }
+        _ => {
+            return Checked {
+                value: given.clone(),
+                problems: vec!["expected a list (an array keyed 0, 1, 2, ...)".to_owned()],
+            };
+        }
     };
-    let mut commands = Vec::new();
-    for (index, (key, item)) in items.iter().enumerate() {
-        let single = Value::Array(vec![(Key::Int(0), item.clone())]);
-        let decoded = if *key == Key::Int(index as i64) {
-            decode_commands(&single, reader)
-        } else {
-            // Not a list: let the decoder say so for the whole value.
-            return decode_commands(value, reader);
-        };
-        match decoded {
-            Ok(mut one) => commands.append(&mut one),
-            Err(mut error) => {
-                error.field = error.field.replacen("[0]", &format!("[{index}]"), 1);
-                eprintln!(
-                    "speedyspec: {}: {HOOK_COMMANDS}: {error}",
-                    hooks.describe_owners(HOOK_COMMANDS)
-                );
-            }
+    let mut seen = Vec::new();
+    let mut kept = Vec::new();
+    let mut problems = Vec::new();
+    for (index, (_, item)) in items.into_iter().enumerate() {
+        match check(&item, index, &mut seen) {
+            Ok(()) => kept.push((Key::Int(kept.len() as i64), item)),
+            Err(problem) => problems.push(problem),
         }
     }
-    Ok(commands)
+    Checked {
+        value: Value::Array(kept),
+        problems,
+    }
 }
 
-/// Fires a filter over an empty list and decodes the result; any problem is reported and the
-/// list counts as empty.
+/// A single item's contract error as `[index].field: problem`.
+fn at_index(index: usize, error: &ContractError) -> String {
+    if error.field.is_empty() {
+        format!("[{index}]: {}", error.problem)
+    } else {
+        format!("[{index}].{}: {}", error.field, error.problem)
+    }
+}
+
+/// Fires a filter over an empty list and decodes each item of the result. The checks have
+/// already dropped (and reported) every bad item, against the plugin whose callback returned it;
+/// whatever still fails here came from no known plugin.
 fn collect<T>(
-    hooks: &OwnerTracking,
+    hooks: &AttributedHooks,
     hook: &str,
-    decode: impl FnOnce(&Value) -> Result<Vec<T>, ContractError>,
+    decode: impl Fn(&Value) -> Result<T, ContractError>,
 ) -> Vec<T> {
-    match hooks.filter(hook, Value::Array(Vec::new()), &[]) {
-        Ok(value) => decode(&value).unwrap_or_else(|error| {
+    let result = hooks.filter(hook, Value::Array(Vec::new()), &[]);
+    report_rejections(hooks);
+    let items = match result {
+        Ok(Value::Array(items)) => items,
+        Ok(_) => {
             eprintln!(
-                "speedyspec: {}: {hook}: {error}",
-                hooks.describe_owners(hook)
+                "speedyspec: a plugin: {hook}: expected a list (an array keyed 0, 1, 2, ...)"
             );
-            Vec::new()
-        }),
-        Err(error) => {
-            report_hook_error(hooks, &error);
-            Vec::new()
+            return Vec::new();
         }
+        Err(error) => {
+            report_hook_error(&error);
+            return Vec::new();
+        }
+    };
+    let mut decoded = Vec::new();
+    for (index, (_, item)) in items.iter().enumerate() {
+        match decode(item) {
+            Ok(one) => decoded.push(one),
+            Err(error) => eprintln!("speedyspec: a plugin: {hook}: {}", at_index(index, &error)),
+        }
+    }
+    decoded
+}
+
+/// One line per problem the contract checks found, naming the plugin.
+fn report_rejections(hooks: &AttributedHooks) {
+    for rejection in hooks.take_rejections() {
+        let who = rejection.owner.as_deref().unwrap_or("a plugin");
+        eprintln!(
+            "speedyspec: {who}: {}: {}",
+            rejection.hook, rejection.problem
+        );
     }
 }
 
-fn report_hook_error(hooks: &OwnerTracking, error: &HookError) {
-    let who = error
-        .owner
-        .clone()
-        .unwrap_or_else(|| hooks.describe_owners(&error.hook));
+fn report_hook_error(error: &HookError) {
+    let who = error.owner.as_deref().unwrap_or("a plugin");
     eprintln!("speedyspec: {who}: {}: {}", error.hook, error.message);
 }
 

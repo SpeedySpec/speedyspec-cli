@@ -24,4 +24,5 @@ semver = "1"
 serde_json = "1"
 
 [dev-dependencies]
+speedyspec-hooks = { path = "../speedyspec-hooks", features = ["conformance"] }
 tempfile = "3"

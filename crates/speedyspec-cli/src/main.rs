@@ -1,6 +1,7 @@
 //! The `speedyspec` executable. All the work is in [`commands::run`].
 
 mod app;
+mod attribution;
 mod boot;
 mod commands;
 

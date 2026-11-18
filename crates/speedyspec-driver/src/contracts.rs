@@ -80,7 +80,8 @@ pub struct Command {
     pub options: Vec<CommandOption>,
 }
 
-/// Decodes the value a plugin returned for apps into validated [`App`]s.
+/// Decodes the value a plugin returned for apps into validated [`App`]s: a list of
+/// [`decode_app`] items with unique ids. Fields are reported as `[i].field`.
 pub fn decode_apps(value: &Value, reader: &dyn ObjectReader) -> Result<Vec<App>, ContractError> {
     let d = Decoder {
         reader,
@@ -93,23 +94,25 @@ pub fn decode_apps(value: &Value, reader: &dyn ObjectReader) -> Result<Vec<App>,
         .enumerate()
         .map(|(i, item)| {
             let path = format!("[{i}]");
-            let props = d.object(item, "App", &path)?;
-            let id = d.id(&props, "id", &path)?;
-            d.unique(&mut ids, &id, &path, "id")?;
-            let label = d.non_empty(&props, "label", &path)?;
-            let parts = d.parts(&props, &path)?;
-            let drivers = d.drivers(&props, &path)?;
-            Ok(App {
-                id,
-                label,
-                parts,
-                drivers,
-            })
+            let app = d.app(item, &path)?;
+            d.unique(&mut ids, &app.id, &path, "id")?;
+            Ok(app)
         })
         .collect()
 }
 
-/// Decodes the value a plugin returned for commands into validated [`Command`]s.
+/// Decodes one `App` object. Fields are reported relative to it (`id`, `parts[0].label`); an
+/// empty field means the value itself is wrong.
+pub fn decode_app(value: &Value, reader: &dyn ObjectReader) -> Result<App, ContractError> {
+    Decoder {
+        reader,
+        contract: "App",
+    }
+    .app(value, "")
+}
+
+/// Decodes the value a plugin returned for commands into validated [`Command`]s: a list of
+/// [`decode_command`] items with unique names. Fields are reported as `[i].field`.
 pub fn decode_commands(
     value: &Value,
     reader: &dyn ObjectReader,
@@ -125,25 +128,21 @@ pub fn decode_commands(
         .enumerate()
         .map(|(i, item)| {
             let path = format!("[{i}]");
-            let props = d.object(item, "Command", &path)?;
-            let name = d.id(&props, "name", &path)?;
-            d.unique(&mut names, &name, &path, "name")?;
-            let description = d.string(&props, "description", &path)?;
-            let handler = match d.get(&props, "handler", &path)? {
-                v @ Value::Opaque(_) => v.clone(),
-                _ => return Err(d.err(&join(&path, "handler"), "expected a closure object")),
-            };
-            let arguments = d.arguments(&props, &path)?;
-            let options = d.options(&props, &path)?;
-            Ok(Command {
-                name,
-                description,
-                handler,
-                arguments,
-                options,
-            })
+            let command = d.command(item, &path)?;
+            d.unique(&mut names, &command.name, &path, "name")?;
+            Ok(command)
         })
         .collect()
+}
+
+/// Decodes one `Command` object. Fields are reported relative to it (`name`,
+/// `options[0].default`); an empty field means the value itself is wrong.
+pub fn decode_command(value: &Value, reader: &dyn ObjectReader) -> Result<Command, ContractError> {
+    Decoder {
+        reader,
+        contract: "Command",
+    }
+    .command(value, "")
 }
 
 fn join(path: &str, name: &str) -> String {
@@ -189,6 +188,33 @@ impl Decoder<'_> {
             }
         }
         Err(self.err(path, "expected a list (an array keyed 0, 1, 2, ...)"))
+    }
+
+    fn app(&self, value: &Value, path: &str) -> Result<App, ContractError> {
+        let props = self.object(value, "App", path)?;
+        Ok(App {
+            id: self.id(&props, "id", path)?,
+            label: self.non_empty(&props, "label", path)?,
+            parts: self.parts(&props, path)?,
+            drivers: self.drivers(&props, path)?,
+        })
+    }
+
+    fn command(&self, value: &Value, path: &str) -> Result<Command, ContractError> {
+        let props = self.object(value, "Command", path)?;
+        let name = self.id(&props, "name", path)?;
+        let description = self.string(&props, "description", path)?;
+        let handler = match self.get(&props, "handler", path)? {
+            v @ Value::Opaque(_) => v.clone(),
+            _ => return Err(self.err(&join(path, "handler"), "expected a closure object")),
+        };
+        Ok(Command {
+            name,
+            description,
+            handler,
+            arguments: self.arguments(&props, path)?,
+            options: self.options(&props, path)?,
+        })
     }
 
     fn object(&self, value: &Value, class: &str, path: &str) -> Result<Props, ContractError> {
@@ -645,6 +671,33 @@ mod tests {
         );
         let e = decode_commands(&list(vec![c]), &r).unwrap_err();
         assert_eq!(e.field, "[0].arguments[1].name");
+    }
+
+    #[test]
+    fn single_item_decoders_report_relative_fields() {
+        let r = FakeReader::default();
+        let app_value = app(&r, "wp", vec![part(&r, "core", "")], vec![]);
+        let e = decode_app(&app_value, &r).unwrap_err();
+        assert_eq!(e.field, "parts[0].label");
+        assert_eq!(
+            decode_app(&app(&r, "wp", vec![], vec!["zip"]), &r)
+                .unwrap()
+                .drivers,
+            ["zip"]
+        );
+        let e = decode_app(&Value::Null, &r).unwrap_err();
+        assert_eq!(e.field, "");
+        assert!(e.problem.contains(APP), "{}", e.problem);
+
+        let h = Value::Opaque(Rc::new(1u8));
+        assert_eq!(
+            decode_command(&command(&r, "x", h, vec![]), &r)
+                .unwrap()
+                .name,
+            "x"
+        );
+        let e = decode_command(&command(&r, "x", Value::Null, vec![]), &r).unwrap_err();
+        assert_eq!(e.field, "handler");
     }
 
     #[test]
