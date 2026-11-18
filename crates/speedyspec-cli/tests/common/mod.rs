@@ -93,6 +93,19 @@ impl Speedyspec {
         }
     }
 
+    /// Starts the command without waiting for it, its output discarded (to signal it, say).
+    #[allow(dead_code)]
+    pub fn spawn(mut self, args: &[&str]) -> (std::process::Child, Option<tempfile::TempDir>) {
+        let child = self
+            .command
+            .args(args)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("speedyspec runs");
+        (child, self._home.take())
+    }
+
     pub fn run(mut self, args: &[&str]) -> Run {
         let output = self.command.args(args).output().expect("speedyspec runs");
         Run {

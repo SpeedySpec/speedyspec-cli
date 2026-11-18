@@ -5,8 +5,10 @@
 //! unchanged (an app's config may read it).
 
 use std::io::Read;
+use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicI32, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -17,6 +19,94 @@ use speedyspec_driver::{AppRuntime, AppTask};
 const MAX_OUTPUT: usize = 1024 * 1024;
 /// How much of the output an error message quotes.
 const QUOTED_OUTPUT: usize = 2000;
+/// How long to wait for the output once the task's processes are gone.
+const OUTPUT_GRACE: Duration = Duration::from_secs(2);
+/// The signals that stop the CLI, which stop a running task first.
+const STOPPING: [libc::c_int; 3] = [libc::SIGINT, libc::SIGTERM, libc::SIGHUP];
+
+/// A stopping signal that arrived while a task ran, or 0.
+static STOPPED_BY: AtomicI32 = AtomicI32::new(0);
+
+extern "C" fn note_signal(signal: libc::c_int) {
+    STOPPED_BY.store(signal, Ordering::SeqCst);
+}
+
+/// The task runs in a process group of its own, so that everything it starts can be stopped
+/// with it. That also keeps the terminal's Ctrl-C from reaching it, so while the guard lives the
+/// stopping signals are caught here; the caller stops the group and then ends as the signal
+/// would have ended it.
+struct SignalGuard {
+    previous: Vec<(libc::c_int, libc::sighandler_t)>,
+}
+
+impl SignalGuard {
+    fn install() -> SignalGuard {
+        STOPPED_BY.store(0, Ordering::SeqCst);
+        let handler = note_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+        let mut previous = Vec::new();
+        for signal in STOPPING {
+            // SAFETY: the handler only stores into an atomic, which is async-signal-safe.
+            let before = unsafe { libc::signal(signal, handler) };
+            if before == libc::SIG_IGN {
+                // Ignored before (SIGHUP under nohup, say): it stays ignored.
+                // SAFETY: puts back the disposition just replaced.
+                unsafe { libc::signal(signal, libc::SIG_IGN) };
+            } else {
+                previous.push((signal, before));
+            }
+        }
+        SignalGuard { previous }
+    }
+
+    fn received(&self) -> Option<libc::c_int> {
+        match STOPPED_BY.load(Ordering::SeqCst) {
+            0 => None,
+            signal => Some(signal),
+        }
+    }
+}
+
+impl Drop for SignalGuard {
+    fn drop(&mut self) {
+        for &(signal, previous) in &self.previous {
+            // SAFETY: puts back the disposition `install` replaced.
+            unsafe { libc::signal(signal, previous) };
+        }
+    }
+}
+
+/// Stops every process left in the task's group: the child, if it still runs, and anything the
+/// app started.
+fn stop_group(leader: u32) {
+    // SAFETY: a negative pid names the process group the child leads; nothing else is in it.
+    unsafe { libc::kill(-(leader as libc::pid_t), libc::SIGKILL) };
+}
+
+/// The output a reader thread collected, or what it had when `deadline` passed: a process that
+/// left the group can still hold the pipe open.
+fn finish(reader: JoinHandle<(Vec<u8>, bool)>, deadline: Instant) -> (Vec<u8>, bool) {
+    while !reader.is_finished() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    if reader.is_finished() {
+        reader.join().unwrap_or_default()
+    } else {
+        (
+            b"[output still held open by a process the task started]\n".to_vec(),
+            true,
+        )
+    }
+}
+
+/// The diagnostics the child appended to `path` as they happened, one JSON object a line.
+fn diagnostics_so_far(path: &Path) -> Vec<Diagnostic> {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Json>(line).ok())
+        .map(|json| Diagnostic::from_json(&json))
+        .collect()
+}
 
 /// A PHP warning, notice, deprecation, error or exception raised while the task ran.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -135,6 +225,7 @@ pub fn run(root: &Path, runtime: &AppRuntime, task: &AppTask) -> Result<TaskOutc
         .map_err(|e| fail(format!("could not make a directory for the task: {e}")))?;
     let request_path = dir.path().join("request.json");
     let result_path = dir.path().join("result.json");
+    let diagnostics_path = dir.path().join("diagnostics.jsonl");
     let map = |pairs: &[(String, String)]| -> Json {
         Json::Object(
             pairs
@@ -151,6 +242,7 @@ pub fn run(root: &Path, runtime: &AppRuntime, task: &AppTask) -> Result<TaskOutc
         "file": task.file.to_string_lossy(),
         "input": task.input,
         "loads_app": task.loads_app,
+        "diagnostics_file": diagnostics_path.to_string_lossy(),
     });
     std::fs::write(&request_path, request.to_string())
         .map_err(|e| fail(format!("could not write the task's request: {e}")))?;
@@ -160,6 +252,7 @@ pub fn run(root: &Path, runtime: &AppRuntime, task: &AppTask) -> Result<TaskOutc
             "cannot find the speedyspec executable to run the task: {e}"
         ))
     })?;
+    let signals = SignalGuard::install();
     let mut child = Command::new(exe)
         .arg("self")
         .arg("run-task")
@@ -170,6 +263,7 @@ pub fn run(root: &Path, runtime: &AppRuntime, task: &AppTask) -> Result<TaskOutc
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        .process_group(0)
         .spawn()
         .map_err(|e| fail(format!("could not start the task {name}: {e}")))?;
     let stdout = collect(child.stdout.take().expect("stdout is piped"));
@@ -177,26 +271,39 @@ pub fn run(root: &Path, runtime: &AppRuntime, task: &AppTask) -> Result<TaskOutc
 
     let started = Instant::now();
     let status = loop {
+        if let Some(signal) = signals.received() {
+            stop_group(child.id());
+            let _ = child.wait();
+            drop(dir);
+            drop(signals);
+            // SAFETY: ends this process as the signal would have, its own disposition restored.
+            unsafe { libc::raise(signal) };
+            std::process::exit(128 + signal);
+        }
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
             Ok(None) if started.elapsed() >= task.timeout => {
-                let _ = child.kill();
+                stop_group(child.id());
                 let _ = child.wait();
                 break None;
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            Err(e) => return Err(fail(format!("could not wait for the task {name}: {e}"))),
+            Err(e) => {
+                stop_group(child.id());
+                return Err(fail(format!("could not wait for the task {name}: {e}")));
+            }
         }
     };
-    let output = output_text(
-        stdout.join().unwrap_or_default(),
-        stderr.join().unwrap_or_default(),
-    );
+    // Whatever the app started in the background goes with the task.
+    stop_group(child.id());
+    drop(signals);
+    let deadline = Instant::now() + OUTPUT_GRACE;
+    let output = output_text(finish(stdout, deadline), finish(stderr, deadline));
     let Some(status) = status else {
         return Err(fail(format!(
             "the task {name} did not finish within {}s and was stopped{}",
             task.timeout.as_secs(),
-            details(&[], &output)
+            details(&diagnostics_so_far(&diagnostics_path), &output)
         )));
     };
 
@@ -204,7 +311,7 @@ pub fn run(root: &Path, runtime: &AppRuntime, task: &AppTask) -> Result<TaskOutc
     let Ok(result) = serde_json::from_str::<Json>(&written) else {
         return Err(fail(format!(
             "the task {name} ended without a result ({status}){}",
-            details(&[], &output)
+            details(&diagnostics_so_far(&diagnostics_path), &output)
         )));
     };
     let diagnostics: Vec<Diagnostic> = result["diagnostics"]

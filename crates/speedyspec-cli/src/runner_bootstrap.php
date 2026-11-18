@@ -34,9 +34,16 @@ $__speedyspec_runner['write'] = static function (array $payload) use ($__speedys
 
 $__speedyspec_runner['note'] = static function (string $level, string $message, string $file, int $line) use ($__speedyspec_runner): void
 {
+    $diagnostic = ['level' => $level, 'message' => $message, 'file' => $file, 'line' => $line];
     $diagnostics = $__speedyspec_runner['diagnostics'];
-    $diagnostics[] = ['level' => $level, 'message' => $message, 'file' => $file, 'line' => $line];
+    $diagnostics[] = $diagnostic;
     $__speedyspec_runner['diagnostics'] = $diagnostics;
+    // Also on disk as it happens, so a task that is stopped at its timeout still has them.
+    $line_json = json_encode($diagnostic, JSON_INVALID_UTF8_SUBSTITUTE | JSON_UNESCAPED_SLASHES);
+    if ($line_json !== false)
+    {
+        file_put_contents($__speedyspec_runner['request']['diagnostics_file'], $line_json . "\n", FILE_APPEND);
+    }
 };
 
 set_error_handler(static function (int $number, string $message, string $file = '', int $line = 0) use ($__speedyspec_runner): bool

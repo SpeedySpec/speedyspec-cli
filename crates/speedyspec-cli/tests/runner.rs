@@ -235,6 +235,141 @@ fn slow_task_is_killed_at_its_timeout() {
     assert!(!alive, "the child {pid} is still running");
 }
 
+fn is_alive(pid: &str) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", pid.trim()])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap()
+        .success()
+}
+
+/// Waits briefly for a pid file a shell writes in the background.
+fn read_pid(marker: &Path) -> String {
+    for _ in 0..100 {
+        if let Ok(pid) = fs::read_to_string(marker) {
+            if !pid.trim().is_empty() {
+                return pid;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    panic!("{} was never written", marker.display());
+}
+
+#[test]
+fn a_process_the_task_started_is_stopped_with_it_at_the_timeout() {
+    let root = app(ENTRY);
+    let marker = root.path().join("pid");
+    let file = task(
+        root.path(),
+        "task.php",
+        &format!(
+            "return static function (array $input): string {{ return (string) shell_exec('sleep 30 & echo $! > {}; wait'); }};",
+            marker.to_str().unwrap()
+        ),
+    );
+    let started = std::time::Instant::now();
+    let out = run_task(root.path(), &file, &["--timeout", "2"]);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(
+        out.stderr.contains("did not finish within 2s"),
+        "{}",
+        out.stderr
+    );
+    let pid = read_pid(&marker);
+    assert!(!is_alive(&pid), "the task's sleep {pid} is still running");
+}
+
+#[test]
+fn a_background_process_does_not_outlive_a_finished_task() {
+    let root = app(ENTRY);
+    let marker = root.path().join("pid");
+    // The sleep keeps the task's stderr open, so the CLI must not wait for it.
+    let file = task(
+        root.path(),
+        "task.php",
+        &format!(
+            "return static function (array $input): string {{ shell_exec('sleep 30 > /dev/null & echo $! > {}'); return 'done'; }};",
+            marker.to_str().unwrap()
+        ),
+    );
+    let started = std::time::Instant::now();
+    let out = run_task(root.path(), &file, &[]);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(outcome(&out)["result"], "done");
+    let pid = read_pid(&marker);
+    assert!(!is_alive(&pid), "the task's sleep {pid} is still running");
+}
+
+#[test]
+fn diagnostics_so_far_are_kept_when_a_task_is_stopped() {
+    let root = app(ENTRY);
+    let file = task(
+        root.path(),
+        "task.php",
+        "return static function (array $input): int { trigger_error('almost there', E_USER_WARNING); sleep(60); return 1; };",
+    );
+    let out = run_task(root.path(), &file, &["--timeout", "2"]);
+    assert!(
+        out.stderr.contains("did not finish within 2s"),
+        "{}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("warning: almost there ("),
+        "{}",
+        out.stderr
+    );
+}
+
+#[test]
+fn interrupting_the_cli_stops_the_task_too() {
+    for signal in ["INT", "TERM"] {
+        let root = app(ENTRY);
+        let marker = root.path().join("pid");
+        let file = task(
+            root.path(),
+            "task.php",
+            &format!(
+                "return static function (array $input): string {{ return (string) shell_exec('sleep 30 & echo $! > {}; wait'); }};",
+                marker.to_str().unwrap()
+            ),
+        );
+        let (mut cli, _home) = Speedyspec::new(&[]).spawn(&[
+            "self",
+            "task",
+            "--root",
+            root.path().to_str().unwrap(),
+            "--file",
+            &file,
+            "--entry",
+            "entry.php",
+        ]);
+        let pid = read_pid(&marker);
+        let sent = std::process::Command::new("kill")
+            .args([&format!("-{signal}"), &cli.id().to_string()])
+            .status()
+            .unwrap();
+        assert!(sent.success());
+        let status = cli.wait().unwrap();
+        assert!(!status.success(), "{signal}: {status:?}");
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(
+            !is_alive(&pid),
+            "{signal}: the task's sleep {pid} is still running"
+        );
+    }
+}
+
 #[test]
 fn request_and_result_files_are_removed() {
     let root = app(ENTRY);
