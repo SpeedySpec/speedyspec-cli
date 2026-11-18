@@ -263,8 +263,10 @@ numeric string with an integral value (`'20'`, `' 20'`, `'-5'`, `'20.0'`),
 parsed by PHP's own `_is_numeric_string_ex` (surrounding whitespace allowed,
 trailing data not). `'20'` and `20` are the same priority. Anything else
 (non-numeric or partly numeric strings, fractions, `null`, bools, arrays,
-objects, values outside 64 bits) is a `TypeError` naming the parameter, as is
-a priority outside the registry's `i32`. A negative `$acceptedArgs` is a
+objects, values outside 64 bits) is a `TypeError` naming the parameter. The
+registry's priority is an `i64` (`speedyspec_hooks::AddOptions::priority`),
+so every PHP int is a valid priority: `PHP_INT_MIN` runs first and
+`PHP_INT_MAX` last, as in WordPress. A negative `$acceptedArgs` is a
 `ValueError`.
 
 The macro route also works, and was checked in Task 1 with a throwaway class

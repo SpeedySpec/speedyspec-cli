@@ -681,19 +681,11 @@ impl<'a> Call<'a> {
         }
     }
 
-    /// A priority: an integer argument (see [`Call::int_or`]) that fits the
-    /// registry's `i32`, else a `TypeError` naming the range.
-    fn priority(&self, i: usize) -> Result<i32, Fail> {
-        let priority = self.int_or(i, "priority", 10)?;
-        i32::try_from(priority).map_err(|_| {
-            Fail::Type(format!(
-                "{}(): Argument #{} ($priority) must be an integer between {} and {}, {priority} given",
-                self.name,
-                i + 1,
-                i32::MIN,
-                i32::MAX
-            ))
-        })
+    /// A priority: an integer argument (see [`Call::int_or`]). The registry's
+    /// priority is 64 bits, so every PHP int fits, `PHP_INT_MIN` and
+    /// `PHP_INT_MAX` included.
+    fn priority(&self, i: usize) -> Result<i64, Fail> {
+        self.int_or(i, "priority", 10)
     }
 
     /// Arguments from `first` on, as hook values.

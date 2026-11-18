@@ -119,7 +119,7 @@ impl Hooks for OwnerTracking {
         self.inner.remove(hook, id)
     }
 
-    fn remove_keyed(&self, hook: &str, key: &str, priority: i32) -> Result<bool, HookError> {
+    fn remove_keyed(&self, hook: &str, key: &str, priority: i64) -> Result<bool, HookError> {
         self.inner.remove_keyed(hook, key, priority)
     }
 

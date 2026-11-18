@@ -14,8 +14,9 @@ pub struct CallbackError(pub String);
 /// Options for [`Hooks::add`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AddOptions {
-    /// Lower runs first. Default 10, as in WordPress.
-    pub priority: i32,
+    /// Lower runs first. Default 10, as in WordPress. 64 bits, so PHP's
+    /// `PHP_INT_MIN` and `PHP_INT_MAX` (the "run first"/"run last" idioms) fit.
+    pub priority: i64,
     /// How many arguments the callback sees. Default: all of them.
     pub accepted_args: usize,
     /// Caller-chosen identity, so a callback can be removed without keeping its
@@ -95,7 +96,7 @@ pub trait Hooks {
     /// Ok(true) if something was removed.
     fn remove(&self, hook: &str, id: CallbackId) -> Result<bool, HookError>;
     /// Removes by [`AddOptions::key`]; the priority must match the one it was added at.
-    fn remove_keyed(&self, hook: &str, key: &str, priority: i32) -> Result<bool, HookError>;
+    fn remove_keyed(&self, hook: &str, key: &str, priority: i64) -> Result<bool, HookError>;
     fn has(&self, hook: &str) -> Result<bool, HookError>;
     fn has_keyed(&self, hook: &str, key: &str) -> Result<bool, HookError>;
     fn run(&self, hook: &str, args: &[Value]) -> Result<(), HookError>;

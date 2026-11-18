@@ -49,6 +49,7 @@ const CASES: &[(&str, Case)] = &[
     ),
     ("has_with_callback", case_has_with_callback),
     ("numeric_priority", case_numeric_priority),
+    ("extreme_priority", case_extreme_priority),
     ("object_identity_survives", case_object_identity_survives),
     ("rust_callback_seen_by_php", case_rust_callback_seen_by_php),
     ("rust_fires_into_php", case_rust_fires_into_php),
@@ -250,11 +251,17 @@ fn case_numeric_priority(ctx: &Ctx) -> Result<(), String> {
     // across string and int spellings, integral floats, a string
     // acceptedArgs, then TypeError for 'abc', '20abc', 20.5, null, '20.5',
     // '', true and [20]; ValueError for acceptedArgs -1; TypeError for a
-    // priority outside i32 and for acceptedArgs 'two'; nothing registered.
+    // priority outside 64 bits and for acceptedArgs 'two'; nothing registered.
     eq(
         &require_out(ctx, "numeric_priority.php")?,
         "ab|111|11|2|TTTTTTTT|VRAn",
     )
+}
+
+fn case_extreme_priority(ctx: &Ctx) -> Result<(), String> {
+    // PHP_INT_MIN first and PHP_INT_MAX last; removal at the wrong priority
+    // fails, at PHP_INT_MAX and at (string) PHP_INT_MIN succeeds.
+    eq(&require_out(ctx, "extreme_priority.php")?, "abc|011n")
 }
 
 fn case_object_identity_survives(ctx: &Ctx) -> Result<(), String> {
@@ -1311,7 +1318,7 @@ impl Hooks for TestHooks {
     fn remove(&self, hook: &str, id: CallbackId) -> Result<bool, HookError> {
         self.memory.remove(hook, id)
     }
-    fn remove_keyed(&self, hook: &str, key: &str, priority: i32) -> Result<bool, HookError> {
+    fn remove_keyed(&self, hook: &str, key: &str, priority: i64) -> Result<bool, HookError> {
         self.memory.remove_keyed(hook, key, priority)
     }
     fn has(&self, hook: &str) -> Result<bool, HookError> {

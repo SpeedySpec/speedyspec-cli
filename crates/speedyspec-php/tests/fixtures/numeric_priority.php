@@ -66,7 +66,7 @@ catch (ValueError $v)
 }
 try
 {
-    Hook::add('numeric.bad', $e, '99999999999');
+    Hook::add('numeric.bad', $e, '99999999999999999999');
 }
 catch (TypeError $t)
 {

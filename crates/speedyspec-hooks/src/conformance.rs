@@ -61,6 +61,10 @@ pub fn run_all(make: &dyn Fn() -> SharedHooks, capabilities: Capabilities) {
             callback_may_fire_same_hook_recursively,
         ),
         ("array_value_round_trips", array_value_round_trips),
+        (
+            "extreme_priorities_order_and_remove",
+            extreme_priorities_order_and_remove,
+        ),
     ];
     for (name, case) in cases {
         // Name the case on failure; the assertion message alone would not.
@@ -93,14 +97,14 @@ fn recorder(log: &Log, label: &str) -> Rc<Callback> {
     })
 }
 
-fn at(priority: i32) -> AddOptions {
+fn at(priority: i64) -> AddOptions {
     AddOptions {
         priority,
         ..AddOptions::default()
     }
 }
 
-fn keyed(key: &str, priority: i32) -> AddOptions {
+fn keyed(key: &str, priority: i64) -> AddOptions {
     AddOptions {
         priority,
         key: Some(key.to_owned()),
@@ -304,6 +308,32 @@ fn callback_may_fire_same_hook_recursively(make: Make) {
     hooks.run("h", &[]).unwrap();
     assert_eq!(depth.get(), 3);
     assert_eq!(hooks.ran("h"), Ok(3));
+}
+
+/// i64::MAX runs last, i64::MIN first; remove_keyed needs the exact extreme
+fn extreme_priorities_order_and_remove(make: Make) {
+    let hooks = make();
+    let log = log();
+    hooks
+        .add("h", recorder(&log, "last"), keyed("max", i64::MAX))
+        .unwrap();
+    hooks.add("h", recorder(&log, "middle"), at(10)).unwrap();
+    hooks
+        .add("h", recorder(&log, "first"), keyed("min", i64::MIN))
+        .unwrap();
+    hooks
+        .add("h", recorder(&log, "also last"), at(i64::MAX))
+        .unwrap();
+    hooks.run("h", &[]).unwrap();
+    assert_eq!(*log.borrow(), ["first", "middle", "last", "also last"]);
+
+    assert_eq!(hooks.remove_keyed("h", "max", i64::MIN), Ok(false));
+    assert_eq!(hooks.remove_keyed("h", "max", i64::MAX), Ok(true));
+    assert_eq!(hooks.remove_keyed("h", "min", i64::MAX), Ok(false));
+    assert_eq!(hooks.remove_keyed("h", "min", i64::MIN), Ok(true));
+    log.borrow_mut().clear();
+    hooks.run("h", &[]).unwrap();
+    assert_eq!(*log.borrow(), ["middle", "also last"]);
 }
 
 /// nested Array with Int and Str keys through an identity filter; equal

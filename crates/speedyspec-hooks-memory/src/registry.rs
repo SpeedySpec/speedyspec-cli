@@ -6,7 +6,7 @@ use speedyspec_hooks::{AddOptions, Callback, CallbackId, HookError, HookErrorKin
 
 struct Entry {
     id: CallbackId,
-    priority: i32,
+    priority: i64,
     accepted_args: usize,
     key: Option<String>,
     owner: Option<String>,
@@ -137,7 +137,7 @@ impl Hooks for MemoryHooks {
         })
     }
 
-    fn remove_keyed(&self, hook: &str, key: &str, priority: i32) -> Result<bool, HookError> {
+    fn remove_keyed(&self, hook: &str, key: &str, priority: i64) -> Result<bool, HookError> {
         let mut inner = self.inner.borrow_mut();
         let Some(&i) = inner.names.get(hook) else {
             return Ok(false);
