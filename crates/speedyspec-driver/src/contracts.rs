@@ -673,6 +673,133 @@ mod tests {
         assert_eq!(e.field, "[0].arguments[1].name");
     }
 
+    /// A reader that knows the class but cannot read the properties.
+    struct NoProperties;
+
+    impl ObjectReader for NoProperties {
+        fn class_of(&self, _: &Value) -> Option<String> {
+            Some(APP.to_owned())
+        }
+        fn properties_of(&self, _: &Value) -> Option<Vec<(String, Value)>> {
+            None
+        }
+    }
+
+    #[test]
+    fn validation_table() {
+        const ARG: &str = "SpeedySpec\\Cli\\Contracts\\CommandArgument";
+        const OPT: &str = "SpeedySpec\\Cli\\Contracts\\CommandOption";
+        let r = FakeReader::default();
+        let h = || Value::Opaque(Rc::new(1u8));
+        let argument = |required: Value| {
+            r.object(
+                ARG,
+                vec![
+                    ("name", s("a")),
+                    ("description", s("")),
+                    ("required", required),
+                ],
+            )
+        };
+        let option = |name: &str, takes_value: Value, default: Value| {
+            r.object(
+                OPT,
+                vec![
+                    ("name", s(name)),
+                    ("description", s("")),
+                    ("takesValue", takes_value),
+                    ("default", default),
+                ],
+            )
+        };
+        // (what, decoded value, expected field, expected words in the problem)
+        let apps: Vec<(&str, Value, &str, &str)> = vec![(
+            "duplicate part ids",
+            list(vec![app(
+                &r,
+                "wp",
+                vec![part(&r, "core", "Core"), part(&r, "core", "Again")],
+                vec![],
+            )]),
+            "[0].parts[1].id",
+            "duplicate id \"core\"",
+        )];
+        for (what, value, field, problem) in apps {
+            let e = decode_apps(&value, &r).unwrap_err();
+            assert_eq!(e.field, field, "{what}");
+            assert!(e.problem.contains(problem), "{what}: {}", e.problem);
+        }
+        let commands: Vec<(&str, Value, &str, &str)> = vec![
+            (
+                "duplicate option names",
+                list(vec![command(
+                    &r,
+                    "x",
+                    h(),
+                    vec![(
+                        "options",
+                        list(vec![
+                            option("force", Value::Bool(false), Value::Null),
+                            option("force", Value::Bool(false), Value::Null),
+                        ]),
+                    )],
+                )]),
+                "[0].options[1].name",
+                "duplicate name \"force\"",
+            ),
+            (
+                "non-bool takesValue",
+                list(vec![command(
+                    &r,
+                    "x",
+                    h(),
+                    vec![(
+                        "options",
+                        list(vec![option("force", s("yes"), Value::Null)]),
+                    )],
+                )]),
+                "[0].options[0].takesValue",
+                "expected a bool",
+            ),
+            (
+                "non-bool required",
+                list(vec![command(
+                    &r,
+                    "x",
+                    h(),
+                    vec![("arguments", list(vec![argument(Value::Int(1))]))],
+                )]),
+                "[0].arguments[0].required",
+                "expected a bool",
+            ),
+            (
+                "non-string, non-null default",
+                list(vec![command(
+                    &r,
+                    "x",
+                    h(),
+                    vec![(
+                        "options",
+                        list(vec![option("format", Value::Bool(true), Value::Int(3))]),
+                    )],
+                )]),
+                "[0].options[0].default",
+                "expected a string or null",
+            ),
+        ];
+        for (what, value, field, problem) in commands {
+            let e = decode_commands(&value, &r).unwrap_err();
+            assert_eq!(e.field, field, "{what}");
+            assert!(e.problem.contains(problem), "{what}: {}", e.problem);
+        }
+        // An object whose properties cannot be read is reported as the wrong
+        // value, not trusted.
+        let value = list(vec![Value::Opaque(Rc::new(2u8))]);
+        let e = decode_apps(&value, &NoProperties).unwrap_err();
+        assert_eq!(e.field, "[0]");
+        assert!(e.problem.contains(APP), "{}", e.problem);
+    }
+
     #[test]
     fn single_item_decoders_report_relative_fields() {
         let r = FakeReader::default();
