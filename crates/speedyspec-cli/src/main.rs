@@ -1,13 +1,18 @@
 //! The `speedyspec` executable. All the work is in [`commands::run`].
 
 mod app;
+mod app_target;
 mod attribution;
 mod boot;
 mod commands;
+mod db_cmd;
 mod drivers;
 mod install;
+mod installs;
 mod plugin_cmd;
 mod prompt;
+mod runner;
+mod runner_child;
 mod self_cmd;
 
 use std::process::ExitCode;

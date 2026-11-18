@@ -41,3 +41,31 @@ jobs:
       - name: Stop k3s
         if: always()
         run: scripts/k3s.sh down
+
+  database:
+    name: database (MySQL 8.4, MariaDB 11.4)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: speedyspec-cli
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: speedyspec-cli
+
+      - name: Install Rust 1.99
+        run: rustup toolchain install 1.99 --profile minimal && rustup default 1.99
+
+      # Throwaway servers in containers on the runner, on loopback; nothing else is contacted.
+      - name: Start MySQL and MariaDB
+        run: scripts/mysql.sh up
+
+      # speedyspec-db has no PHP dependency, so this job builds no static PHP.
+      - name: Test against both servers
+        run: |
+          eval "$(scripts/mysql.sh env)"
+          cargo test -p speedyspec-db --test mysql -- --ignored --test-threads=1
+
+      - name: Stop MySQL and MariaDB
+        if: always()
+        run: scripts/mysql.sh down

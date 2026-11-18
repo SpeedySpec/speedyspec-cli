@@ -50,6 +50,15 @@ pub struct PluginRef {
     pub version: String,
 }
 
+/// An install whose files are on this machine, which the CLI records so later commands can find
+/// it by name.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalInstall {
+    pub name: String,
+    /// Absolute.
+    pub location: std::path::PathBuf,
+}
+
 /// What the user gave `app uninstall`.
 pub struct UninstallInput<'a> {
     /// The install's name.
@@ -114,6 +123,13 @@ pub trait Driver {
 
     /// What `install` returned, as lines of command output for the user.
     fn report(&self, result: &Value) -> Vec<String>;
+
+    /// The install `prepared` describes, when its files end up on this machine: the CLI records it
+    /// under that name. `None` (the default) for drivers whose installs live elsewhere and keep
+    /// their own record.
+    fn local_install(&self, _prepared: &Prepared) -> Option<LocalInstall> {
+        None
+    }
 
     /// Flags `app uninstall` accepts for this driver. Empty means the driver cannot uninstall.
     fn uninstall_flags(&self) -> Vec<DriverFlag> {

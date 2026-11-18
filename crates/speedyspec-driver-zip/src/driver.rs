@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use speedyspec_driver::{
-    ContractError, Driver, DriverError, DriverFlag, DriverInput, ObjectReader, PluginRef, Prepared,
-    Progress, ZipSource, decode_zip_source,
+    ContractError, Driver, DriverError, DriverFlag, DriverInput, LocalInstall, ObjectReader,
+    PluginRef, Prepared, Progress, ZipSource, decode_zip_source, install_name_problem,
 };
 use speedyspec_hooks::{Key, Value};
 
@@ -20,6 +20,8 @@ pub struct ZipDriver {
 /// What `prepare` settled for one install.
 struct Settings {
     base: PathBuf,
+    /// The install's name, which the CLI records.
+    name: String,
     force: bool,
 }
 
@@ -54,6 +56,12 @@ impl Driver for ZipDriver {
                 default: Some("."),
             },
             DriverFlag {
+                name: "name",
+                help: "Name of this install, for later commands (default: the app's id)",
+                takes_value: true,
+                default: None,
+            },
+            DriverFlag {
                 name: "force",
                 help: "Merge into non-empty destinations, replacing files of the same path",
                 takes_value: false,
@@ -69,10 +77,20 @@ impl Driver for ZipDriver {
             std::path::absolute(base).map_err(|e| DriverError(format!("--base {base}: {e}")))?;
         // `absolute` keeps a trailing "." component; drop it so the path reads as a directory.
         let base: PathBuf = base.components().collect();
+        let name = given
+            .get("name")
+            .map_or(input.app, String::as_str)
+            .to_owned();
+        if let Some(problem) = install_name_problem(&name) {
+            return Err(DriverError(format!(
+                "the install name {problem}; give one with --name"
+            )));
+        }
         Ok(Prepared {
             settings: vec![("base".to_owned(), base.to_string_lossy().into_owned())],
             state: Box::new(Settings {
                 base,
+                name,
                 force: given.contains_key("force"),
             }),
         })
@@ -80,6 +98,14 @@ impl Driver for ZipDriver {
 
     fn seed(&self) -> Value {
         Value::Array(Vec::new())
+    }
+
+    fn local_install(&self, prepared: &Prepared) -> Option<LocalInstall> {
+        let settings = prepared.state.downcast_ref::<Settings>()?;
+        Some(LocalInstall {
+            name: settings.name.clone(),
+            location: settings.base.clone(),
+        })
     }
 
     fn check_answer(&self, answer: &Value, reader: &dyn ObjectReader) -> Result<(), ContractError> {

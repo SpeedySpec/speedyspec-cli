@@ -24,6 +24,19 @@ pub fn user_plugin_dir() -> UserPluginDir {
     )
 }
 
+/// speedyspec's per-user directory, which holds `plugins/` and `installs/`: `$SPEEDYSPEC_HOME`
+/// when that is an absolute path, otherwise `<data dir>/speedyspec`. The same rule as
+/// [`user_plugin_dir`], with the same warnings.
+pub fn home_dir() -> UserPluginDir {
+    let found = user_plugin_dir();
+    UserPluginDir {
+        dir: found
+            .dir
+            .and_then(|plugins| plugins.parent().map(Path::to_path_buf)),
+        warnings: found.warnings,
+    }
+}
+
 fn user_plugin_dir_from(home: Option<&str>, data_dir: Option<PathBuf>) -> UserPluginDir {
     let mut warnings = Vec::new();
     if let Some(h) = home.filter(|h| !h.is_empty()) {

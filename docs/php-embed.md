@@ -208,7 +208,18 @@ only for target artifacts) and `RUSTC_WRAPPER=rustc-host-dynamic`, a
 four-line wrapper baked into its image that adds
 `-C target-feature=-crt-static` to rustc invocations without `--target`,
 i.e. build scripts and proc macros. Test binaries stay fully static. Their
-path is therefore `target-linux/x86_64-unknown-linux-musl/debug/...`.
+path is therefore `target/x86_64-unknown-linux-musl/debug/...` inside the
+container: `target-linux/` on a Linux host such as CI.
+
+On macOS that target is a Docker volume (`speedyspec-cargo-target-amd64`, or
+`-arm64`), not `target-linux/` (since 2026-11-18). Building through Docker
+Desktop's file sharing failed four times in one day with "crate `<dep>` required
+to be available in rlib format", a different dependency each time, never on CI
+and always gone on an immediate rerun. That is consistent with one rustc not
+yet seeing a library another had just written through the shared mount. Copy
+anything needed on the host out from inside the container, for example
+`scripts/linux.sh cp target/x86_64-unknown-linux-musl/release/speedyspec dist/`;
+`SPEEDYSPEC_LINUX_TARGET=bind` restores the old mount.
 
 ## Starting PHP and registering native code
 
@@ -612,6 +623,20 @@ for macOS 12 or later (`MACOSX_DEPLOYMENT_TARGET`), measured on 2026-11-18:
 | `speedyspec-linux-x86_64` (static-pie, musl) | 28.6 MB (28,561,424 bytes) | 33.5 MB |
 | `speedyspec-linux-aarch64` (static, musl; native in Docker on Apple silicon) | 24.5 MB (24,542,960 bytes) | not measured |
 | `speedyspec-macos-x86_64` | built in CI only | |
+
+Plan 5 (2026-11-18) adds the extensions WordPress needs to run in the CLI's own PHP: `mysqli`,
+`mysqlnd`, `pdo`, `pdo_mysql`, `dom`, `xml`, `simplexml`, `xmlreader`, `xmlwriter`, `sodium`, `iconv`,
+`fileinfo` and `exif`. `libphp.a` on macOS grows from 51.3 MB to 71.7 MB, and the stripped release
+binaries grow:
+
+| Release asset | Before | After |
+| --- | --- | --- |
+| `speedyspec-macos-aarch64` | 22.9 MB (22,880,016 bytes) | 36.9 MB (36,884,928 bytes) |
+| `speedyspec-linux-x86_64` | 28.6 MB (28,561,424 bytes) | 43.1 MB (43,128,720 bytes) |
+| `speedyspec-linux-aarch64` | 24.5 MB (24,542,960 bytes) | 39.1 MB (39,112,704 bytes) |
+
+Rebuilding PHP with them took 2 min 45 s on macOS, 9 min 46 s for Linux x86_64 under emulation
+and 1 min 51 s for Linux aarch64 (libraries already built).
 
 A first Linux aarch64 PHP build through `scripts/linux.sh` on a Mac can fail with "Too many open
 files in system" while unpacking php-src: Docker Desktop's file sharing runs out of handles on

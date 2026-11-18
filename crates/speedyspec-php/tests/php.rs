@@ -43,6 +43,10 @@ const CASES: &[(&str, Case)] = &[
     ("priority_order", case_priority_order),
     ("accepted_args", case_accepted_args),
     ("own_hook_functions", case_own_hook_functions),
+    (
+        "extensions_wordpress_needs",
+        case_extensions_wordpress_needs,
+    ),
     ("std_handles", case_std_handles),
     (
         "remove_closure_by_identity",
@@ -245,6 +249,10 @@ fn case_priority_order(ctx: &Ctx) -> Result<(), String> {
 
 fn case_accepted_args(ctx: &Ctx) -> Result<(), String> {
     eq(&require_out(ctx, "accepted_args.php")?, "2")
+}
+
+fn case_extensions_wordpress_needs(ctx: &Ctx) -> Result<(), String> {
+    eq(&require_out(ctx, "extensions.php")?, "yyyyyyyyyyyy")
 }
 
 fn case_own_hook_functions(ctx: &Ctx) -> Result<(), String> {

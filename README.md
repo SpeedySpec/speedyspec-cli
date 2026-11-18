@@ -8,6 +8,8 @@ installable "apps" through hooks. No PHP, Composer or `php.ini` is needed on the
 speedyspec --version                   # speedyspec, php and contracts versions, three lines
 speedyspec php <file> [args...]        # run a PHP file with hooks available; exit code is the script's
 speedyspec app list                    # id <TAB> label <TAB> drivers ("?" marks a driver this binary cannot run)
+speedyspec app installs                # the installs recorded on this machine: name <TAB> app <TAB> driver <TAB> location
+speedyspec app db … --install <name>   # an install's database: export, import, query, tables, size, check
 speedyspec app install <app> ...       # install an app a plugin provides (see "Installing an app")
 speedyspec app uninstall <name>        # remove a Kubernetes install (see "Installing into Kubernetes")
 speedyspec self plugin list            # name <TAB> version <TAB> directory
@@ -156,7 +158,7 @@ it is dropped with a message naming the plugin.
 ## Installing an app
 
 ```
-speedyspec app install [<app>] [--part <id>]... [--driver <id>] [--base <dir>] [--force] [--<option> <value>]...
+speedyspec app install [<app>] [--part <id>]... [--driver <id>] [--base <dir>] [--name <install>] [--force] [--<option> <value>]...
 ```
 
 The app, its parts and the driver are settled first: `--part` defaults to the app's default
@@ -183,6 +185,14 @@ later one. A download is given up after a minute without an answer, half an hour
 refused. A staging directory left in the base by an interrupted run (`.speedyspec-staging-*`)
 is removed by the next install there, so do not run two installs into one base at once. On success the command prints one line per destination,
 `<destination>\t<absolute path>`.
+
+A zip install is recorded so later commands find it by name: `--name` (default: the app's id;
+lowercase letters, digits and hyphens) names it, and the record is
+`$SPEEDYSPEC_HOME/installs/<name>.json` (or the platform data directory's `speedyspec/installs`).
+Installing again under the same name into the same base replaces the record. The same name for
+another base or another app is refused before anything is downloaded. `speedyspec app installs`
+lists the records (`name`, `app`, `driver`, `location`, tab-separated); Kubernetes installs keep
+their record in the cluster instead.
 
 `app install` refuses to run if a plugin hit a fatal error while loading, and it installs
 nothing when a plugin's answer on an install hook does not match its contract; the message
@@ -220,6 +230,38 @@ Hook::add('speedyspec_driver_zip', static function (array $sources, InstallReque
 `ZipSource` is `url` (https), `destination` (relative to the base; `.` is the base itself),
 `sha256` (optional, 64 hex characters) and `stripComponents` (leading path segments to drop,
 0 to 32). That plugin is `examples/install-wordpress`.
+
+## Working with an install's database
+
+```
+speedyspec app db export [--to <file>] [--force]   --install <name>
+speedyspec app db import <file|->       [--yes]     --install <name>
+speedyspec app db query <sql>                       --install <name>
+speedyspec app db tables | size | check             --install <name>
+```
+
+These find the install by name (`app installs`) and ask its app's plugin where the database is
+(`speedyspec_app_database`); speedyspec then does the work itself, so no `mysql` or `mysqldump`
+is needed on the machine. MySQL and MariaDB are supported. The password is never printed.
+The connection is not encrypted yet (no TLS): over a socket or a loopback address that does
+not matter, and for any other host speedyspec warns before connecting. A server that requires
+secure transport refuses it.
+
+- `export` writes a dump: each of the app's tables (those starting with its table prefix) is
+  dropped, created and filled, binary columns as hex. It goes to stdout, or to `--to <file>`,
+  which is created readable only by you and replaced only with `--force`. A dump holds the
+  site's data, so keep it private.
+- `import` runs a dump's statements in order and asks to confirm first (`--yes` skips the
+  question). It reads `mysqldump` files too. It refuses a dump that switches, creates or drops a
+  database, and stored routines (`DELIMITER`). It stops at the first statement that fails,
+  naming its line; the statements before it stay applied, because MySQL commits table changes
+  at once.
+- `query` runs one statement: rows come out tab-separated with a header line (`NULL` for null,
+  `0x...` for binary values; dates, times and JSON as text); anything else prints how many rows
+  it changed.
+- `tables` lists `name`, rows (the server's estimate), data bytes and index bytes; `size` prints
+  the data, index and total bytes; `check` runs `CHECK TABLE` and exits 1 when a table is not
+  `OK`.
 
 ## Installing into Kubernetes
 
@@ -376,6 +418,15 @@ uploaded (in the minutes after it is published) is reported as such; try again s
 | `speedyspec_driver_zip` | filter | Receives `[]` and the `InstallRequest`; append `ZipSource` objects. Register with 2 accepted arguments. |
 | `speedyspec_driver_kubernetes` | filter | Receives `null` (or an earlier plugin's answer) and the `InstallRequest`; return a `KubernetesResources`. Register with 2 accepted arguments. |
 | `speedyspec_install_after` | action | Receives the `InstallRequest` and the result. For zip: a list of `['url' => ..., 'destination' => ..., 'path' => ...]`. For kubernetes: a list of `['apiVersion' => ..., 'kind' => ..., 'namespace' => ..., 'name' => ...]`. Register with 2 accepted arguments. |
+| `speedyspec_app_runtime` | filter | Receives `null` (or an earlier plugin's answer) and the `Install` being worked on; return an `AppRuntime` saying how to load the app (its entry file, `ini` settings, `$_SERVER` entries). Register with 2 accepted arguments. |
+| `speedyspec_app_database` | filter | Receives `null` (or an earlier plugin's answer) and the `Install`; return a `DatabaseConnection`, or an `AppTask` whose callable returns the connection as an array (`host`, `database`, `user`, `password`, optionally `port`, `socket`, `tablePrefix`, `charset`). Register with 2 accepted arguments. |
+
+The `Install` carries `name`, `app`, `parts`, `driver` and `root` (the install's directory on
+this machine, or `null` when its files are elsewhere). An `AppTask` runs in a separate process:
+speedyspec starts itself again, loads the app's entry file at PHP's top level when `loadsApp` is
+true, and calls what the task file returns with the input. It inherits speedyspec's environment,
+so an app config that reads `getenv()` sees the same values. Warnings, errors, `exit()` and the
+app's output are reported, and a task past its `timeoutSeconds` is stopped.
 
 The `InstallRequest` carries `app`, `parts` (the selected part ids), `driver`, `options` (the
 install option values by name) and `settings` (for zip: `base`, the absolute base directory;

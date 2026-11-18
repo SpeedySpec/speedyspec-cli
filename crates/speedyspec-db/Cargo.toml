@@ -1,0 +1,14 @@
+[package]
+name = "speedyspec-db"
+version = "0.1.0"
+description = "speedyspec's MySQL client: export, import, query, tables, size and check for an app's database."
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+speedyspec-driver = { path = "../speedyspec-driver" }
+# Synchronous, pure Rust; TLS through rustls with ring, so the binary stays static.
+mysql = { version = "28", default-features = false, features = ["minimal-rust", "rustls-tls-ring"] }
+
+[dev-dependencies]
+tempfile = "3"

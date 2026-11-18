@@ -256,7 +256,7 @@ fn string_map(pairs: &[(String, String)]) -> Value {
     )
 }
 
-fn string_list(items: &[String]) -> Value {
+pub(crate) fn string_list(items: &[String]) -> Value {
     Value::Array(
         items
             .iter()
@@ -391,6 +391,18 @@ pub fn install(runtime: &Runtime, matches: &ArgMatches, prepass: Option<Prepass>
             return 1;
         }
     };
+    // An install recorded on this machine must not take a name another one already has; checked
+    // before anything is downloaded.
+    let local = driver.local_install(&prepared);
+    if let Some(local) = &local {
+        match crate::installs::clash(local, &choices.app) {
+            Ok(None) => {}
+            Ok(Some(problem)) | Err(problem) => {
+                eprintln!("speedyspec: {problem}");
+                return 1;
+            }
+        }
+    }
 
     let request = match runtime.php.construct(
         INSTALL_REQUEST,
@@ -481,6 +493,14 @@ pub fn install(runtime: &Runtime, matches: &ArgMatches, prepass: Option<Prepass>
     };
 
     let mut code = 0;
+    if let Some(local) = &local {
+        let record =
+            crate::installs::Record::new(local, &choices.app, &choices.parts, &choices.driver);
+        if let Err(problem) = crate::installs::write(&record) {
+            eprintln!("speedyspec: installed, but {problem}");
+            code = 1;
+        }
+    }
     if let Err(error) = runtime
         .hooks
         .run(HOOK_INSTALL_AFTER, &[request, result.clone()])

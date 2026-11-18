@@ -46,7 +46,7 @@ if [ "$(uname -s)" = "Darwin" ]; then
     export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-12.0}"
     deployment_target="$MACOSX_DEPLOYMENT_TARGET"
 fi
-extensions="ctype,curl,filter,mbstring,openssl,phar,tokenizer,zip,zlib"
+extensions="ctype,curl,dom,exif,fileinfo,filter,iconv,mbstring,mysqli,mysqlnd,openssl,pdo,pdo_mysql,phar,simplexml,sodium,tokenizer,xml,xmlreader,xmlwriter,zip,zlib"
 
 # `cli` is built only because ext-php-rs's build script runs `php -i` to read
 # the API version and thread safety. The CLI binary is never shipped.

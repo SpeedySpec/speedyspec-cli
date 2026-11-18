@@ -12,6 +12,7 @@ path = "src/main.rs"
 [dependencies]
 speedyspec-driver = { path = "../speedyspec-driver" }
 speedyspec-driver-zip = { path = "../speedyspec-driver-zip" }
+speedyspec-db = { path = "../speedyspec-db" }
 speedyspec-fetch = { path = "../speedyspec-fetch" }
 speedyspec-selfupdate = { path = "../speedyspec-selfupdate" }
 speedyspec-driver-kubernetes = { path = "../speedyspec-driver-kubernetes" }
@@ -28,6 +29,8 @@ rpassword = "7"
 # Reads the GitHub release description when installing a plugin from owner/repo.
 serde_json = "1"
 tempfile = "3"
+# Process groups and signals for the runner's child.
+libc = "0.2"
 
 [build-dependencies]
 semver = "1"
@@ -38,3 +41,5 @@ speedyspec-hooks = { path = "../speedyspec-hooks", features = ["conformance"] }
 tempfile = "3"
 speedyspec-testkit = { path = "../speedyspec-testkit" }
 sha2 = "0.11"
+# The database tests make their own databases and users.
+mysql = { version = "28", default-features = false, features = ["minimal-rust", "rustls-tls-ring"] }

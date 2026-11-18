@@ -30,7 +30,7 @@ const GLOBAL_NAMES: &[&str] = &[
 /// before returning, so PHP shuts down cleanly and its output is flushed.
 pub fn run(args: &[String]) -> ExitCode {
     // `self` needs neither PHP nor plugins; a broken plugin must not stop an update.
-    if crate::self_cmd::is_self_update(args) {
+    if crate::self_cmd::runs_before_plugins(args) {
         let code = run_without_plugins(args);
         let _ = std::io::stdout().flush();
         return ExitCode::from(exit_byte(i64::from(code)));
@@ -73,7 +73,7 @@ fn run_without_plugins(args: &[String]) -> i32 {
     {
         Ok(matches) => match matches.subcommand() {
             Some(("self", sub)) => crate::self_cmd::run(sub),
-            _ => unreachable!("is_self_update found self update"),
+            _ => unreachable!("runs_before_plugins found a self command"),
         },
         Err(error) => {
             let code = error.exit_code();
@@ -128,6 +128,10 @@ fn dispatch(runtime: &Runtime, args: &[String]) -> i32 {
         }
         Some(("php", sub)) => run_php(runtime, sub),
         Some(("self", sub)) => match sub.subcommand() {
+            Some(("database", database)) => crate::app_target::print_database(
+                runtime,
+                database.get_one::<String>("install").expect("required"),
+            ),
             Some(("plugin", plugin)) => match plugin.subcommand() {
                 Some(("list", _)) => list_plugins(runtime),
                 Some(("install", install)) => crate::plugin_cmd::install(install),
@@ -138,6 +142,8 @@ fn dispatch(runtime: &Runtime, args: &[String]) -> i32 {
         },
         Some(("app", sub)) => match sub.subcommand() {
             Some(("list", _)) => crate::app::list(&runtime.apps),
+            Some(("installs", _)) => crate::installs::print_list(),
+            Some(("db", db)) => crate::db_cmd::run(runtime, db),
             Some(("install", install)) => crate::app::install(runtime, install, prepass),
             Some(("uninstall", uninstall)) => crate::app::uninstall(uninstall),
             _ => unreachable!("clap requires an app subcommand"),
@@ -266,8 +272,13 @@ fn build_tree(plugin_commands: &[PluginCommand], install_options: &[InstallOptio
                 .subcommand_required(true)
                 .arg_required_else_help(true)
                 .subcommand(Clap::new("list").about("List the apps that can be installed"))
+                .subcommand(
+                    Clap::new("installs")
+                        .about("List the installs speedyspec recorded on this machine"),
+                )
                 .subcommand(install_clap(install_options))
-                .subcommand(uninstall_clap()),
+                .subcommand(uninstall_clap())
+                .subcommand(crate::db_cmd::clap()),
         );
     for command in plugin_commands {
         tree = tree.subcommand(plugin_clap(command));

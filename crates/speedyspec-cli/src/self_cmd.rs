@@ -30,11 +30,40 @@ pub fn clap() -> Clap {
                         .help("Only say whether a newer release exists"),
                 ),
         )
+        // The runner's child side: started by the CLI itself, never by hand.
+        .subcommand(
+            Clap::new("run-task")
+                .hide(true)
+                .arg(Arg::new("request").long("request").required(true))
+                .arg(Arg::new("result").long("result").required(true)),
+        )
+        // The database connection a plugin gives for an install, without its password: for the tests.
+        .subcommand(
+            Clap::new("database")
+                .hide(true)
+                .arg(Arg::new("install").long("install").required(true)),
+        )
+        // Runs one task through the runner and prints what came back: for the tests.
+        .subcommand(
+            Clap::new("task")
+                .hide(true)
+                .arg(Arg::new("root").long("root").required(true))
+                .arg(Arg::new("file").long("file").required(true))
+                .arg(Arg::new("entry").long("entry"))
+                .arg(Arg::new("no-app").long("no-app").action(ArgAction::SetTrue))
+                .arg(Arg::new("input").long("input"))
+                .arg(
+                    Arg::new("timeout")
+                        .long("timeout")
+                        .value_parser(clap::value_parser!(u64)),
+                ),
+        )
 }
 
-/// Whether the arguments name `self update` (global flags may come first). Only that command
-/// runs before PHP starts; `self plugin` needs the loaded plugins.
-pub fn is_self_update(args: &[String]) -> bool {
+/// Whether the arguments name a `self` command that runs before plugins are loaded (global flags
+/// may come first): `self update`, and the runner's `self run-task` and `self task`. `self
+/// plugin` needs the loaded plugins.
+pub fn runs_before_plugins(args: &[String]) -> bool {
     let mut words = Vec::new();
     let mut args = args.iter();
     while let Some(arg) = args.next() {
@@ -47,7 +76,7 @@ pub fn is_self_update(args: &[String]) -> bool {
             }
         }
     }
-    words == ["self", "update"]
+    matches!(words[..], ["self", "update" | "run-task" | "task"])
 }
 
 fn say(line: &str) {
@@ -58,7 +87,46 @@ fn say(line: &str) {
 pub fn run(matches: &ArgMatches) -> i32 {
     match matches.subcommand() {
         Some(("update", update)) => self_update(update.get_flag("check")),
+        Some(("run-task", run)) => crate::runner_child::run(
+            std::path::Path::new(run.get_one::<String>("request").expect("required")),
+            std::path::Path::new(run.get_one::<String>("result").expect("required")),
+        ),
+        Some(("task", task)) => run_one_task(task),
         _ => unreachable!("commands.rs dispatches every other self subcommand"),
+    }
+}
+
+/// `self task`: one task through the runner, its outcome printed as JSON.
+fn run_one_task(matches: &ArgMatches) -> i32 {
+    let text = |name: &str| matches.get_one::<String>(name).cloned();
+    let input = match text("input").map(|input| serde_json::from_str(&input)) {
+        None => serde_json::json!({}),
+        Some(Ok(input)) => input,
+        Some(Err(e)) => {
+            eprintln!("speedyspec: --input is not JSON: {e}");
+            return 2;
+        }
+    };
+    let runtime = speedyspec_driver::AppRuntime {
+        entry: text("entry"),
+        ..Default::default()
+    };
+    let task = speedyspec_driver::AppTask {
+        file: text("file").expect("required").into(),
+        input,
+        loads_app: !matches.get_flag("no-app"),
+        timeout: std::time::Duration::from_secs(*matches.get_one::<u64>("timeout").unwrap_or(&600)),
+    };
+    let root = std::path::PathBuf::from(text("root").expect("required"));
+    match crate::runner::run(&root, &runtime, &task) {
+        Ok(outcome) => {
+            say(&outcome.to_json().to_string());
+            0
+        }
+        Err(error) => {
+            eprintln!("speedyspec: {error}");
+            1
+        }
     }
 }
 
@@ -140,28 +208,35 @@ mod tests {
     }
 
     #[test]
-    fn finds_self_update_after_global_flags() {
-        assert!(is_self_update(&args(&["self", "update"])));
-        assert!(is_self_update(&args(&[
+    fn finds_the_commands_that_run_before_plugins() {
+        assert!(runs_before_plugins(&args(&["self", "update"])));
+        assert!(runs_before_plugins(&args(&[
             "--no-interaction",
             "self",
             "update"
         ])));
-        assert!(is_self_update(&args(&[
+        assert!(runs_before_plugins(&args(&[
             "--plugin-dir",
             "self",
             "self",
             "update"
         ])));
-        assert!(!is_self_update(&args(&[
+        assert!(!runs_before_plugins(&args(&[
             "--plugin-dir",
             "self",
             "app",
             "list"
         ])));
-        assert!(!is_self_update(&args(&["app", "self"])));
-        assert!(!is_self_update(&args(&["--version"])));
-        assert!(!is_self_update(&args(&["self", "plugin", "list"])));
-        assert!(!is_self_update(&args(&["self"])));
+        assert!(!runs_before_plugins(&args(&["app", "self"])));
+        assert!(!runs_before_plugins(&args(&["--version"])));
+        assert!(!runs_before_plugins(&args(&["self", "plugin", "list"])));
+        assert!(!runs_before_plugins(&args(&["self"])));
+        assert!(runs_before_plugins(&args(&[
+            "self",
+            "run-task",
+            "--request",
+            "r"
+        ])));
+        assert!(runs_before_plugins(&args(&["self", "task"])));
     }
 }
