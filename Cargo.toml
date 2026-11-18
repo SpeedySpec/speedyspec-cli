@@ -5,3 +5,7 @@ members = ["crates/*"]
 [workspace.package]
 edition = "2024"
 rust-version = "1.99"
+
+# Release binaries are downloaded; symbols only add size (PHP's own errors do not need them).
+[profile.release]
+strip = "symbols"
