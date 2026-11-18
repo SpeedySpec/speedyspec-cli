@@ -57,10 +57,13 @@ version bundled in the binary (see `speedyspec --version`); `entry` is relative 
 
 Plugins are found in the user directory (`$SPEEDYSPEC_HOME/plugins`, otherwise the platform data
 directory's `speedyspec/plugins`) and in each `--plugin-dir`. `SPEEDYSPEC_HOME` must be an
-absolute path; a relative one is ignored with a warning. A `--plugin-dir` that does not exist is
-reported. The working directory is never searched. Everything a plugin prints while loading goes to stderr. A plugin that throws, hits a
-fatal error, calls `exit()` or needs another contracts version is skipped with a
-`speedyspec: plugin <name> skipped: <why>` line; the others still load.
+absolute path; a relative one (or a relative `HOME` behind the data directory) is ignored with a
+warning. A `--plugin-dir` that does not exist is reported. The working directory is never
+searched. What a plugin prints while loading (`echo`, `print`, PHP's own diagnostics) goes to
+stderr; the one exception is a direct write to `STDOUT` or `php://stdout`, which reaches stdout
+(see `docs/php-embed.md`). A plugin that throws, hits a fatal error, calls `exit()` or needs
+another contracts version is skipped with a `speedyspec: plugin <name> skipped: <why>` line; the
+others still load.
 
 ```php
 <?php

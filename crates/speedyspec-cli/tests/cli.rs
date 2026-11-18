@@ -605,6 +605,49 @@ fn missing_plugin_dir_is_reported() {
 }
 
 #[test]
+fn relative_home_never_yields_a_plugin_directory() {
+    // `HOME=rel` makes the platform data directory relative: macOS's
+    // `rel/Library/Application Support`, Linux's `rel/.local/share`. Plugins planted at both
+    // must not load from the working directory.
+    let cwd = tempfile::tempdir().unwrap();
+    for data in ["rel/Library/Application Support", "rel/.local/share"] {
+        plant_good(&cwd.path().join(data).join("speedyspec/plugins/good"));
+    }
+    let output = Command::new(env!("CARGO_BIN_EXE_speedyspec"))
+        .current_dir(cwd.path())
+        .env_remove("SPEEDYSPEC_HOME")
+        .env_remove("XDG_DATA_HOME")
+        .env("HOME", "rel")
+        .args(["plugin", "list"])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(0), "{stderr}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    assert!(
+        stderr.starts_with("speedyspec: the platform data directory \"rel/")
+            && stderr
+                .contains("is not an absolute path (check HOME); no user plugin directory is used"),
+        "{stderr}"
+    );
+    assert_eq!(stderr.lines().count(), 1, "{stderr}");
+
+    // A relative XDG_DATA_HOME on its own must not be used either.
+    let home = tempfile::tempdir().unwrap();
+    plant_good(&cwd.path().join("xdg/speedyspec/plugins/good"));
+    let output = Command::new(env!("CARGO_BIN_EXE_speedyspec"))
+        .current_dir(cwd.path())
+        .env_remove("SPEEDYSPEC_HOME")
+        .env("XDG_DATA_HOME", "xdg")
+        .env("HOME", home.path())
+        .args(["plugin", "list"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+}
+
+#[test]
 fn relative_speedyspec_home_is_ignored() {
     // A relative SPEEDYSPEC_HOME would load plugins from the working directory.
     let cwd = tempfile::tempdir().unwrap();

@@ -173,7 +173,7 @@ pub fn boot(args: &[String]) -> Result<Runtime, String> {
     let mut loaded = Vec::new();
     if !options.no_plugins {
         let user = user_plugin_dir();
-        if let Some(warning) = &user.warning {
+        for warning in &user.warnings {
             eprintln!("speedyspec: {warning}");
         }
         let mut dirs: Vec<SearchDir> = user.dir.into_iter().map(SearchDir::implicit).collect();

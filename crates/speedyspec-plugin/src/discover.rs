@@ -3,19 +3,20 @@ use std::path::{Path, PathBuf};
 
 use crate::manifest::{MANIFEST_FILE, Plugin, PluginError, read_plugin};
 
-/// The per-user plugin directory, and a warning to show when the environment named one that
+/// The per-user plugin directory, and warnings to show when the environment named one that
 /// was ignored.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct UserPluginDir {
-    /// `$SPEEDYSPEC_HOME/plugins`, or `<data dir>/speedyspec/plugins`; `None` when no home is
-    /// known. Never relative, so nothing is loaded from the working directory on its own.
+    /// `$SPEEDYSPEC_HOME/plugins`, or `<data dir>/speedyspec/plugins`; `None` when no absolute
+    /// home is known. Never relative, so nothing is loaded from the working directory on its own.
     pub dir: Option<PathBuf>,
-    /// Set when `SPEEDYSPEC_HOME` was not an absolute path and the default was used instead.
-    pub warning: Option<String>,
+    /// One line for each relative path that was ignored (`SPEEDYSPEC_HOME`, or the platform data
+    /// directory derived from a relative `HOME`).
+    pub warnings: Vec<String>,
 }
 
 /// Per-user plugin directory: `$SPEEDYSPEC_HOME/plugins` when that is an absolute path,
-/// otherwise `<data dir>/speedyspec/plugins`.
+/// otherwise `<data dir>/speedyspec/plugins` when the platform data directory is absolute.
 pub fn user_plugin_dir() -> UserPluginDir {
     user_plugin_dir_from(
         std::env::var("SPEEDYSPEC_HOME").ok().as_deref(),
@@ -24,25 +25,34 @@ pub fn user_plugin_dir() -> UserPluginDir {
 }
 
 fn user_plugin_dir_from(home: Option<&str>, data_dir: Option<PathBuf>) -> UserPluginDir {
-    let default = || data_dir.map(|d| d.join("speedyspec").join("plugins"));
-    match home {
-        Some(h) if !h.is_empty() && Path::new(h).is_absolute() => UserPluginDir {
-            dir: Some(PathBuf::from(h).join("plugins")),
-            warning: None,
-        },
+    let mut warnings = Vec::new();
+    if let Some(h) = home.filter(|h| !h.is_empty()) {
+        if Path::new(h).is_absolute() {
+            return UserPluginDir {
+                dir: Some(PathBuf::from(h).join("plugins")),
+                warnings,
+            };
+        }
         // A relative home would be resolved against the working directory, which must never
         // be a source of plugins.
-        Some(h) if !h.is_empty() => UserPluginDir {
-            dir: default(),
-            warning: Some(format!(
-                "SPEEDYSPEC_HOME must be an absolute path; ignoring \"{h}\" and using the default data directory"
-            )),
-        },
-        _ => UserPluginDir {
-            dir: default(),
-            warning: None,
-        },
+        warnings.push(format!(
+            "SPEEDYSPEC_HOME must be an absolute path; ignoring \"{h}\" and using the default data directory"
+        ));
     }
+    // `dirs` builds the data directory from `$HOME` (and on Linux `$XDG_DATA_HOME`) without
+    // checking that it is absolute; a relative one would also point into the working directory.
+    let dir = match data_dir {
+        Some(d) if d.is_absolute() => Some(d.join("speedyspec").join("plugins")),
+        Some(d) => {
+            warnings.push(format!(
+                "the platform data directory \"{}\" is not an absolute path (check HOME); no user plugin directory is used",
+                d.display()
+            ));
+            None
+        }
+        None => None,
+    };
+    UserPluginDir { dir, warnings }
 }
 
 /// A directory to search for plugins.
@@ -282,7 +292,7 @@ mod tests {
     }
 
     fn dir_of(found: UserPluginDir) -> Option<PathBuf> {
-        assert_eq!(found.warning, None);
+        assert!(found.warnings.is_empty(), "{:?}", found.warnings);
         found.dir
     }
 
@@ -318,12 +328,40 @@ mod tests {
         for relative in ["h", "./h", "../h"] {
             let found = user_plugin_dir_from(Some(relative), Some("/data".into()));
             assert_eq!(found.dir, Some(PathBuf::from("/data/speedyspec/plugins")));
-            let warning = found.warning.expect("a warning");
+            assert_eq!(found.warnings.len(), 1, "{:?}", found.warnings);
+            let warning = &found.warnings[0];
             assert!(
                 warning.contains("SPEEDYSPEC_HOME must be an absolute path"),
                 "{warning}"
             );
             assert!(warning.contains(relative), "{warning}");
         }
+    }
+
+    #[test]
+    fn relative_data_dir_yields_no_plugin_directory() {
+        for data in [
+            "rel/Library/Application Support",
+            "rel/.local/share",
+            "share",
+        ] {
+            let found = user_plugin_dir_from(None, Some(data.into()));
+            assert_eq!(found.dir, None, "{data}");
+            assert_eq!(found.warnings.len(), 1, "{:?}", found.warnings);
+            assert!(
+                found.warnings[0].contains("not an absolute path"),
+                "{:?}",
+                found.warnings
+            );
+            assert!(found.warnings[0].contains(data), "{:?}", found.warnings);
+            // Both relative: two warnings, still no directory.
+            let found = user_plugin_dir_from(Some("h"), Some(data.into()));
+            assert_eq!(found.dir, None);
+            assert_eq!(found.warnings.len(), 2, "{:?}", found.warnings);
+        }
+        // An absolute SPEEDYSPEC_HOME does not need the data directory at all.
+        let found = user_plugin_dir_from(Some("/h"), Some("rel".into()));
+        assert_eq!(found.dir, Some(PathBuf::from("/h/plugins")));
+        assert!(found.warnings.is_empty());
     }
 }
