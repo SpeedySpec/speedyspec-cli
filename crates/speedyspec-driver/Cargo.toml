@@ -9,3 +9,6 @@ rust-version.workspace = true
 speedyspec-hooks = { path = "../speedyspec-hooks" }
 # Kubernetes manifests are JSON documents.
 serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

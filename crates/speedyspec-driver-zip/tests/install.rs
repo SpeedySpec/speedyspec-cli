@@ -533,7 +533,10 @@ fn driver_describes_itself() {
         .iter()
         .map(|f| (f.name, f.takes_value))
         .collect();
-    assert_eq!(names, vec![("base", true), ("name", true), ("force", false)]);
+    assert_eq!(
+        names,
+        vec![("base", true), ("name", true), ("force", false)]
+    );
 }
 
 #[test]

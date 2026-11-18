@@ -7,7 +7,7 @@ use std::fmt;
 
 use speedyspec_hooks::{Key, Value};
 
-const NS: &str = "SpeedySpec\\Cli\\Contracts\\";
+pub(crate) const NS: &str = "SpeedySpec\\Cli\\Contracts\\";
 
 /// Reads class and properties of a PHP object held in a `Value::Opaque`.
 /// Implemented on top of the PHP runtime.
@@ -255,7 +255,7 @@ fn authority(after_scheme: &str) -> &str {
 }
 
 /// Why `destination` cannot be used as a path under the base directory, if it cannot.
-fn destination_problem(destination: &str) -> Option<&'static str> {
+pub(crate) fn destination_problem(destination: &str) -> Option<&'static str> {
     if destination.is_empty() {
         return Some("must not be empty (use \".\" for the base directory itself)");
     }
@@ -289,15 +289,15 @@ fn is_identifier(s: &str) -> bool {
         && chars.all(|c| matches!(c, 'a'..='z' | '0'..='9' | '-'))
 }
 
-type Props = Vec<(String, Value)>;
+pub(crate) type Props = Vec<(String, Value)>;
 
-struct Decoder<'a> {
-    reader: &'a dyn ObjectReader,
-    contract: &'static str,
+pub(crate) struct Decoder<'a> {
+    pub(crate) reader: &'a dyn ObjectReader,
+    pub(crate) contract: &'static str,
 }
 
 impl Decoder<'_> {
-    fn err(&self, field: &str, problem: &str) -> ContractError {
+    pub(crate) fn err(&self, field: &str, problem: &str) -> ContractError {
         ContractError {
             contract: self.contract,
             field: field.to_string(),
@@ -346,7 +346,12 @@ impl Decoder<'_> {
         })
     }
 
-    fn object(&self, value: &Value, class: &str, path: &str) -> Result<Props, ContractError> {
+    pub(crate) fn object(
+        &self,
+        value: &Value,
+        class: &str,
+        path: &str,
+    ) -> Result<Props, ContractError> {
         let full = format!("{NS}{class}");
         let wrong = || self.err(path, &format!("expected an object of class {full}"));
         if self.reader.class_of(value).as_deref() != Some(full.as_str()) {
@@ -355,7 +360,7 @@ impl Decoder<'_> {
         self.reader.properties_of(value).ok_or_else(wrong)
     }
 
-    fn get<'p>(
+    pub(crate) fn get<'p>(
         &self,
         props: &'p Props,
         name: &str,
@@ -368,14 +373,19 @@ impl Decoder<'_> {
             .ok_or_else(|| self.err(&join(path, name), "property is missing"))
     }
 
-    fn string(&self, props: &Props, name: &str, path: &str) -> Result<String, ContractError> {
+    pub(crate) fn string(
+        &self,
+        props: &Props,
+        name: &str,
+        path: &str,
+    ) -> Result<String, ContractError> {
         match self.get(props, name, path)? {
             Value::Str(s) => Ok(s.clone()),
             _ => Err(self.err(&join(path, name), "expected a string")),
         }
     }
 
-    fn optional_string(
+    pub(crate) fn optional_string(
         &self,
         props: &Props,
         name: &str,
@@ -388,7 +398,12 @@ impl Decoder<'_> {
         }
     }
 
-    fn boolean(&self, props: &Props, name: &str, path: &str) -> Result<bool, ContractError> {
+    pub(crate) fn boolean(
+        &self,
+        props: &Props,
+        name: &str,
+        path: &str,
+    ) -> Result<bool, ContractError> {
         match self.get(props, name, path)? {
             Value::Bool(b) => Ok(*b),
             _ => Err(self.err(&join(path, name), "expected a bool")),
@@ -523,52 +538,14 @@ impl Decoder<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::fake_reader::FakeReader;
     use speedyspec_hooks::{Key, Value};
     use std::any::Any;
-    use std::cell::RefCell;
-    use std::collections::HashMap;
     use std::rc::Rc;
 
     const APP: &str = "SpeedySpec\\Cli\\Contracts\\App";
     const PART: &str = "SpeedySpec\\Cli\\Contracts\\AppPart";
     const COMMAND: &str = "SpeedySpec\\Cli\\Contracts\\Command";
-
-    type Props = Vec<(String, Value)>;
-
-    #[derive(Default)]
-    struct FakeReader {
-        objects: RefCell<HashMap<usize, (String, Props)>>,
-    }
-
-    fn addr(rc: &Rc<dyn Any>) -> usize {
-        Rc::as_ptr(rc) as *const () as usize
-    }
-
-    impl FakeReader {
-        fn object(&self, class: &str, props: Vec<(&str, Value)>) -> Value {
-            let rc: Rc<dyn Any> = Rc::new(0u8);
-            let props = props.into_iter().map(|(k, v)| (k.to_string(), v)).collect();
-            self.objects
-                .borrow_mut()
-                .insert(addr(&rc), (class.to_string(), props));
-            Value::Opaque(rc)
-        }
-    }
-
-    impl ObjectReader for FakeReader {
-        fn class_of(&self, value: &Value) -> Option<String> {
-            let Value::Opaque(rc) = value else {
-                return None;
-            };
-            self.objects.borrow().get(&addr(rc)).map(|o| o.0.clone())
-        }
-        fn properties_of(&self, value: &Value) -> Option<Vec<(String, Value)>> {
-            let Value::Opaque(rc) = value else {
-                return None;
-            };
-            self.objects.borrow().get(&addr(rc)).map(|o| o.1.clone())
-        }
-    }
 
     fn list(items: Vec<Value>) -> Value {
         Value::Array(
