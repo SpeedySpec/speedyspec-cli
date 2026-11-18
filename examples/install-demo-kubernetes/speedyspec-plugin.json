@@ -1,0 +1,6 @@
+{
+    "name": "speedyspec/install-demo-kubernetes",
+    "version": "1.0.0",
+    "contracts": "^1.0",
+    "entry": "plugin.php"
+}

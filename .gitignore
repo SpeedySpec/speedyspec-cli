@@ -3,3 +3,4 @@
 /target-linux*/
 /.php-build-linux*/
 /craft.yml
+/.k3s/

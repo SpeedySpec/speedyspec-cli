@@ -9,6 +9,7 @@ speedyspec --version              # speedyspec, php and contracts versions, thre
 speedyspec php <file> [args...]   # run a PHP file with hooks available; exit code is the script's
 speedyspec app list               # id <TAB> label <TAB> drivers ("?" marks a driver this binary cannot run)
 speedyspec app install <app> ...  # install an app a plugin provides (see "Installing an app")
+speedyspec app uninstall <name>   # remove a Kubernetes install (see "Installing into Kubernetes")
 speedyspec plugin list            # name <TAB> version <TAB> directory
 speedyspec plugin install <src>   # install a plugin from a zip URL or a GitHub release
 speedyspec plugin remove <name>   # remove an installed plugin
@@ -110,7 +111,7 @@ speedyspec app install [<app>] [--part <id>]... [--driver <id>] [--base <dir>] [
 
 The app, its parts and the driver are settled first: `--part` defaults to the app's default
 parts; `--driver` can be left out when the app has exactly one driver this binary can run. The
-only driver so far is `zip`. Anything missing is asked for when stdin is a terminal and
+drivers are `zip` and `kubernetes`. Anything missing is asked for when stdin is a terminal and
 `--no-interaction` was not given; otherwise the command fails with what is missing (it never
 waits for input from a script).
 
@@ -170,6 +171,90 @@ Hook::add('speedyspec_driver_zip', static function (array $sources, InstallReque
 `sha256` (optional, 64 hex characters) and `stripComponents` (leading path segments to drop,
 0 to 32). That plugin is `examples/install-wordpress`.
 
+## Installing into Kubernetes
+
+```
+speedyspec app install <app> --driver kubernetes --namespace <ns> [--name <install>] [--timeout 10m] [--force-conflicts]
+                             [--server <url> (--token-file <path|-> | SPEEDYSPEC_KUBE_TOKEN=...) [--ca-cert <pem> | --insecure-skip-tls-verify]]
+                             [--context <kubeconfig context>]
+speedyspec app uninstall <install> --namespace <ns> [--yes] [the same connection flags]
+```
+
+No kubectl or Helm is needed. The cluster is named with `--server` and a token, or, when
+neither is given, taken from your kubeconfig (`--context` picks a context). The token is never a
+flag value: put it in `SPEEDYSPEC_KUBE_TOKEN`, or in a file named by `--token-file` (`-` reads
+it from standard input). It is never printed, recorded, or shown to plugins.
+
+An install, in order:
+
+1. The plugin's answer is checked. Nothing in the cluster changes if it is wrong.
+2. `--namespace`, and any other namespace a resource names, is created if it is missing.
+3. The install record is written: a Secret `speedyspec-install-<install>` (type
+   `speedyspec.com/install`) in `--namespace`, listing everything about to be applied. It is
+   written first so that an install that fails part-way can still be removed.
+4. Each resource is applied in the order the plugin gave, with server-side apply (field manager
+   `speedyspec`) and the labels `app.kubernetes.io/managed-by=speedyspec`,
+   `speedyspec.com/app=<app>` and `speedyspec.com/install=<install>`. A resource that names no
+   namespace gets `--namespace`.
+5. The install waits, up to `--timeout`, for its workloads: every Deployment, StatefulSet,
+   DaemonSet and Job, or what the plugin's `waitFor` names.
+6. The record is marked `installed`.
+
+`<install>` defaults to the app's id; give `--name` to install the same app twice. Installing
+again under the same name re-applies. A resource the plugin no longer returns is left running,
+reported, and kept in the record so that uninstall removes it. On failure the command says
+which resource and why, marks the record `failed`, and leaves what was applied in place:
+nothing is rolled back. A field another manager owns (someone ran `kubectl edit`, a controller
+writes it) fails the install naming the field and the manager; `--force-conflicts` takes it
+over.
+
+`app uninstall` reads the record, shows what will go and asks to confirm (`--yes` skips the
+question; it warns when PersistentVolumeClaims, and so data, are among it). It deletes the
+recorded resources in reverse order, then the namespaces the install created, then the record.
+It runs no plugin code, so it works with `--no-plugins`. It leaves alone, and reports, anything
+that no longer carries this install's label (something else replaced it), a namespace that
+still holds such a thing, and any namespace the install did not create. If a delete fails the
+record stays, and the command can be run again.
+
+A plugin answers `speedyspec_driver_kubernetes` with a `KubernetesResources`: complete
+manifests as arrays, in the order to apply them.
+
+```php
+<?php
+
+declare(strict_types=1);
+
+use SpeedySpec\Cli\Contracts\InstallRequest;
+use SpeedySpec\Cli\Contracts\KubernetesResources;
+use SpeedySpec\Cli\Contracts\WaitFor;
+use SpeedySpec\Hooks\Hook;
+
+Hook::add('speedyspec_driver_kubernetes', static function (mixed $given, InstallRequest $request): mixed
+{
+    if ($request->app !== 'demo') {
+        return $given;
+    }
+    $resources = [
+        ['apiVersion' => 'v1', 'kind' => 'ConfigMap', 'metadata' => ['name' => 'demo'], 'data' => new stdClass()],
+        // ... a Deployment, a Service ...
+    ];
+
+    return new KubernetesResources($resources, [new WaitFor('Deployment', 'demo')]);
+}, 10, 2);
+```
+
+Arrays become JSON as `json_encode` would make them: a list (`[]` included) is a JSON array and
+any other array an object, so write an empty object as `new stdClass`
+(`'emptyDir' => new stdClass`), not `[]`. The filter starts from `null`. A plugin with nothing
+to add returns what it was given; one that adds to another plugin's answer builds a new
+`KubernetesResources` from it (the class is readonly):
+`new KubernetesResources([...$given->resources, $mine], $given->waitFor)`.
+
+`waitFor` omitted waits on the default workloads; `[]` waits on nothing. Readiness is built in
+for Deployment, StatefulSet, DaemonSet, Job and Pod; a `WaitFor` for any other kind must name
+a status condition that has to be `True` (`new WaitFor('Widget', 'w', condition: 'Available')`).
+The example plugin is `examples/install-demo-kubernetes`.
+
 ## Installing and removing plugins
 
 ```
@@ -199,10 +284,12 @@ new one has validated. Both commands work when an installed plugin is broken, an
 | `speedyspec_install_options` | filter | Receives `[]`, the app id and the driver id; append `InstallOption` objects. Register with 3 accepted arguments. |
 | `speedyspec_install_before` | action | Receives the `InstallRequest`. Throwing stops the install; nothing is installed. |
 | `speedyspec_driver_zip` | filter | Receives `[]` and the `InstallRequest`; append `ZipSource` objects. Register with 2 accepted arguments. |
-| `speedyspec_install_after` | action | Receives the `InstallRequest` and the result: for zip, a list of `['url' => ..., 'destination' => ..., 'path' => ...]`. Register with 2 accepted arguments. |
+| `speedyspec_driver_kubernetes` | filter | Receives `null` (or an earlier plugin's answer) and the `InstallRequest`; return a `KubernetesResources`. Register with 2 accepted arguments. |
+| `speedyspec_install_after` | action | Receives the `InstallRequest` and the result. For zip: a list of `['url' => ..., 'destination' => ..., 'path' => ...]`. For kubernetes: a list of `['apiVersion' => ..., 'kind' => ..., 'namespace' => ..., 'name' => ...]`. Register with 2 accepted arguments. |
 
 The `InstallRequest` carries `app`, `parts` (the selected part ids), `driver`, `options` (the
-install option values by name) and `settings` (for zip: `base`, the absolute base directory).
+install option values by name) and `settings` (for zip: `base`, the absolute base directory;
+for kubernetes: `namespace` and `name`, never the server or the token).
 What a plugin prints from the before and after actions is command output; what it prints from
 the filters goes to stderr.
 

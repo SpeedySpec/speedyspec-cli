@@ -32,8 +32,37 @@ fn wordpress_example_loads_and_is_listed() {
 }
 
 #[test]
+fn kubernetes_example_loads_and_is_listed() {
+    let home = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_speedyspec"))
+        .env("SPEEDYSPEC_HOME", home.path())
+        .env("KUBECONFIG", "/nonexistent/speedyspec-test-kubeconfig")
+        .stdin(Stdio::null())
+        .arg("--plugin-dir")
+        .arg(example("install-demo-kubernetes"))
+        .args(["app", "list"])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "demo\tDemo\tkubernetes\n"
+    );
+    assert_eq!(output.status.code(), Some(0));
+}
+
+#[test]
+fn kubernetes_example_follows_the_php_style() {
+    assert_php_style("install-demo-kubernetes");
+}
+
+#[test]
 fn wordpress_example_follows_the_php_style() {
-    let source = fs::read_to_string(example("install-wordpress").join("plugin.php")).unwrap();
+    assert_php_style("install-wordpress");
+}
+
+fn assert_php_style(name: &str) {
+    let source = fs::read_to_string(example(name).join("plugin.php")).unwrap();
     assert!(
         source.starts_with("<?php\n\ndeclare(strict_types=1);\n"),
         "{source}"
