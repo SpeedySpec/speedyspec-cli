@@ -663,5 +663,8 @@ is unset). The workflow's token is read-only (`permissions: contents:
 read`). It caches `.php-build*/spc` and `.php-build*/buildroot` keyed on
 `php-version` and `scripts/build-php.sh` (which holds the `spc` pins), builds
 PHP (with `SPEEDYSPEC_ALLOW_HOST_INSTALL=1`), and runs
-`cargo test --workspace`. **It has never run**: the repositories do not exist
-on GitHub yet, so the workflow is correct by inspection only.
+`cargo test --workspace`. The build step is given the workflow token as
+`GITHUB_TOKEN`: `spc` looks up source releases through the GitHub API, and
+anonymous calls from shared runners are rate limited (HTTP 403), which failed
+the first run. `scripts/linux.sh` forwards `GITHUB_TOKEN` into its container
+when it is set.

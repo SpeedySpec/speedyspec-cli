@@ -60,6 +60,9 @@ jobs:
         # Runners are throwaway, so spc may install missing build tools.
         env:
           SPEEDYSPEC_ALLOW_HOST_INSTALL: "1"
+          # spc looks up source releases through the GitHub API; unauthenticated calls from
+          # shared runners are rate limited (HTTP 403). The read-only workflow token is enough.
+          GITHUB_TOKEN: ${{ github.token }}
         run: ${{ matrix.run }} scripts/build-php.sh
 
       - name: Test

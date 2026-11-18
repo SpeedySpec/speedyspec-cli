@@ -92,6 +92,13 @@ if [ -t 0 ] && [ -t 1 ]; then
     tty_flag=(--tty --interactive)
 fi
 
+# spc authenticates its GitHub API calls with GITHUB_TOKEN when it is set (CI sets it to
+# avoid the anonymous rate limit). Passed by name so the value never appears in a command line.
+token_flags=()
+if [ -n "${GITHUB_TOKEN:-}" ]; then
+    token_flags=(--env GITHUB_TOKEN)
+fi
+
 exec docker run --rm ${tty_flag[@]+"${tty_flag[@]}"} \
     --platform "$platform" \
     --volume "$repo:/work" \
@@ -99,6 +106,7 @@ exec docker run --rm ${tty_flag[@]+"${tty_flag[@]}"} \
     --volume "$target_dir:/work/target" \
     --volume "speedyspec-cargo-registry-${platform##*/}:/usr/local/cargo/registry" \
     ${contracts_flags[@]+"${contracts_flags[@]}"} \
+    ${token_flags[@]+"${token_flags[@]}"} \
     --env CARGO_BUILD_TARGET="$rust_target" \
     --env SPEEDYSPEC_ALLOW_HOST_INSTALL=1 \
     --workdir /work \
