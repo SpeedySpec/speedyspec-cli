@@ -73,6 +73,13 @@ const CASES: &[(&str, Case)] = &[
     ),
     ("fiber_throw_into_parked", case_fiber_throw_into_parked),
     ("fiber_frames_per_context", case_fiber_frames_per_context),
+    (
+        "fiber_frames_are_not_shared",
+        case_fiber_frames_are_not_shared,
+    ),
+    ("fiber_exit_while_parked", case_fiber_exit_while_parked),
+    // Before the first fatal error: a bailout turns the cycle collector off.
+    ("fiber_destroyed_by_gc", case_fiber_destroyed_by_gc),
     ("fiber_exit_in_callback", case_fiber_exit_in_callback),
     (
         "fiber_suspend_outside_fiber",
@@ -93,6 +100,10 @@ const CASES: &[(&str, Case)] = &[
         case_uncaught_in_run_file_not_on_stdout,
     ),
     ("fatal_while_fiber_parked", case_fatal_while_fiber_parked),
+    (
+        "fiber_abandoned_after_fatal",
+        case_fiber_abandoned_after_fatal,
+    ),
     ("fatal_inside_callback", case_fatal_inside_callback),
     ("exit_inside_callback", case_exit_inside_callback),
     ("panic_propagates", case_panic_propagates),
@@ -145,7 +156,19 @@ fn main() -> ExitCode {
         hooks,
         shutdown_seen,
     } = ctx;
+    // Two abandoned fibers' records (and the parked one's) are still saved;
+    // dropping `Php` must forget them without touching freed memory.
+    let records = speedyspec_php::fiber_records();
     let (out, ()) = capture(1, || drop(php));
+    if records < 3 || speedyspec_php::fiber_records() != 0 {
+        failed += 1;
+        println!(
+            "FAILED: abandoned_records_forgotten_at_drop: {records} before, {} after",
+            speedyspec_php::fiber_records()
+        );
+    } else {
+        println!("ok: abandoned_records_forgotten_at_drop");
+    }
     match out {
         Ok(out) if out.is_empty() && shutdown_seen.get() => {
             println!("ok: parked_fiber_unwound_at_shutdown");
@@ -540,6 +563,168 @@ fn case_fiber_frames_per_context(ctx: &Ctx) -> Result<(), String> {
         &require_out(ctx, "fiber_frames_per_context.php")?,
         "from-main,from-fiber",
     )
+}
+
+fn case_fiber_frames_are_not_shared(ctx: &Ctx) -> Result<(), String> {
+    // Fiber A is parked inside `ctx.park`, so its context has a firing frame.
+    eq(&require_out(ctx, "fiber_ctx_frames.php")?, "")?;
+    // Fired from Rust, the main context has no firing frame: the callback's
+    // exception has no PHP caller to go back to and is only queued for
+    // release. A frame stack shared between contexts would keep it in A's
+    // frame instead, until A's firing ends.
+    let (out, fired) = capture(1, || ctx.hooks.run("ctx.throw", &[]));
+    eq(&out?, "")?;
+    match fired {
+        Err(err) if err.message.contains("noisy") => {}
+        other => return Err(format!("ctx.throw: {other:?}")),
+    }
+    // Any native call drains the queue, before A is resumed.
+    eq(
+        &stdout_of(|| {
+            ctx.php.eval(
+                "t",
+                "\\SpeedySpec\\Hooks\\Hook::ran('x'); echo 'mark;'; $GLOBALS['speedyspecCtxFiber']->resume();",
+            )
+        })?,
+        "E-freed;mark;resumed;",
+    )
+}
+
+fn case_fiber_exit_while_parked(ctx: &Ctx) -> Result<(), String> {
+    eq(
+        &stdout_of(|| {
+            ctx.php.eval(
+                "t",
+                "$GLOBALS['speedyspecExitFiber'] = new Fiber(static function (): void
+                 {
+                     \\SpeedySpec\\Hooks\\Hook::run('ctx.park');
+                     echo 'fiber-done;';
+                 });
+                 $GLOBALS['speedyspecExitFiber']->start();
+                 echo 'parked;';",
+            )
+        })?,
+        "parked;",
+    )?;
+    // A top-level exit() is the main context's own: reported as Exit, not
+    // parked for the fiber's native call.
+    let (out, result) = capture(1, || ctx.php.eval("t", "echo 'exiting;'; exit(7);"));
+    eq(&out?, "exiting;")?;
+    match result {
+        Err(PhpError::Exit(7)) => {}
+        other => return Err(format!("expected Err(Exit(7)), got {other:?}")),
+    }
+    // The parked fiber is untouched and completes its firing.
+    eq(
+        &stdout_of(|| {
+            ctx.php.eval(
+                "t",
+                "$GLOBALS['speedyspecExitFiber']->resume();
+                 echo $GLOBALS['speedyspecExitFiber']->isTerminated() ? 'T' : 'S';",
+            )
+        })?,
+        "resumed;fiber-done;T",
+    )
+}
+
+fn case_fiber_destroyed_by_gc(ctx: &Ctx) -> Result<(), String> {
+    // Leaving scope does not destroy the cycle; gc_collect_cycles() does,
+    // unwinding the parked firing; 200 more cycles do not grow memory.
+    eq(
+        &require_out(ctx, "fiber_gc_cycle.php")?,
+        "out-of-scope;unwound;collected;0",
+    )?;
+    let result = ctx
+        .hooks
+        .filter("php.double", Value::Int(21), &[])
+        .map_err(|e| e.to_string())?;
+    if result != Value::Int(42) {
+        return Err(format!("firing from Rust gave {result:?}"));
+    }
+    eq(&stdout_of(|| ctx.php.eval("t", "echo 'alive';"))?, "alive")
+}
+
+fn case_fiber_abandoned_after_fatal(ctx: &Ctx) -> Result<(), String> {
+    // Fibers parked inside a hook when a fatal error marks every object
+    // destructed are later freed without being unwound: their records are
+    // abandoned, until a new fiber reuses the address or `Php` is dropped.
+    eq(
+        &stdout_of(|| {
+            ctx.php.eval(
+                "t",
+                "\\SpeedySpec\\Hooks\\Hook::add('ctx.abandon', static function (): void
+                 {
+                     try
+                     {
+                         Fiber::suspend();
+                     }
+                     finally
+                     {
+                         echo 'unwound?';
+                     }
+                 });
+                 $GLOBALS['speedyspecAbandoned'] = [];
+                 for ($i = 0; $i < 3; $i++)
+                 {
+                     $fiber = new Fiber(static function (): void
+                     {
+                         \\SpeedySpec\\Hooks\\Hook::run('ctx.abandon');
+                     });
+                     $fiber->start();
+                     $GLOBALS['speedyspecAbandoned'][] = $fiber;
+                 }
+                 unset($fiber);",
+            )
+        })?,
+        "",
+    )?;
+    let parked = speedyspec_php::fiber_records();
+    let (_, result) = capture(1, || quiet(|| ctx.php.require(&fixture("redeclare.php"))));
+    match result {
+        Err(PhpError::Fatal { .. }) => {}
+        other => return Err(format!("expected a fatal error, got {other:?}")),
+    }
+    // Freed, not unwound: no finally block runs, the records stay.
+    eq(
+        &stdout_of(|| {
+            ctx.php
+                .eval("t", "unset($GLOBALS['speedyspecAbandoned']); echo 'gone;';")
+        })?,
+        "gone;",
+    )?;
+    if speedyspec_php::fiber_records() != parked {
+        return Err(format!(
+            "records went from {parked} to {} although nothing was unwound",
+            speedyspec_php::fiber_records()
+        ));
+    }
+    // New fibers that park and finish inside a hook still work, and one that
+    // lands on an abandoned fiber's address retires its stale record. (The
+    // count cannot tell whether `on_fiber_init` dropped it or the first
+    // switch into the new fiber consumed it; an abandoned record is inert
+    // either way, see the fix report.)
+    eq(
+        &stdout_of(|| {
+            ctx.php.eval(
+                "t",
+                "$fiber = new Fiber(static function (): void
+                 {
+                     \\SpeedySpec\\Hooks\\Hook::run('ctx.park');
+                 });
+                 $fiber->start();
+                 $fiber->resume();
+                 unset($fiber);",
+            )
+        })?,
+        "resumed;",
+    )?;
+    let after = speedyspec_php::fiber_records();
+    if after + 1 != parked {
+        return Err(format!(
+            "expected the new fiber to retire one stale record: {parked} -> {after}"
+        ));
+    }
+    Ok(())
 }
 
 fn case_fiber_exit_in_callback(ctx: &Ctx) -> Result<(), String> {

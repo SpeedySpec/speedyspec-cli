@@ -408,7 +408,11 @@ a fatal error, call `exit()` or throw. The rule `src/runtime.rs` follows:
    jumping, the outgoing context's record is saved under its address and the
    incoming one's loaded (fresh for a new fiber); a destroyed context's
    record is freed, releasing what it held; a new context at a reused address
-   drops any stale record. PHP keeps `EG(bailout)`, the VM stack and
+   drops any stale record. (That last step is bookkeeping, not a safety
+   measure: an abandoned fiber's record is inert, with no pending re-raise or
+   exit, no kept exception, and a depth that only matters inside native
+   calls, where it is non-zero anyway, so a new fiber loading it instead
+   would behave the same.) PHP keeps `EG(bailout)`, the VM stack and
    `EG(current_execute_data)` per fiber itself, so a bailout never jumps
    across stacks: inside a fiber it is caught by the fiber's own `zend_try`
    and re-raised by PHP in the context that resumed the fiber, where the
@@ -427,9 +431,12 @@ a fatal error, call `exit()` or throw. The rule `src/runtime.rs` follows:
    entries before calling any callback), so other contexts can use the
    registry and the engine freely. When PHP destroys a suspended fiber
    (last reference gone, cycle collection, or shutdown) it resumes it with
-   its internal graceful-exit object: `Fiber::suspend()` throws it, it
-   unwinds the callback, the trampoline parks it like an `exit()` (it is not
-   reported as one: `PhpError`/`CallbackError` say the fiber was destroyed),
+   its internal graceful-exit object (the harness covers all three: the
+   last reference dropped by `unset`, a reference cycle destroyed by
+   `gc_collect_cycles()`, and a fiber still parked at shutdown, as well as
+   the last reference held by Rust and released from the bridge's queue):
+   `Fiber::suspend()` throws it, it unwinds the callback, the trampoline
+   parks it like an `exit()` (it is not reported as one: `PhpError`/`CallbackError` say the fiber was destroyed),
    and the native call rethrows it, so the frames return normally and
    release what they hold. After a fatal error PHP marks every existing
    object destructed; a fiber suspended at that time is later freed without
@@ -510,8 +517,8 @@ x86_64 CI runner should be faster.
 
 ## Verification
 
-`cargo test -p speedyspec-php --test php` prints an `ok` line per check (52
-since Task 3's fourth fix round) and exits 0 on both targets.
+`cargo test -p speedyspec-php --test php` prints an `ok` line per check (57
+since Task 3's fifth fix round) and exits 0 on both targets.
 
 - **macOS arm64**, native: `otool -L` on the test binary lists only
   `libSystem`, `libresolv` and the CoreFoundation, CoreServices and

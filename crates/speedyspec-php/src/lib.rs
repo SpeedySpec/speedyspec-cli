@@ -23,3 +23,11 @@ pub const PHP_VERSION: &str = env!("SPEEDYSPEC_PHP_VERSION");
 pub fn php_entries() -> u64 {
     runtime::entries()
 }
+
+/// How many saved per-context records the fiber bookkeeping holds (contexts
+/// not running now, abandoned fibers included); tests use it to see records
+/// created, freed and forgotten.
+#[doc(hidden)]
+pub fn fiber_records() -> usize {
+    runtime::fiber_records()
+}

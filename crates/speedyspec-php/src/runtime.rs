@@ -800,6 +800,13 @@ pub(crate) fn entries() -> u64 {
     ENGINE.with(|e| e.entries.get())
 }
 
+/// How many per-context records are saved: one per context not running now
+/// (suspended fibers, the main context while a fiber runs, and records of
+/// fibers PHP abandoned).
+pub(crate) fn fiber_records() -> usize {
+    ENGINE.with(|e| e.contexts.borrow().len())
+}
+
 /// True from boot until the request ends in `Php::drop`.
 pub(crate) fn alive() -> bool {
     ENGINE.with(|e| e.alive.get())
