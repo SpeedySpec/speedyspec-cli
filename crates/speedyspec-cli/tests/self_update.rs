@@ -12,6 +12,11 @@ use speedyspec_testkit::{Route, Server};
 
 const NEW: &str = "#!/bin/sh\necho \"speedyspec 9.9.9\"\n";
 
+/// The version of the binary under test: what `version.txt` says, which release-please changes.
+fn version() -> &'static str {
+    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../version.txt")).trim()
+}
+
 fn asset() -> String {
     format!(
         "speedyspec-{}-{}",
@@ -94,9 +99,12 @@ fn check_reports_a_newer_release() {
     assert_eq!(out.code, 0, "{}", out.stderr);
     assert_eq!(
         out.stdout,
-        "speedyspec 9.9.9 is available (this is 0.0.0); run `speedyspec self update`\n"
+        format!(
+            "speedyspec 9.9.9 is available (this is {}); run `speedyspec self update`\n",
+            version()
+        )
     );
-    assert_eq!(first_line(&exe), "speedyspec 0.0.0");
+    assert_eq!(first_line(&exe), format!("speedyspec {}", version()));
     assert_eq!(
         paths(&server),
         vec!["/repos/SpeedySpec/speedyspec-cli/releases/latest"]
@@ -112,8 +120,9 @@ fn updates_the_copy() {
     assert_eq!(
         out.stdout,
         format!(
-            "updated {} from 0.0.0 to 9.9.9\n",
-            exe.canonicalize().unwrap().display()
+            "updated {} from {} to 9.9.9\n",
+            exe.canonicalize().unwrap().display(),
+            version()
         )
     );
     assert!(
@@ -144,11 +153,14 @@ fn updates_through_a_symlink() {
 
 #[test]
 fn up_to_date_is_not_an_error() {
-    let server = release("v0.0.0", true);
+    let server = release(&format!("v{}", version()), true);
     let (_dir, exe) = copy();
     let out = run(&exe, &server, &[], &["self", "update"]);
     assert_eq!(out.code, 0, "{}", out.stderr);
-    assert_eq!(out.stdout, "speedyspec 0.0.0 is the latest release\n");
+    assert_eq!(
+        out.stdout,
+        format!("speedyspec {} is the latest release\n", version())
+    );
     assert_eq!(paths(&server).len(), 1, "nothing was downloaded");
 }
 
@@ -176,7 +188,7 @@ fn assets_not_uploaded_yet() {
         "{}",
         out.stderr
     );
-    assert_eq!(first_line(&exe), "speedyspec 0.0.0");
+    assert_eq!(first_line(&exe), format!("speedyspec {}", version()));
 }
 
 #[test]
@@ -195,5 +207,5 @@ fn works_with_a_broken_plugin() {
 #[test]
 fn version_comes_from_version_txt() {
     let (_dir, exe) = copy();
-    assert_eq!(first_line(&exe), "speedyspec 0.0.0");
+    assert_eq!(first_line(&exe), format!("speedyspec {}", version()));
 }

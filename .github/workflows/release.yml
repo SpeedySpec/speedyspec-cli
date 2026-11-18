@@ -1,9 +1,12 @@
 name: Release
 
-# release-please keeps a release pull request open on main. Merging it tags the
-# version and publishes the GitHub release; this workflow then builds the four
-# binaries at that tag and uploads them with SHA256SUMS. Run it by hand with a
-# tag to rebuild and re-upload the binaries of a release that already exists.
+# release-please keeps a release pull request open on main. Merging it changes
+# version.txt to a version with no tag yet. This workflow then builds the four
+# binaries at that commit first, and only when every build passes lets
+# release-please tag and publish the release, uploading the binaries and
+# SHA256SUMS straight after. A failed build publishes nothing; the next push to
+# main tries again. Run it by hand with a tag to rebuild and re-upload the
+# binaries of a release that already exists.
 on:
   push:
     branches: [main]
@@ -23,8 +26,42 @@ permissions:
   contents: read
 
 jobs:
-  release-please:
+  # Whether this push carries a merged release pull request whose release does not exist yet.
+  pending:
     if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    outputs:
+      pending: ${{ steps.check.outputs.pending }}
+      tag: ${{ steps.check.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch tags
+        run: git fetch --tags --quiet origin
+
+      - name: Check version.txt against the tags
+        id: check
+        run: scripts/release-pending.sh | tee -a "$GITHUB_OUTPUT"
+
+  build:
+    needs: pending
+    # A pending release, or a dispatch (when the pending check is skipped).
+    if: >-
+      always() && !cancelled() &&
+      (needs.pending.outputs.pending == 'true' || github.event_name == 'workflow_dispatch')
+    uses: ./.github/workflows/build.yml
+    with:
+      ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.sha }}
+    permissions:
+      contents: read
+
+  release-please:
+    needs: [pending, build]
+    # On a push, unless this push's release failed to build.
+    if: >-
+      always() && !cancelled() && github.event_name == 'push' &&
+      needs.pending.result == 'success' &&
+      (needs.build.result == 'success' || needs.build.result == 'skipped')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -41,21 +78,11 @@ jobs:
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
-  build:
-    needs: release-please
-    # Runs for a new release, and for a dispatch (when release-please is skipped).
-    if: >-
-      always() && !cancelled() &&
-      (needs.release-please.outputs.release_created == 'true' || github.event_name == 'workflow_dispatch')
-    uses: ./.github/workflows/build.yml
-    with:
-      ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || needs.release-please.outputs.tag_name }}
-    permissions:
-      contents: read
-
   publish:
-    needs: [release-please, build]
-    if: always() && !cancelled() && needs.build.result == 'success'
+    needs: [build, release-please]
+    if: >-
+      always() && !cancelled() && needs.build.result == 'success' &&
+      (github.event_name == 'workflow_dispatch' || needs.release-please.outputs.release_created == 'true')
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -84,7 +111,10 @@ jobs:
       - name: Write SHA256SUMS
         run: scripts/release-sums.sh dist
 
+      # SHA256SUMS first: a binary is never there without the list that verifies it.
       - name: Upload to the release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$TAG" dist/speedyspec-* dist/SHA256SUMS --clobber --repo "$GITHUB_REPOSITORY"
+        run: |
+          gh release upload "$TAG" dist/SHA256SUMS --clobber --repo "$GITHUB_REPOSITORY"
+          gh release upload "$TAG" dist/speedyspec-* --clobber --repo "$GITHUB_REPOSITORY"

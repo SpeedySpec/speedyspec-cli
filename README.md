@@ -81,12 +81,16 @@ See `docs/php-embed.md` for how PHP is built, linked and embedded.
 
 Releases are cut by release-please. It keeps a pull request titled `chore: release <version>`
 open on `main`, with the changelog and `version.txt` (the version `--version` prints) updated
-from the Conventional Commits merged since the last release. Merging it tags the version and
-publishes the GitHub release; the Release workflow then builds, tests and smoke-runs the four
-binaries at that tag and uploads them with `SHA256SUMS`, about half an hour later. Until they
-are there, `self update` reports that the files are still being uploaded and the download
-addresses above return 404. If the build fails, fix it and run the Release workflow by hand
-(*Run workflow*) with the tag: it rebuilds and re-uploads that release's binaries.
+from the Conventional Commits merged since the last release. Check the title of the first one
+before merging it: it should be `chore: release 0.1.0`.
+
+Merging it leaves `version.txt` naming a version with no tag yet (`scripts/release-pending.sh`
+says so). The Release workflow then builds, tests and smoke-runs the four binaries at that
+commit first, about half an hour, and only when all four pass lets release-please tag the
+version and publish the GitHub release, uploading `SHA256SUMS` and then the binaries straight
+after. A failed build publishes nothing: fix it, and the next push to `main` tries again. To
+rebuild and re-upload the binaries of a release that already exists, run the Release workflow by
+hand (*Run workflow*) with its tag.
 
 ## Plugins
 
