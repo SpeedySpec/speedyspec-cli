@@ -419,8 +419,10 @@ a fatal error, call `exit()` or throw. The rule `src/boundary.rs` follows:
    callable itself released after the call) such an exception belongs to no
    one: `boundary::settle_stray` logs it to stderr
    (`speedyspec: discarded an uncaught ...`) and clears it, at the start and
-   end of each top-level entry and before shutdown, so the next call is not
-   blamed for it.
+   end of each top-level entry (including every PHP callback fired from
+   Rust, in `call_php`, before the call and after its post-call release when
+   the call succeeded) and before shutdown, so the next call is not blamed
+   for it and a callback's result is never replaced by it.
 5. **Exceptions and `exit()` are values, not jumps.** An exception is left in
    `EG(exception)` by PHP and taken out by the code that called in. A PHP
    callback's exception becomes that callback's `CallbackError`; when the

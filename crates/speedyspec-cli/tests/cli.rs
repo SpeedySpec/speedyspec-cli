@@ -374,6 +374,24 @@ fn one_bad_app_does_not_hide_the_others() {
     }
 }
 
+/// A bad return value whose destructor throws is dropped between callbacks; the exception must
+/// not be blamed on the next plugin's callback.
+#[test]
+fn throwing_destructor_of_a_rejected_value_does_not_blame_the_next_plugin() {
+    let out = run(&["dtor-bad", "good"], &["app", "list"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.stdout, "demo\tDemo\tzip?\n", "{}", out.stderr);
+    assert!(!out.stderr.contains("fixture/good"), "{}", out.stderr);
+    assert_eq!(
+        contract_lines(&out.stderr, "speedyspec_apps"),
+        [
+            "speedyspec: speedyspec-fixture/dtor-bad: speedyspec_apps: expected a list (an array keyed 0, 1, 2, ...)"
+        ],
+        "{}",
+        out.stderr
+    );
+}
+
 #[test]
 fn callback_added_from_init_is_attributed_to_its_plugin() {
     let out = run(&["good", "late-bad"], &["app", "list"]);

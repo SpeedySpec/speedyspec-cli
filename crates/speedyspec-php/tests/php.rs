@@ -1373,6 +1373,26 @@ fn case_stray_destructor_exception(ctx: &Ctx) -> Result<(), String> {
     drop(thrower().map_err(|e| e.to_string())?);
     let (err, out) = capture(2, || stdout_of(|| ctx.php.eval("t", "echo 'clean';")));
     eq(&out?, "clean")?;
+    discarded(err)?;
+
+    // A PHP callback fired from Rust is not blamed either: it returns its own
+    // value, and the destructor's exception is logged, not returned.
+    ctx.php
+        .eval(
+            "t",
+            "\\SpeedySpec\\Hooks\\Hook::add('stray.filter', static fn (int $v): int => $v + 1);",
+        )
+        .map_err(|e| e.to_string())?;
+    drop(thrower().map_err(|e| e.to_string())?);
+    let (err, filtered) = capture(2, || ctx.hooks.filter("stray.filter", Value::Int(1), &[]));
+    match filtered {
+        Ok(Value::Int(2)) => {}
+        other => {
+            return Err(format!(
+                "filter from Rust after a stray exception: {other:?}"
+            ));
+        }
+    }
     discarded(err)
 }
 

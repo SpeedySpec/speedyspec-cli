@@ -889,6 +889,13 @@ impl CallError {
 /// call is made from a dummy frame of an internal function, which is what
 /// calling from inside a native function looks like.
 pub(crate) fn call_php(callable: *mut zval, args: &[Value]) -> Result<Value, CallError> {
+    // Called from Rust with no PHP code running (a hook fired from Rust), values
+    // Rust let go of earlier must be released, and any exception their
+    // destructors throw cleared, before the call: otherwise the post-call drain
+    // below would release them and the callback would be blamed for (and lose
+    // its result to) an exception that is not its own. Inside a native call
+    // this does nothing.
+    settle_stray();
     // Owned here; the guard only sees pointers.
     let mut params: Vec<ManuallyDrop<Zval>> = args
         .iter()
@@ -938,7 +945,19 @@ pub(crate) fn call_php(callable: *mut zval, args: &[Value]) -> Result<Value, Cal
         release_later(param);
     }
     release_later(retval);
+    // What the call left in EG(exception) is the call's own; anything the
+    // releases below add while it was clear is not. (Releasing this call's
+    // own temporaries does not destroy objects on the success path: every
+    // object in the arguments is still held by `args`, and every object in
+    // the result by `value`. This keeps a successful result from ever being
+    // replaced by a release's exception regardless.)
+    // SAFETY: a plain read of the executor globals on the engine's thread.
+    let clear_before = matches!(called, Ok(Ok(true)))
+        && unsafe { (*ext_php_rs_executor_globals()).exception.is_null() };
     drain();
+    if clear_before {
+        settle_stray();
+    }
 
     match called {
         Err(interrupted) => {
