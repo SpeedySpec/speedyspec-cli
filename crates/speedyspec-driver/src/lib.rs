@@ -3,6 +3,7 @@
 
 mod contracts;
 mod driver;
+mod kubernetes;
 
 pub use contracts::{
     App, AppPart, Command, CommandArgument, CommandOption, ContractError, InstallOption,
@@ -13,3 +14,4 @@ pub use driver::{
     Driver, DriverError, DriverFlag, DriverInput, PluginRef, Prepared, Progress, UninstallInput,
     UninstallPlan,
 };
+pub use kubernetes::{KubernetesResources, WaitFor, decode_kubernetes_resources, value_to_json};
