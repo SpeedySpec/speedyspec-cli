@@ -82,6 +82,20 @@ impl MemoryHooks {
     }
 }
 
+impl MemoryHooks {
+    /// Takes the first entry of `hook` matching `matches` out of the registry. The entry is
+    /// returned rather than dropped in place: dropping it can release the callback's last
+    /// reference, which may run code that uses the registry again (a PHP destructor), so it
+    /// must happen after the borrow has ended. The caller drops it.
+    fn take_entry(&self, hook: &str, matches: impl Fn(&Entry) -> bool) -> Option<Entry> {
+        let mut inner = self.inner.borrow_mut();
+        let &i = inner.names.get(hook)?;
+        let entries = &mut inner.hooks[i].entries;
+        let at = entries.iter().position(matches)?;
+        Some(entries.remove(at))
+    }
+}
+
 fn callback_error(hook: &str, owner: &Option<String>, message: String) -> HookError {
     HookError {
         kind: HookErrorKind::Callback,
@@ -123,36 +137,15 @@ impl Hooks for MemoryHooks {
     }
 
     fn remove(&self, hook: &str, id: CallbackId) -> Result<bool, HookError> {
-        let mut inner = self.inner.borrow_mut();
-        let Some(&i) = inner.names.get(hook) else {
-            return Ok(false);
-        };
-        let entries = &mut inner.hooks[i].entries;
-        Ok(match entries.iter().position(|e| e.id == id) {
-            Some(at) => {
-                entries.remove(at);
-                true
-            }
-            None => false,
-        })
+        let removed = self.take_entry(hook, |e| e.id == id);
+        Ok(removed.is_some())
     }
 
     fn remove_keyed(&self, hook: &str, key: &str, priority: i64) -> Result<bool, HookError> {
-        let mut inner = self.inner.borrow_mut();
-        let Some(&i) = inner.names.get(hook) else {
-            return Ok(false);
-        };
-        let entries = &mut inner.hooks[i].entries;
-        let found = entries
-            .iter()
-            .position(|e| e.priority == priority && e.key.as_deref() == Some(key));
-        Ok(match found {
-            Some(at) => {
-                entries.remove(at);
-                true
-            }
-            None => false,
-        })
+        let removed = self.take_entry(hook, |e| {
+            e.priority == priority && e.key.as_deref() == Some(key)
+        });
+        Ok(removed.is_some())
     }
 
     fn has(&self, hook: &str) -> Result<bool, HookError> {

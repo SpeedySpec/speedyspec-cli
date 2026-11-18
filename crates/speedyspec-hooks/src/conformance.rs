@@ -65,6 +65,26 @@ pub fn run_all(make: &dyn Fn() -> SharedHooks, capabilities: Capabilities) {
             "extreme_priorities_order_and_remove",
             extreme_priorities_order_and_remove,
         ),
+        (
+            "filter_error_stops_chain_and_names_owner",
+            filter_error_stops_chain_and_names_owner,
+        ),
+        (
+            "accepted_args_truncates_filter",
+            accepted_args_truncates_filter,
+        ),
+        (
+            "has_keyed_false_for_other_key",
+            has_keyed_false_for_other_key,
+        ),
+        (
+            "callback_may_remove_another_during_run",
+            callback_may_remove_another_during_run,
+        ),
+        (
+            "callback_dropped_on_removal_may_reenter",
+            callback_dropped_on_removal_may_reenter,
+        ),
     ];
     for (name, case) in cases {
         // Name the case on failure; the assertion message alone would not.
@@ -242,7 +262,165 @@ fn error_stops_firing_and_names_owner(make: Make) {
     assert_eq!(err.kind, HookErrorKind::Callback);
     assert_eq!(err.hook, "h");
     assert_eq!(err.owner.as_deref(), Some("acme/p"));
+    // The callback's own text, verbatim: the PHP bridge matches on it.
+    assert_eq!(err.message, "boom");
     assert_eq!(*log.borrow(), ["first"]);
+}
+
+/// 2nd of 3 filter callbacks errs; 3rd not called; Callback error naming the owner
+fn filter_error_stops_chain_and_names_owner(make: Make) {
+    let hooks = make();
+    let third_called = Rc::new(Cell::new(false));
+    let third_in = Rc::clone(&third_called);
+    let plus_one: Rc<Callback> = Rc::new(|args| match args[0] {
+        Value::Int(n) => Ok(Value::Int(n + 1)),
+        _ => Err(CallbackError("not an int".into())),
+    });
+    hooks.add("f", plus_one, at(10)).unwrap();
+    let failing: Rc<Callback> = Rc::new(|_| Err(CallbackError("filter boom".into())));
+    hooks
+        .add(
+            "f",
+            failing,
+            AddOptions {
+                priority: 11,
+                owner: Some("acme/f".into()),
+                ..AddOptions::default()
+            },
+        )
+        .unwrap();
+    let third: Rc<Callback> = Rc::new(move |args| {
+        third_in.set(true);
+        Ok(args[0].clone())
+    });
+    hooks.add("f", third, at(12)).unwrap();
+
+    let err = hooks.filter("f", Value::Int(1), &[]).unwrap_err();
+    assert_eq!(err.kind, HookErrorKind::Callback);
+    assert_eq!(err.hook, "f");
+    assert_eq!(err.owner.as_deref(), Some("acme/f"));
+    assert_eq!(err.message, "filter boom");
+    assert!(!third_called.get());
+}
+
+/// filter with accepted_args 2 and value + 2 extra args: the callback sees 2;
+/// with accepted_args 0 it sees none and its return value still replaces the value
+fn accepted_args_truncates_filter(make: Make) {
+    let hooks = make();
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let seen_in = Rc::clone(&seen);
+    let two: Rc<Callback> = Rc::new(move |args| {
+        seen_in.borrow_mut().push(args.len());
+        Ok(args[0].clone())
+    });
+    hooks
+        .add(
+            "f",
+            two,
+            AddOptions {
+                accepted_args: 2,
+                ..at(10)
+            },
+        )
+        .unwrap();
+    let seen_in = Rc::clone(&seen);
+    let none: Rc<Callback> = Rc::new(move |args| {
+        seen_in.borrow_mut().push(args.len());
+        Ok(Value::Int(99))
+    });
+    hooks
+        .add(
+            "f",
+            none,
+            AddOptions {
+                accepted_args: 0,
+                ..at(20)
+            },
+        )
+        .unwrap();
+    let result = hooks
+        .filter("f", Value::Int(1), &[Value::Int(2), Value::Int(3)])
+        .unwrap();
+    assert_eq!(*seen.borrow(), [2, 0]);
+    assert_eq!(result, Value::Int(99));
+}
+
+/// has_keyed is false for a key nobody registered, and for a hook that does not exist
+fn has_keyed_false_for_other_key(make: Make) {
+    let hooks = make();
+    let log = log();
+    hooks.add("h", recorder(&log, "a"), keyed("k", 10)).unwrap();
+    assert_eq!(hooks.has_keyed("h", "k"), Ok(true));
+    assert_eq!(hooks.has_keyed("h", "other"), Ok(false));
+    assert_eq!(hooks.has_keyed("missing", "k"), Ok(false));
+}
+
+/// "a" removes "b" during a run: b still runs this time (changes apply from the
+/// next firing), and not the next time
+fn callback_may_remove_another_during_run(make: Make) {
+    let hooks = make();
+    let log = log();
+    let b_id: Rc<Cell<Option<CallbackId>>> = Rc::new(Cell::new(None));
+    let (h, log_in, b_in) = (Rc::clone(&hooks), Rc::clone(&log), Rc::clone(&b_id));
+    let a: Rc<Callback> = Rc::new(move |_| {
+        log_in.borrow_mut().push("a".to_owned());
+        if let Some(id) = b_in.take() {
+            assert_eq!(h.remove("h", id), Ok(true));
+        }
+        Ok(Value::Null)
+    });
+    hooks.add("h", a, at(10)).unwrap();
+    b_id.set(Some(hooks.add("h", recorder(&log, "b"), at(20)).unwrap()));
+
+    hooks.run("h", &[]).unwrap();
+    assert_eq!(*log.borrow(), ["a", "b"]);
+    log.borrow_mut().clear();
+    hooks.run("h", &[]).unwrap();
+    assert_eq!(*log.borrow(), ["a"]);
+}
+
+/// Releasing a removed callback may run code that uses the backend again (a PHP
+/// callback's last reference can run a destructor): removal must not hold the
+/// backend busy while the callback is released.
+fn callback_dropped_on_removal_may_reenter(make: Make) {
+    /// Uses the backend when dropped.
+    struct Reenters {
+        hooks: std::rc::Weak<dyn crate::Hooks>,
+        seen: Rc<Cell<bool>>,
+    }
+    impl Drop for Reenters {
+        fn drop(&mut self) {
+            if let Some(hooks) = self.hooks.upgrade() {
+                assert_eq!(hooks.has("other"), Ok(false));
+                hooks.run("other", &[]).unwrap();
+                self.seen.set(true);
+            }
+        }
+    }
+    let hooks = make();
+    let seen = Rc::new(Cell::new(false));
+    for removal in ["by id", "by key"] {
+        seen.set(false);
+        let reenters = Reenters {
+            hooks: Rc::downgrade(&hooks),
+            seen: Rc::clone(&seen),
+        };
+        let cb: Rc<Callback> = Rc::new(move |_| {
+            let _keep = &reenters;
+            Ok(Value::Null)
+        });
+        let id = hooks.add("h", cb, keyed("k", 10)).unwrap();
+        let removed = if removal == "by id" {
+            hooks.remove("h", id)
+        } else {
+            hooks.remove_keyed("h", "k", 10)
+        };
+        assert_eq!(removed, Ok(true), "{removal}");
+        assert!(
+            seen.get(),
+            "the callback was not released on removal {removal}"
+        );
+    }
 }
 
 /// callback adds another to same hook; first run calls 1, second 2
