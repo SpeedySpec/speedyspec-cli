@@ -4,20 +4,19 @@ use std::path::{Path, PathBuf};
 use crate::manifest::{MANIFEST_FILE, Plugin, PluginError, parse_manifest};
 
 /// Per-user plugin directory: `$SPEEDYSPEC_HOME/plugins`, or `<data dir>/speedyspec/plugins`.
-pub fn user_plugin_dir() -> PathBuf {
+/// `None` when no home is known; never a relative fallback, so nothing is loaded from the
+/// working directory on its own.
+pub fn user_plugin_dir() -> Option<PathBuf> {
     user_plugin_dir_from(
         std::env::var("SPEEDYSPEC_HOME").ok().as_deref(),
         dirs::data_dir(),
     )
 }
 
-fn user_plugin_dir_from(home: Option<&str>, data_dir: Option<PathBuf>) -> PathBuf {
+fn user_plugin_dir_from(home: Option<&str>, data_dir: Option<PathBuf>) -> Option<PathBuf> {
     match home {
-        Some(h) if !h.is_empty() => PathBuf::from(h).join("plugins"),
-        _ => data_dir
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("speedyspec")
-            .join("plugins"),
+        Some(h) if !h.is_empty() => Some(PathBuf::from(h).join("plugins")),
+        _ => data_dir.map(|d| d.join("speedyspec").join("plugins")),
     }
 }
 
@@ -157,17 +156,23 @@ mod tests {
     fn user_plugin_dir_prefers_speedyspec_home() {
         assert_eq!(
             user_plugin_dir_from(Some("/h"), Some("/data".into())),
-            std::path::Path::new("/h/plugins")
+            Some(std::path::PathBuf::from("/h/plugins"))
         );
     }
 
     #[test]
     fn user_plugin_dir_falls_back_to_data_dir() {
-        let expected = std::path::Path::new("/data/speedyspec/plugins");
+        let expected = Some(std::path::PathBuf::from("/data/speedyspec/plugins"));
         assert_eq!(user_plugin_dir_from(None, Some("/data".into())), expected);
         assert_eq!(
             user_plugin_dir_from(Some(""), Some("/data".into())),
             expected
         );
+    }
+
+    #[test]
+    fn user_plugin_dir_is_none_without_any_home() {
+        assert_eq!(user_plugin_dir_from(None, None), None);
+        assert_eq!(user_plugin_dir_from(Some(""), None), None);
     }
 }
