@@ -40,8 +40,8 @@ impl Kind {
 struct State {
     kinds: Vec<Kind>,
     objects: BTreeMap<ObjectKey, Json>,
-    /// `(method, kind, status, message)`: the next matching request fails this way.
-    failures: Vec<(String, String, u16, String)>,
+    /// `(method, kind, name or any, status, message)`: the next matching request fails this way.
+    failures: Vec<(String, String, Option<String>, u16, String)>,
     /// `(object, manager, field)`: fields another manager owns.
     owned: Vec<(ObjectKey, String, String)>,
     requests: Vec<Received>,
@@ -188,6 +188,25 @@ impl FakeCluster {
         self.lock().failures.push((
             method.to_owned(),
             kind.to_owned(),
+            None,
+            status,
+            message.to_owned(),
+        ));
+    }
+
+    /// As `fail_next`, but only for the object of that kind called `name`.
+    pub fn fail_next_named(
+        &self,
+        method: &str,
+        kind: &str,
+        name: &str,
+        status: u16,
+        message: &str,
+    ) {
+        self.lock().failures.push((
+            method.to_owned(),
+            kind.to_owned(),
+            Some(name.to_owned()),
             status,
             message.to_owned(),
         ));
@@ -386,9 +405,13 @@ fn object_request(
     if let Some(at) = state
         .failures
         .iter()
-        .position(|(method, failing, _, _)| *method == request.method && *failing == kind.kind)
+        .position(|(method, failing, named, _, _)| {
+            *method == request.method
+                && *failing == kind.kind
+                && named.as_deref().is_none_or(|named| named == name)
+        })
     {
-        let (_, _, code, message) = state.failures.remove(at);
+        let (_, _, _, code, message) = state.failures.remove(at);
         return status(code, "Invalid", &message);
     }
     let object_key = key(&kind.api_version(), &kind.kind, namespace, name);

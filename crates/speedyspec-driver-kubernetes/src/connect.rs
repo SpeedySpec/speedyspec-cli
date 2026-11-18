@@ -1,8 +1,12 @@
 //! Turning the user's flags into a connection to one cluster.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::io::Read;
+use std::time::Duration;
 
 use kube::Client;
+use kube::api::ApiResource;
 use kube::config::{Config, KubeConfigOptions, Kubeconfig};
 use speedyspec_driver::is_fetchable_url;
 use tokio::runtime::Runtime;
@@ -29,6 +33,10 @@ pub enum ConnectError {
 pub struct Connection {
     pub(crate) runtime: Runtime,
     pub(crate) client: Client,
+    /// What discovery has said about each kind asked for so far.
+    pub(crate) kinds: RefCell<HashMap<(String, String), (ApiResource, bool)>>,
+    /// How long an unknown kind is retried before it is reported.
+    pub(crate) discovery_wait: Duration,
 }
 
 /// Builds a connection from the flags, the token in the environment, and stdin (for
@@ -89,7 +97,12 @@ pub fn connect(
     let client = runtime
         .block_on(async { Client::try_from(config) })
         .map_err(|e| ConnectError::Failure(format!("could not set up the cluster client: {e}")))?;
-    Ok(Connection { runtime, client })
+    Ok(Connection {
+        runtime,
+        client,
+        kinds: RefCell::default(),
+        discovery_wait: Duration::from_secs(30),
+    })
 }
 
 /// The token to use, if one was given: the file (or stdin) wins over the environment.
@@ -162,6 +175,12 @@ pub(crate) fn explain(error: &kube::Error) -> String {
 }
 
 impl Connection {
+    /// How long a kind the cluster does not know is retried before it is reported. A resource
+    /// definition applied a moment ago takes a little while to be served.
+    pub fn set_discovery_wait(&mut self, wait: Duration) {
+        self.discovery_wait = wait;
+    }
+
     /// The cluster's version, for example `v1.34.1`.
     pub fn server_version(&self) -> Result<String, String> {
         self.runtime
