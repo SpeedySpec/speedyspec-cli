@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.0.1](https://github.com/SpeedySpec/speedyspec-cli/compare/v1.0.0...v1.0.1) (2026-11-18)
+
+
+### Bug Fixes
+
+* release builds on Intel macOS and Linux aarch64 ([#5](https://github.com/SpeedySpec/speedyspec-cli/issues/5)) ([49fe5c2](https://github.com/SpeedySpec/speedyspec-cli/commit/49fe5c2b9b7582290d174e226ceb4be5b00b21e5))
+
 ## 1.0.0 (2026-11-18)
 
 
