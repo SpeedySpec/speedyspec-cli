@@ -24,20 +24,36 @@ fn wordpress_example_loads_and_is_listed() {
         .output()
         .unwrap();
     assert_eq!(String::from_utf8_lossy(&output.stderr), "");
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "wordpress\tWordPress\tzip\n");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "wordpress\tWordPress\tzip\n"
+    );
     assert_eq!(output.status.code(), Some(0));
 }
 
 #[test]
 fn wordpress_example_follows_the_php_style() {
     let source = fs::read_to_string(example("install-wordpress").join("plugin.php")).unwrap();
-    assert!(source.starts_with("<?php\n\ndeclare(strict_types=1);\n"), "{source}");
-    assert!(source.ends_with("}\n") || source.ends_with(";\n"), "must end with one newline");
+    assert!(
+        source.starts_with("<?php\n\ndeclare(strict_types=1);\n"),
+        "{source}"
+    );
+    assert!(
+        source.ends_with("}\n") || source.ends_with(";\n"),
+        "must end with one newline"
+    );
     assert!(!source.ends_with("\n\n"), "no trailing blank lines");
     for (number, line) in source.lines().enumerate() {
         let number = number + 1;
         assert!(!line.contains('\t'), "line {number} has a tab");
-        assert!(line.len() <= 120, "line {number} is longer than 120 characters");
-        assert_eq!(line.trim_end(), line, "line {number} has trailing whitespace");
+        assert!(
+            line.len() <= 120,
+            "line {number} is longer than 120 characters"
+        );
+        assert_eq!(
+            line.trim_end(),
+            line,
+            "line {number} has trailing whitespace"
+        );
     }
 }
