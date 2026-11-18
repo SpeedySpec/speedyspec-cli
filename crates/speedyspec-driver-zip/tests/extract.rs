@@ -4,7 +4,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use sha2::{Digest, Sha256};
-use speedyspec_driver_zip::{Archive, ExtractError, FetchError, HttpFetch, fetch_and_extract};
+use speedyspec_driver_zip::{
+    Archive, ExtractError, FetchError, HttpFetch, Limits, fetch_and_extract, fetch_and_extract_with,
+};
 use speedyspec_testkit::{Entry, Route, Server, build_zip};
 use tempfile::TempDir;
 
@@ -235,6 +237,100 @@ fn symlink_outside_is_rejected() {
         );
         area.assert_untouched();
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_chain_that_climbs_out_is_rejected() {
+    // Each link's target reads as inside, but on disk `up` is the parent of the target
+    // directory and `up2` its grandparent.
+    let (_server, url) = serve(&[
+        ("ok.txt", Entry::file("fine")),
+        ("a", Entry::Symlink(".".to_owned())),
+        ("up", Entry::Symlink("a/..".to_owned())),
+        ("up2", Entry::Symlink("up/..".to_owned())),
+    ]);
+    let area = Area::new();
+    let entry = unsafe_entry(extract(&area, &url, None, 0));
+    assert!(entry == "up" || entry == "up2", "{entry}");
+    area.assert_untouched();
+}
+
+#[cfg(unix)]
+#[test]
+fn dangling_symlink_is_rejected() {
+    let (_server, url) = serve(&[
+        ("a.txt", Entry::file("A")),
+        ("link", Entry::Symlink("./missing".to_owned())),
+    ]);
+    let area = Area::new();
+    assert_eq!(unsafe_entry(extract(&area, &url, None, 0)), "link");
+    area.assert_untouched();
+}
+
+#[cfg(unix)]
+#[test]
+fn symlink_with_a_parent_segment_that_stays_inside_is_allowed() {
+    let (_server, url) = serve(&[
+        ("pkg/bin/tool", Entry::file("#!/bin/sh")),
+        ("bin/tool", Entry::Symlink("../pkg/bin/tool".to_owned())),
+    ]);
+    let area = Area::new();
+    extract(&area, &url, None, 0).unwrap();
+    assert_eq!(area.read("bin/tool"), "#!/bin/sh");
+}
+
+#[cfg(unix)]
+#[test]
+fn overlong_symlink_target_is_rejected() {
+    let (_server, url) = serve(&[
+        ("a.txt", Entry::file("A")),
+        ("link", Entry::Symlink("x/".repeat(3000))),
+    ]);
+    let area = Area::new();
+    assert_eq!(unsafe_entry(extract(&area, &url, None, 0)), "link");
+    area.assert_untouched();
+}
+
+#[test]
+fn download_larger_than_the_limit_is_refused() {
+    let (_server, url) = serve(&[("a.txt", Entry::File(vec![b'x'; 5000], 0o644))]);
+    let area = Area::new();
+    let archive = Archive {
+        url: &url,
+        sha256: None,
+        strip_components: 0,
+    };
+    let limits = Limits {
+        download_bytes: 1000,
+        ..Limits::default()
+    };
+    let result = fetch_and_extract_with(&archive, &area.target(), &HttpFetch::new(), &limits);
+    let message = result.unwrap_err().to_string();
+    assert!(message.contains("1000 bytes"), "{message}");
+    area.assert_untouched();
+}
+
+#[test]
+fn unpacking_more_than_the_limit_is_refused() {
+    let (_server, url) = serve(&[
+        ("a.txt", Entry::File(vec![b'x'; 600], 0o644)),
+        ("b.txt", Entry::File(vec![b'y'; 600], 0o644)),
+    ]);
+    let area = Area::new();
+    let archive = Archive {
+        url: &url,
+        sha256: None,
+        strip_components: 0,
+    };
+    let limits = Limits {
+        unpacked_bytes: 1000,
+        ..Limits::default()
+    };
+    let result = fetch_and_extract_with(&archive, &area.target(), &HttpFetch::new(), &limits);
+    let message = result.unwrap_err().to_string();
+    assert!(message.contains("1000 bytes"), "{message}");
+    area.assert_untouched();
 }
 
 #[cfg(unix)]

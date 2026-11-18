@@ -364,3 +364,29 @@ fn bad_source_is_a_usage_error() {
     assert_eq!(out.code, 2);
     assert!(out.stderr.contains("owner/repo"), "{}", out.stderr);
 }
+
+#[test]
+fn remove_refuses_names_that_are_not_plugin_names() {
+    let home = TempDir::new().unwrap();
+    fs::create_dir_all(plugins_dir(home.path()).join("acme.one")).unwrap();
+    fs::write(home.path().join("precious.txt"), "keep").unwrap();
+    for name in ["..", ".", "", "acme", "../x"] {
+        let out = Speedyspec::with_home(&[], home.path()).run(&[
+            "--no-plugins",
+            "plugin",
+            "remove",
+            "--yes",
+            "--",
+            name,
+        ]);
+        assert_eq!(out.code, 2, "{name:?}: {}", out.stderr);
+        assert!(
+            out.stderr.contains("is not a plugin name"),
+            "{name:?}: {}",
+            out.stderr
+        );
+        assert_eq!(out.stdout, "");
+    }
+    assert_eq!(listing(home.path()), vec!["plugins", "precious.txt"]);
+    assert_eq!(listing(&plugins_dir(home.path())), vec!["acme.one"]);
+}

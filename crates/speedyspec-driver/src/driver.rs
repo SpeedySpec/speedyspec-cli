@@ -25,6 +25,10 @@ pub struct DriverFlag {
 
 /// What the user gave a driver.
 pub struct DriverInput<'a> {
+    /// The app being installed and its selected parts, for drivers that name or label what
+    /// they create after them.
+    pub app: &'a str,
+    pub parts: &'a [String],
     /// The driver's flags that were given, by name; a switch that was given is `"1"`.
     pub flags: &'a BTreeMap<String, String>,
     /// Whether the driver may ask the user questions.
@@ -65,6 +69,10 @@ pub trait Driver {
 
     /// Checks the user's flags before any plugin is asked for anything.
     fn prepare(&self, input: &DriverInput<'_>) -> Result<Prepared, DriverError>;
+
+    /// What the driver's filter starts from, before any plugin has answered: an empty list
+    /// for a driver whose answer is a list, null for one whose answer is a single object.
+    fn seed(&self) -> Value;
 
     /// Checks what one plugin callback returned on the driver's filter.
     fn check_answer(&self, answer: &Value, reader: &dyn ObjectReader) -> Result<(), ContractError>;

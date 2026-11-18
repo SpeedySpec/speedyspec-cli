@@ -377,6 +377,8 @@ pub fn install(runtime: &Runtime, matches: &ArgMatches, prepass: Option<Prepass>
         }
     }
     let prepared = match driver.prepare(&DriverInput {
+        app: &choices.app,
+        parts: &choices.parts,
         flags: &flags,
         interactive: may_ask,
     }) {
@@ -433,11 +435,9 @@ pub fn install(runtime: &Runtime, matches: &ArgMatches, prepass: Option<Prepass>
         );
     runtime.php.redirect_output(Output::Stderr);
     runtime.hooks.validate(&hook, validator);
-    let answer = runtime.hooks.filter(
-        &hook,
-        Value::Array(Vec::new()),
-        std::slice::from_ref(&request),
-    );
+    let answer = runtime
+        .hooks
+        .filter(&hook, driver.seed(), std::slice::from_ref(&request));
     runtime.hooks.clear_validators();
     runtime.php.redirect_output(Output::Stdout);
     let rejections = runtime.hooks.take_rejections();

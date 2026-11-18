@@ -1,6 +1,8 @@
 //! `HttpFetch` against a loopback server.
 
 use speedyspec_driver_zip::{Fetch, FetchError, HttpFetch};
+use std::time::{Duration, Instant};
+
 use speedyspec_testkit::{Route, Server};
 
 fn fetch(url: &str) -> (Result<u64, FetchError>, Vec<u8>) {
@@ -90,4 +92,32 @@ fn errors_name_the_url() {
     let message = result.unwrap_err().to_string();
     assert!(message.contains(&url), "{message}");
     assert!(message.contains("404"), "{message}");
+}
+
+#[test]
+fn a_server_that_never_answers_times_out() {
+    let server = Server::start(vec![("/stall", Route::stalled("", 0))]);
+    let fetch = HttpFetch::with_timeouts(Duration::from_millis(300), Duration::from_millis(300));
+    let started = Instant::now();
+    let mut body = Vec::new();
+    let result = fetch.fetch(&format!("{}/stall", server.url()), &mut body);
+    assert!(matches!(result, Err(FetchError::Io { .. })), "{result:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "must not wait for the server"
+    );
+}
+
+#[test]
+fn a_body_that_stalls_times_out() {
+    let server = Server::start(vec![("/stall", Route::stalled("0123456789", 3))]);
+    let fetch = HttpFetch::with_timeouts(Duration::from_secs(5), Duration::from_millis(300));
+    let started = Instant::now();
+    let mut body = Vec::new();
+    let result = fetch.fetch(&format!("{}/stall", server.url()), &mut body);
+    assert!(matches!(result, Err(FetchError::Io { .. })), "{result:?}");
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "must not wait for the server"
+    );
 }

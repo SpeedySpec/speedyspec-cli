@@ -78,6 +78,10 @@ impl Driver for ZipDriver {
         })
     }
 
+    fn seed(&self) -> Value {
+        Value::Array(Vec::new())
+    }
+
     fn check_answer(&self, answer: &Value, reader: &dyn ObjectReader) -> Result<(), ContractError> {
         decode_sources(answer, reader).map(|_| ())
     }

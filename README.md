@@ -124,8 +124,13 @@ plugin gave one, unpacks everything into a staging directory, and only then move
 under `--base` (default: the working directory). A destination that already holds files is
 refused unless `--force` is given. `--force` merges: files of the same path are replaced,
 everything else is left, nothing is deleted. A failed download or a bad archive changes nothing.
-Archive entries that would land outside their destination (`..`, absolute paths, symbolic links
-leading out) are refused. On success the command prints one line per destination,
+Archive entries that would land outside their destination (`..`, absolute paths) are refused,
+and so is any symbolic link that, followed for real, leads outside it or nowhere. Each
+destination is checked again just before it is filled, so an earlier archive cannot redirect a
+later one. A download is given up after a minute without an answer, half an hour in all, or
+4 GiB; an archive may unpack to at most 16 GiB. A redirect from `https` to plain `http` is
+refused. A staging directory left in the base by an interrupted run (`.speedyspec-staging-*`)
+is removed by the next install there, so do not run two installs into one base at once. On success the command prints one line per destination,
 `<destination>\t<absolute path>`.
 
 `app install` refuses to run if a plugin hit a fatal error while loading, and it installs
@@ -181,7 +186,8 @@ asks for confirmation, or needs `--yes` when it cannot ask. The archive must hol
 and whose `contracts` range this binary satisfies. Plugins are stored in the user plugin
 directory as `<vendor>.<name>`; an installed plugin of the same name is replaced only once the
 new one has validated. Both commands work when an installed plugin is broken, and with
-`--no-plugins`. Only plugins in the user plugin directory can be removed.
+`--no-plugins`. Only plugins in the user plugin directory can be removed. The name must be a plugin name
+(`vendor/package`); anything else is refused before any path is looked at.
 
 ## Hooks fired in this version
 

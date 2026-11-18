@@ -14,6 +14,9 @@ use speedyspec_driver::{Progress, ZipSource};
 use crate::extract::{Archive, ExtractError, fetch_and_extract};
 use crate::fetch::Fetch;
 
+/// What every staging directory's name starts with.
+const STAGING_PREFIX: &str = ".speedyspec-staging-";
+
 /// Where one source ended up.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Placement {
@@ -93,6 +96,9 @@ pub fn install_sources(
 ) -> Result<Vec<Placement>, InstallError> {
     fs::create_dir_all(base).map_err(|e| io_error(base, &e))?;
     let base = base.canonicalize().map_err(|e| io_error(base, &e))?;
+    // An interrupted run cannot clean up after itself. What it left is never part of an
+    // install, so it must neither count as "not empty" nor pile up.
+    remove_stale_staging(&base);
 
     let mut targets = Vec::with_capacity(sources.len());
     for source in sources {
@@ -116,7 +122,7 @@ pub fn install_sources(
 
     // Removed when dropped, on every path out of this function.
     let staging = tempfile::Builder::new()
-        .prefix(".speedyspec-staging-")
+        .prefix(STAGING_PREFIX)
         .tempdir_in(&base)
         .map_err(|e| io_error(&base, &e))?;
     let mut staged = Vec::with_capacity(sources.len());
@@ -135,10 +141,17 @@ pub fn install_sources(
 
     let mut journal = Journal::default();
     let mut placed = Vec::with_capacity(sources.len());
-    for ((source, target), from) in sources.iter().zip(&targets).zip(&staged) {
+    for (source, from) in sources.iter().zip(&staged) {
         progress.step(&format!("placing {}", source.destination));
-        let moved = create_directories(target, &mut journal)
-            .and_then(|()| merge(from, target, &base, &mut journal));
+        // Resolved again, now: the disk has changed since the first look (earlier sources
+        // have been placed), and a destination must not have become a way out of the base.
+        let target = resolve_destination(&base, &source.destination);
+        let moved = match &target {
+            Some(target) => create_directories(target, &mut journal)
+                .and_then(|()| inside(&base, target))
+                .and_then(|()| merge(from, target, &base, &mut journal)),
+            None => Err((base.join(&source.destination), OUTSIDE.to_owned())),
+        };
         if let Err((path, message)) = moved {
             if force {
                 return Err(InstallError::Partial {
@@ -149,15 +162,49 @@ pub fn install_sources(
             }
             // Nothing was there before, so everything this run placed can go again.
             journal.undo();
+            if message == OUTSIDE {
+                return Err(InstallError::OutsideBase {
+                    destination: source.destination.clone(),
+                });
+            }
             return Err(InstallError::Io { path, message });
         }
         placed.push(Placement {
             url: source.url.clone(),
             destination: source.destination.clone(),
-            path: target.clone(),
+            path: target.expect("a source without a target was reported above"),
         });
     }
     Ok(placed)
+}
+
+/// The message for a destination that leads outside the base directory.
+const OUTSIDE: &str = "leads outside the base directory through a symbolic link";
+
+/// Removes what an interrupted install left in `base`. Best effort.
+fn remove_stale_staging(base: &Path) {
+    let Ok(entries) = fs::read_dir(base) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let is_staging = entry
+            .file_name()
+            .to_string_lossy()
+            .starts_with(STAGING_PREFIX);
+        let path = entry.path();
+        if is_staging && fs::symlink_metadata(&path).is_ok_and(|found| found.is_dir()) {
+            let _ = fs::remove_dir_all(&path);
+        }
+    }
+}
+
+/// Fails unless `target`, as the disk resolves it, is inside `base`.
+fn inside(base: &Path, target: &Path) -> Result<(), MoveError> {
+    match target.canonicalize() {
+        Ok(resolved) if resolved.starts_with(base) => Ok(()),
+        Ok(_) => Err((target.to_path_buf(), OUTSIDE.to_owned())),
+        Err(error) => Err(move_error(target, &error)),
+    }
 }
 
 fn io_error(path: &Path, error: &io::Error) -> InstallError {

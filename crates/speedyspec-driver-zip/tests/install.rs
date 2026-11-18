@@ -16,10 +16,14 @@ use speedyspec_hooks::{Key, Value};
 use speedyspec_testkit::{Entry, build_zip};
 use tempfile::TempDir;
 
+type OnFetch = Box<dyn Fn(&str)>;
+
 /// Serves archives from memory; a URL it does not know is an HTTP 500.
 #[derive(Default)]
 struct FakeFetch {
     archives: HashMap<String, Vec<u8>>,
+    /// Called with each URL as it is fetched, to change the disk mid-install.
+    on_fetch: Option<OnFetch>,
 }
 
 impl FakeFetch {
@@ -31,6 +35,9 @@ impl FakeFetch {
 
 impl Fetch for FakeFetch {
     fn fetch(&self, url: &str, to: &mut dyn Write) -> Result<u64, FetchError> {
+        if let Some(hook) = &self.on_fetch {
+            hook(url);
+        }
         let Some(bytes) = self.archives.get(url) else {
             return Err(FetchError::Status {
                 url: url.to_owned(),
@@ -309,7 +316,18 @@ fn force_does_not_write_through_outside_symlink() {
     fs::create_dir(base.path().join("site")).unwrap();
     std::os::unix::fs::symlink(outside.path(), base.path().join("site/js")).unwrap();
     let result = install(&[source(WEB, "site")], base.path(), true, &three());
-    assert!(result.is_err(), "{result:?}");
+    match result {
+        Err(InstallError::Partial {
+            placed,
+            failed,
+            message,
+        }) => {
+            assert!(placed.is_empty());
+            assert_eq!(failed, "site");
+            assert!(message.contains("symbolic link"), "{message}");
+        }
+        other => panic!("{other:?}"),
+    }
     assert_eq!(
         fs::read_dir(outside.path()).unwrap().count(),
         0,
@@ -333,6 +351,98 @@ fn later_source_replaces_an_earlier_one_at_the_same_path() {
         fs::read_to_string(base.path().join("a.txt")).unwrap(),
         "two"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn destination_is_rechecked_before_placing() {
+    // The destination is fine when the install starts; by the time the second source is
+    // placed, something has turned its parent into a link leading outside the base.
+    let base = TempDir::new().unwrap();
+    let outside = TempDir::new().unwrap();
+    let (link, target) = (base.path().join("later"), outside.path().to_path_buf());
+    let mut fetch = three();
+    fetch.on_fetch = Some(Box::new(move |url| {
+        if url == DOCS {
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+        }
+    }));
+    let sources = [source(WEB, "first"), source(DOCS, "later/x")];
+    match install(&sources, base.path(), false, &fetch) {
+        Err(InstallError::OutsideBase { destination }) => assert_eq!(destination, "later/x"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(
+        fs::read_dir(outside.path()).unwrap().count(),
+        0,
+        "outside must be unchanged"
+    );
+    assert_eq!(
+        files(base.path()),
+        vec!["later"],
+        "what the first source placed is undone"
+    );
+    no_staging_left(base.path());
+}
+
+#[test]
+fn stale_staging_does_not_block_or_linger() {
+    let base = TempDir::new().unwrap();
+    let stale = base.path().join(".speedyspec-staging-old/0");
+    fs::create_dir_all(&stale).unwrap();
+    fs::write(stale.join("half.txt"), "left by an interrupted run").unwrap();
+    install(&[source(WEB, ".")], base.path(), false, &three()).unwrap();
+    assert_eq!(files(base.path()), vec!["index.html", "js/app.js"]);
+    no_staging_left(base.path());
+}
+
+fn clashing() -> FakeFetch {
+    FakeFetch::default()
+        .with(
+            "https://x.test/dir.zip",
+            &[("x/y.txt", Entry::file("in a directory"))],
+        )
+        .with(
+            "https://x.test/file.zip",
+            &[("x", Entry::file("a file named x"))],
+        )
+}
+
+#[test]
+fn failed_move_undoes_what_was_placed() {
+    let base = TempDir::new().unwrap();
+    let sources = [
+        source("https://x.test/dir.zip", "."),
+        source("https://x.test/file.zip", "./"),
+    ];
+    let result = install(&sources, base.path(), false, &clashing());
+    assert!(matches!(result, Err(InstallError::Io { .. })), "{result:?}");
+    assert_eq!(
+        fs::read_dir(base.path()).unwrap().count(),
+        0,
+        "everything placed is removed"
+    );
+}
+
+#[test]
+fn failed_move_with_force_reports_what_was_placed() {
+    let base = TempDir::new().unwrap();
+    fs::write(base.path().join("keep.txt"), "mine").unwrap();
+    let sources = [
+        source("https://x.test/dir.zip", "."),
+        source("https://x.test/file.zip", "./"),
+    ];
+    match install(&sources, base.path(), true, &clashing()) {
+        Err(InstallError::Partial { placed, failed, .. }) => {
+            assert_eq!(placed.len(), 1);
+            assert_eq!(placed[0].url, "https://x.test/dir.zip");
+            assert_eq!(failed, "./");
+        }
+        other => panic!("{other:?}"),
+    }
+    // With --force nothing is taken away again: what was placed stays, and so does what was there.
+    assert_eq!(files(base.path()), vec!["keep.txt", "x/y.txt"]);
+    no_staging_left(base.path());
 }
 
 #[test]
@@ -406,6 +516,8 @@ fn flags(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
 fn prepare(driver: &ZipDriver, given: &BTreeMap<String, String>) -> speedyspec_driver::Prepared {
     driver
         .prepare(&DriverInput {
+            app: "site",
+            parts: &[],
             flags: given,
             interactive: false,
         })
@@ -422,6 +534,11 @@ fn driver_describes_itself() {
         .map(|f| (f.name, f.takes_value))
         .collect();
     assert_eq!(names, vec![("base", true), ("force", false)]);
+}
+
+#[test]
+fn driver_filter_starts_from_an_empty_list() {
+    assert_eq!(ZipDriver::new().seed(), Value::Array(Vec::new()));
 }
 
 #[test]

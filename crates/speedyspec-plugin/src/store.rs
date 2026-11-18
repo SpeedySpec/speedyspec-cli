@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::manifest::{PluginError, read_plugin};
+use crate::manifest::{PluginError, read_plugin, valid_name};
 
 /// The directory an installed plugin gets: `vendor/name` becomes `vendor.name`. A dot cannot
 /// appear in a plugin name, so two names never share a directory.
@@ -15,6 +15,11 @@ pub fn directory_name(plugin_name: &str) -> String {
 /// that name, or, when no manifest matches, the directory that name would be installed to (so a
 /// plugin with a broken manifest can still be replaced or removed).
 pub fn find_installed(plugins_dir: &Path, plugin_name: &str) -> Option<PathBuf> {
+    // The name becomes a path below; anything that is not a plugin name could lead out of the
+    // plugins directory ("..", an absolute path).
+    if !valid_name(plugin_name) {
+        return None;
+    }
     let mut candidates: Vec<PathBuf> = fs::read_dir(plugins_dir)
         .ok()?
         .flatten()
@@ -37,6 +42,11 @@ pub fn find_installed(plugins_dir: &Path, plugin_name: &str) -> Option<PathBuf> 
 /// Deletes the installed plugin called `plugin_name` and returns the directory it was in. A
 /// plugin directory that is a symbolic link is unlinked; what it points at is left alone.
 pub fn remove_installed(plugins_dir: &Path, plugin_name: &str) -> Result<PathBuf, PluginError> {
+    if !valid_name(plugin_name) {
+        return Err(PluginError::InvalidName {
+            name: plugin_name.to_owned(),
+        });
+    }
     let Some(dir) = find_installed(plugins_dir, plugin_name) else {
         return Err(PluginError::NotInstalled {
             name: plugin_name.to_owned(),
@@ -120,6 +130,34 @@ mod tests {
             "{error}"
         );
         assert_eq!(listing(plugins.path()), vec!["acme.one"]);
+    }
+
+    #[test]
+    fn names_that_are_not_plugin_names_touch_nothing() {
+        let home = tempfile::tempdir().unwrap();
+        let plugins = home.path().join("plugins");
+        write_plugin(&plugins.join("acme.one"), "acme/one", "plugin.php");
+        fs::write(home.path().join("precious.txt"), "keep").unwrap();
+        for name in [
+            "..",
+            ".",
+            "",
+            "acme",
+            "../x",
+            "acme/..",
+            "acme/one/x",
+            "/etc",
+            "acme.one",
+        ] {
+            assert_eq!(find_installed(&plugins, name), None, "{name:?}");
+            let error = remove_installed(&plugins, name).unwrap_err();
+            assert!(
+                error.to_string().contains("is not a plugin name"),
+                "{name:?}: {error}"
+            );
+        }
+        assert_eq!(listing(&plugins), vec!["acme.one"]);
+        assert_eq!(listing(home.path()), vec!["plugins", "precious.txt"]);
     }
 
     #[cfg(unix)]

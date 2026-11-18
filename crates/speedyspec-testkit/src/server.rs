@@ -15,6 +15,11 @@ pub enum Behaviour {
     TruncateAfter(usize),
     /// Answers `302` with this `Location`.
     RedirectTo(String),
+    /// Sends the headers and this many body bytes (with `StallBeforeHeaders`, nothing at all),
+    /// then keeps the connection open without sending more until the server stops.
+    StallAfter(usize),
+    /// Reads the request and never answers.
+    StallBeforeHeaders,
 }
 
 /// What the server sends for one path.
@@ -47,6 +52,22 @@ impl Route {
             status: 302,
             body: Vec::new(),
             behaviour: Behaviour::RedirectTo(to.into()),
+        }
+    }
+
+    /// A route that stalls: with an empty body it never answers at all; otherwise it sends
+    /// `after` bytes of the body and then goes quiet.
+    pub fn stalled(body: impl Into<Vec<u8>>, after: usize) -> Route {
+        let body = body.into();
+        let behaviour = if body.is_empty() {
+            Behaviour::StallBeforeHeaders
+        } else {
+            Behaviour::StallAfter(after)
+        };
+        Route {
+            status: 200,
+            body,
+            behaviour,
         }
     }
 
@@ -99,7 +120,7 @@ impl Server {
                     }
                     if let Ok(stream) = stream {
                         // A broken connection is the client's business (some tests cause it).
-                        let _ = serve(stream, &routes, &requests);
+                        let _ = serve(stream, &routes, &requests, &stop);
                     }
                 }
             })
@@ -147,6 +168,7 @@ fn serve(
     mut stream: TcpStream,
     routes: &Mutex<HashMap<String, Route>>,
     requests: &Mutex<Vec<Request>>,
+    stop: &AtomicBool,
 ) -> std::io::Result<()> {
     let mut reader = BufReader::new(stream.try_clone()?);
     let mut line = String::new();
@@ -178,6 +200,17 @@ fn serve(
             b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
         );
     };
+    // Holds the connection open and silent until the server is dropped.
+    let stall = |stream: &TcpStream| {
+        while !stop.load(Ordering::SeqCst) {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let _ = stream.shutdown(std::net::Shutdown::Both);
+    };
+    if matches!(route.behaviour, Behaviour::StallBeforeHeaders) {
+        stall(&stream);
+        return Ok(());
+    }
     let mut head = format!(
         "HTTP/1.1 {} X\r\nContent-Length: {}\r\nConnection: close\r\n",
         route.status,
@@ -189,9 +222,15 @@ fn serve(
     head.push_str("\r\n");
     stream.write_all(head.as_bytes())?;
     let body = match route.behaviour {
-        Behaviour::TruncateAfter(n) => &route.body[..n.min(route.body.len())],
+        Behaviour::TruncateAfter(n) | Behaviour::StallAfter(n) => {
+            &route.body[..n.min(route.body.len())]
+        }
         _ => &route.body[..],
     };
     stream.write_all(body)?;
-    stream.flush()
+    stream.flush()?;
+    if matches!(route.behaviour, Behaviour::StallAfter(_)) {
+        stall(&stream);
+    }
+    Ok(())
 }

@@ -13,7 +13,7 @@ use speedyspec_driver::is_fetchable_url;
 use speedyspec_driver_zip::{Archive, Fetch, FetchError, HttpFetch, fetch_and_extract};
 use speedyspec_plugin::{
     MANIFEST_FILE, directory_name, find_installed, parse_manifest, remove_installed,
-    user_plugin_dir,
+    user_plugin_dir, valid_name,
 };
 
 use crate::boot::CONTRACTS_VERSION;
@@ -128,7 +128,15 @@ pub fn resolve_github(
     if !is_fetchable_url(url) {
         return Err(format!("{wanted}: refusing to download from {url}"));
     }
-    let tag_name = release["tag_name"].as_str().or(tag).unwrap_or("latest");
+    // Shown to the user before they confirm, and written by whoever runs the server: nothing
+    // in it may move the cursor or recolour the terminal.
+    let tag_name: String = release["tag_name"]
+        .as_str()
+        .or(tag)
+        .unwrap_or("latest")
+        .chars()
+        .filter(|c| !c.is_control())
+        .collect();
     Ok(Resolved {
         url: url.to_owned(),
         strip_components,
@@ -306,6 +314,13 @@ fn try_remove(matches: &ArgMatches) -> Result<(), i32> {
         eprintln!("speedyspec: {error}");
         1
     };
+    if !valid_name(name) {
+        eprintln!(
+            "speedyspec: {}",
+            speedyspec_plugin::PluginError::InvalidName { name: name.clone() }
+        );
+        return Err(2);
+    }
     if find_installed(&plugins, name).is_none() {
         return Err(fail(speedyspec_plugin::PluginError::NotInstalled {
             name: name.clone(),
@@ -471,6 +486,24 @@ mod tests {
             FakeApi::json(r#"{"tag_name":"v1","zipball_url":"http://evil.test/z","assets":[]}"#);
         let error = resolve_github("acme", "plugin", None, API, &api).unwrap_err();
         assert!(error.contains("http://evil.test/z"), "{error}");
+    }
+
+    #[test]
+    fn github_tag_name_cannot_carry_control_characters() {
+        let api = FakeApi::json(
+            r#"{"tag_name":"v1\u001b[2Jevil\u0007","zipball_url":"https://x.test/z","assets":[]}"#,
+        );
+        let resolved = resolve_github("acme", "plugin", None, API, &api).unwrap();
+        assert!(
+            resolved.describe.contains("v1[2Jevil"),
+            "{}",
+            resolved.describe
+        );
+        assert!(
+            !resolved.describe.chars().any(char::is_control),
+            "{:?}",
+            resolved.describe
+        );
     }
 
     #[test]

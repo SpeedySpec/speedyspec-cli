@@ -64,6 +64,10 @@ pub enum PluginError {
         dir: PathBuf,
         problem: String,
     },
+    /// Not a plugin name at all, so it is never looked for on disk.
+    InvalidName {
+        name: String,
+    },
     /// No plugin of this name is installed in the user plugin directory.
     NotInstalled {
         name: String,
@@ -81,7 +85,8 @@ impl PluginError {
             PluginError::Contracts { name, .. }
             | PluginError::Load { name, .. }
             | PluginError::Duplicate { name, .. }
-            | PluginError::NotInstalled { name, .. } => name.clone(),
+            | PluginError::NotInstalled { name, .. }
+            | PluginError::InvalidName { name } => name.clone(),
         }
     }
 }
@@ -103,6 +108,10 @@ impl fmt::Display for PluginError {
             PluginError::Directory { dir, problem } => {
                 write!(f, "plugin directory {} {problem}", dir.display())
             }
+            PluginError::InvalidName { name } => write!(
+                f,
+                "\"{name}\" is not a plugin name (vendor/package in lowercase letters, digits and hyphens)"
+            ),
             PluginError::NotInstalled { name, dir } => {
                 write!(f, "{name} is not installed in {}", dir.display())
             }
@@ -112,7 +121,9 @@ impl fmt::Display for PluginError {
 
 impl std::error::Error for PluginError {}
 
-fn valid_name(name: &str) -> bool {
+/// Whether `name` is a plugin name: `vendor/package` in lowercase letters, digits and hyphens.
+/// Nothing else may ever be turned into a path under the plugins directory.
+pub fn valid_name(name: &str) -> bool {
     let segment = |s: &str| {
         !s.is_empty()
             && s.bytes()

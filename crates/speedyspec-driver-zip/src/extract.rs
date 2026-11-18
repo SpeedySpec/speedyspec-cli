@@ -19,6 +19,27 @@ pub struct Archive<'a> {
     pub strip_components: u32,
 }
 
+/// How much one archive may take, so a hostile or broken server cannot fill the disk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limits {
+    /// The most bytes one download may be.
+    pub download_bytes: u64,
+    /// The most bytes one archive may unpack to.
+    pub unpacked_bytes: u64,
+    /// The longest target a symbolic link entry may have.
+    pub link_target_bytes: u64,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            download_bytes: 4 << 30,
+            unpacked_bytes: 16 << 30,
+            link_target_bytes: 4096,
+        }
+    }
+}
+
 /// Why an archive was not unpacked.
 #[derive(Debug)]
 pub enum ExtractError {
@@ -36,6 +57,12 @@ pub enum ExtractError {
     Unsafe {
         entry: String,
         problem: String,
+    },
+    /// The download, or what it unpacks to, is over a [`Limits`] value.
+    TooLarge {
+        url: String,
+        what: &'static str,
+        limit: u64,
     },
     /// Nothing was left to unpack (after stripping).
     Empty {
@@ -65,6 +92,9 @@ impl fmt::Display for ExtractError {
             Self::Unsafe { entry, problem } => {
                 write!(f, "archive entry {entry:?} was refused: {problem}")
             }
+            Self::TooLarge { url, what, limit } => {
+                write!(f, "{url}: {what} more than the limit of {limit} bytes")
+            }
             Self::Empty { url } => write!(f, "{url}: the archive holds no files to install"),
             Self::Io { path, message } => write!(f, "{}: {message}", path.display()),
         }
@@ -81,7 +111,25 @@ pub fn fetch_and_extract(
     into: &Path,
     fetch: &dyn Fetch,
 ) -> Result<u64, ExtractError> {
-    let result = download(archive, into, fetch).and_then(|file| unpack(archive, file, into));
+    fetch_and_extract_with(archive, into, fetch, &Limits::default())
+}
+
+/// [`fetch_and_extract`] with other limits than the defaults.
+pub fn fetch_and_extract_with(
+    archive: &Archive<'_>,
+    into: &Path,
+    fetch: &dyn Fetch,
+    limits: &Limits,
+) -> Result<u64, ExtractError> {
+    let result = download(archive, into, fetch, limits)
+        .and_then(|file| unpack(archive, file, into, limits))
+        .and_then(|written| {
+            let root = into.canonicalize().map_err(|e| ExtractError::Io {
+                path: into.to_path_buf(),
+                message: e.to_string(),
+            })?;
+            verify_links(&root, &root).map(|()| written)
+        });
     if result.is_err() {
         empty_directory(into);
     }
@@ -89,7 +137,12 @@ pub fn fetch_and_extract(
 }
 
 /// Fetches the archive into an unnamed-on-drop temporary file and checks its digest.
-fn download(archive: &Archive<'_>, into: &Path, fetch: &dyn Fetch) -> Result<File, ExtractError> {
+fn download(
+    archive: &Archive<'_>,
+    into: &Path,
+    fetch: &dyn Fetch,
+    limits: &Limits,
+) -> Result<File, ExtractError> {
     let beside = into.parent().unwrap_or(into);
     let io_error = |e: io::Error| ExtractError::Io {
         path: beside.to_path_buf(),
@@ -100,10 +153,18 @@ fn download(archive: &Archive<'_>, into: &Path, fetch: &dyn Fetch) -> Result<Fil
     let mut hashing = Hashing {
         inner: &mut file,
         digest: Sha256::new(),
+        remaining: limits.download_bytes,
+        over: false,
     };
-    fetch
-        .fetch(archive.url, &mut hashing)
-        .map_err(ExtractError::Fetch)?;
+    let fetched = fetch.fetch(archive.url, &mut hashing);
+    if hashing.over {
+        return Err(ExtractError::TooLarge {
+            url: archive.url.to_owned(),
+            what: "the download is",
+            limit: limits.download_bytes,
+        });
+    }
+    fetched.map_err(ExtractError::Fetch)?;
     let actual: String = hashing
         .digest
         .finalize()
@@ -127,10 +188,19 @@ fn download(archive: &Archive<'_>, into: &Path, fetch: &dyn Fetch) -> Result<Fil
 struct Hashing<'a> {
     inner: &'a mut File,
     digest: Sha256,
+    /// Bytes still allowed.
+    remaining: u64,
+    /// Set when the download tried to go past the limit.
+    over: bool,
 }
 
 impl Write for Hashing<'_> {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+        if buffer.len() as u64 > self.remaining {
+            self.over = true;
+            return Err(io::Error::other("the download is larger than allowed"));
+        }
+        self.remaining -= buffer.len() as u64;
         let written = self.inner.write(buffer)?;
         self.digest.update(&buffer[..written]);
         Ok(written)
@@ -141,7 +211,13 @@ impl Write for Hashing<'_> {
     }
 }
 
-fn unpack(archive: &Archive<'_>, file: File, into: &Path) -> Result<u64, ExtractError> {
+fn unpack(
+    archive: &Archive<'_>,
+    file: File,
+    into: &Path,
+    limits: &Limits,
+) -> Result<u64, ExtractError> {
+    let mut room = limits.unpacked_bytes;
     let not_a_zip = |message: String| ExtractError::NotAZip {
         url: archive.url.to_owned(),
         message,
@@ -195,9 +271,13 @@ fn unpack(archive: &Archive<'_>, file: File, into: &Path) -> Result<u64, Extract
         }
         if entry.is_symlink() {
             let mut link = String::new();
-            entry
+            (&mut entry)
+                .take(limits.link_target_bytes + 1)
                 .read_to_string(&mut link)
                 .map_err(|_| refuse("the link target is not valid UTF-8"))?;
+            if link.len() as u64 > limits.link_target_bytes {
+                return Err(refuse("the link target is too long"));
+            }
             if !stays_inside(&root, &directory, &link) {
                 return Err(refuse("a symbolic link pointing outside the destination"));
             }
@@ -205,7 +285,17 @@ fn unpack(archive: &Archive<'_>, file: File, into: &Path) -> Result<u64, Extract
         } else {
             let mode = entry.unix_mode();
             let mut out = File::create_new(&target).map_err(io_error)?;
-            io::copy(&mut entry, &mut out).map_err(|e| not_a_zip(e.to_string()))?;
+            // One byte more than there is room for shows that the entry does not fit.
+            let copied = io::copy(&mut (&mut entry).take(room.saturating_add(1)), &mut out)
+                .map_err(|e| not_a_zip(e.to_string()))?;
+            if copied > room {
+                return Err(ExtractError::TooLarge {
+                    url: archive.url.to_owned(),
+                    what: "the archive unpacks to",
+                    limit: limits.unpacked_bytes,
+                });
+            }
+            room -= copied;
             set_mode(&out, mode).map_err(io_error)?;
         }
         written += 1;
@@ -216,6 +306,42 @@ fn unpack(archive: &Archive<'_>, file: File, into: &Path) -> Result<u64, Extract
         });
     }
     Ok(written)
+}
+
+/// Checks every symbolic link under `directory` by resolving it for real: each must lead to
+/// something that exists inside `root`. Reading a link's target as text is not enough, because
+/// a chain of links (`a -> .`, `up -> a/..`) can climb out one harmless-looking step at a time.
+fn verify_links(root: &Path, directory: &Path) -> Result<(), ExtractError> {
+    let entries = fs::read_dir(directory).map_err(|e| ExtractError::Io {
+        path: directory.to_path_buf(),
+        message: e.to_string(),
+    })?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(found) = fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if found.is_dir() {
+            verify_links(root, &path)?;
+        } else if found.file_type().is_symlink() {
+            let shown = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .into_owned();
+            let refuse = |problem: &str| ExtractError::Unsafe {
+                entry: shown.clone(),
+                problem: problem.to_owned(),
+            };
+            let resolved = path
+                .canonicalize()
+                .map_err(|_| refuse("a symbolic link that leads nowhere"))?;
+            if !resolved.starts_with(root) {
+                return Err(refuse("a symbolic link that leads outside the destination"));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// An entry name as path segments, or why it cannot be one. A trailing slash (a directory

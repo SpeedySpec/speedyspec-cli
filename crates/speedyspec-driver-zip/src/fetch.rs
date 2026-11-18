@@ -66,7 +66,14 @@ pub struct HttpFetch {
 }
 
 impl HttpFetch {
+    /// Waits a minute for a server to start answering and half an hour for a body.
     pub fn new() -> HttpFetch {
+        Self::with_timeouts(Duration::from_secs(60), Duration::from_secs(30 * 60))
+    }
+
+    /// As `new`, giving up after `response` without an answer and after `body` receiving one
+    /// body, so a server that stalls cannot hang the command for ever.
+    pub fn with_timeouts(response: Duration, body: Duration) -> HttpFetch {
         let agent = ureq::Agent::config_builder()
             // Redirects are followed here, not by the client, so each hop is checked.
             .max_redirects(0)
@@ -74,6 +81,8 @@ impl HttpFetch {
             .http_status_as_error(false)
             .user_agent(concat!("speedyspec/", env!("CARGO_PKG_VERSION")))
             .timeout_connect(Some(Duration::from_secs(30)))
+            .timeout_recv_response(Some(response))
+            .timeout_recv_body(Some(body))
             .build()
             .into();
         HttpFetch {
@@ -96,13 +105,15 @@ impl Fetch for HttpFetch {
             message,
         };
         let mut current = url.to_owned();
+        let mut was_secure = false;
         for _ in 0..=MAX_REDIRECTS {
-            if !is_fetchable_url(&current) {
+            if !hop_allowed(was_secure, &current) {
                 return Err(FetchError::Insecure {
                     url: url.to_owned(),
                     to: current,
                 });
             }
+            was_secure |= current.starts_with("https://");
             let mut request = self.agent.get(&current);
             if let Some(header) = authorization(&current, self.github_token.as_deref()) {
                 request = request.header("Authorization", header);
@@ -131,6 +142,13 @@ impl Fetch for HttpFetch {
             url: url.to_owned(),
         })
     }
+}
+
+/// Whether the next hop of a download may be fetched: it must pass the URL rule, and once any
+/// hop was `https` no later one may be plain `http`, not even to this machine (a remote server
+/// must not be able to bounce the CLI onto a local service).
+fn hop_allowed(was_secure: bool, url: &str) -> bool {
+    is_fetchable_url(url) && !(was_secure && url.starts_with("http://"))
 }
 
 /// The `Authorization` header for `url`, if it gets one: the GitHub token goes to the GitHub
@@ -182,6 +200,16 @@ mod tests {
             assert_eq!(authorization(elsewhere, token), None, "{elsewhere}");
         }
         assert_eq!(authorization("https://api.github.com/x", None), None);
+    }
+
+    #[test]
+    fn plain_http_is_refused_once_a_hop_was_https() {
+        assert!(hop_allowed(false, "https://x.test/a.zip"));
+        assert!(hop_allowed(true, "https://y.test/a.zip"));
+        assert!(hop_allowed(false, "http://127.0.0.1:8080/a.zip"));
+        assert!(!hop_allowed(true, "http://127.0.0.1:8080/a.zip"));
+        assert!(!hop_allowed(true, "http://localhost/a.zip"));
+        assert!(!hop_allowed(false, "http://example.com/a.zip"));
     }
 
     #[test]
