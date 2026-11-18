@@ -10,7 +10,7 @@
 //! Reading a `zval` ([`to_value`]) never allocates PHP memory and never runs
 //! PHP code. Writing one ([`write_value`]) allocates PHP memory, which can
 //! bail out when `memory_limit` is exceeded, so it must run inside
-//! [`crate::runtime::guard`]; its frames own nothing with a destructor.
+//! [`crate::boundary::guard`]; its frames own nothing with a destructor.
 
 use std::fmt;
 use std::mem::ManuallyDrop;
@@ -26,7 +26,7 @@ use ext_php_rs::ffi::{
 use ext_php_rs::types::Zval;
 use speedyspec_hooks::{Key, Value};
 
-use crate::runtime;
+use crate::boundary;
 
 /// `HASH_FLAG_PACKED` from `Zend/zend_hash.h`; bindgen does not export it.
 const HASH_FLAG_PACKED: u32 = 1 << 2;
@@ -81,7 +81,7 @@ impl fmt::Display for Unconvertible {
 /// One counted reference to a PHP value, held by Rust.
 ///
 /// Creating a handle adds a reference; dropping it hands the reference to
-/// [`runtime::release_later`], which releases it at the next point where PHP
+/// [`boundary::release_later`], which releases it at the next point where PHP
 /// code may safely run (releasing can run a destructor or the cycle
 /// collector), or never, if the engine has already shut down and freed it.
 pub(crate) struct ZvalHandle {
@@ -143,7 +143,7 @@ impl Drop for ZvalHandle {
         // SAFETY: moving the zval out of a handle that is being dropped; it is
         // never read again.
         let zv = unsafe { ManuallyDrop::take(&mut self.zv) };
-        runtime::release_later(ManuallyDrop::new(zv));
+        boundary::release_later(ManuallyDrop::new(zv));
     }
 }
 
@@ -327,7 +327,7 @@ unsafe fn is_hole(slot: *const zval) -> bool {
 /// caller still owns and must release.
 ///
 /// Allocates PHP memory, which can bail out, so call it only inside
-/// [`crate::runtime::guard`]. It owns nothing with a destructor in any frame,
+/// [`crate::boundary::guard`]. It owns nothing with a destructor in any frame,
 /// so a bailout leaks only PHP memory, which the engine reclaims.
 ///
 /// # Safety

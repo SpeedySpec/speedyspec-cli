@@ -5,9 +5,11 @@
 //! booted it. The hook registry passed in [`BootOptions`] is exposed to PHP as
 //! `SpeedySpec\Hooks\Hook` and the WordPress-named functions.
 
+mod boundary;
 mod convert;
 mod hook_class;
 mod runtime;
+mod sapi;
 
 pub use runtime::{BootOptions, Output, Php, PhpError};
 
@@ -21,7 +23,7 @@ pub const PHP_VERSION: &str = env!("SPEEDYSPEC_PHP_VERSION");
 /// entered at all.
 #[doc(hidden)]
 pub fn php_entries() -> u64 {
-    runtime::entries()
+    boundary::entries()
 }
 
 /// How many saved per-context records the fiber bookkeeping holds (contexts
@@ -29,5 +31,5 @@ pub fn php_entries() -> u64 {
 /// created, freed and forgotten.
 #[doc(hidden)]
 pub fn fiber_records() -> usize {
-    runtime::fiber_records()
+    boundary::fiber_records()
 }

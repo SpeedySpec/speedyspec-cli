@@ -3,11 +3,11 @@
 //! global aliases, all backed by the [`SharedHooks`] passed to `Php::boot`.
 //!
 //! A PHP callable registered here is wrapped in a Rust [`Callback`] that
-//! calls it through [`runtime::call_php`]; Rust callbacks in the same
+//! calls it through [`boundary::call_php`]; Rust callbacks in the same
 //! registry run without entering PHP at all.
 //!
 //! The handlers are written by hand rather than with `#[php_impl]`, so that
-//! every one of them goes through [`runtime::native_entry`], which is what
+//! every one of them goes through [`boundary::native_entry`], which is what
 //! keeps bailouts and panics from crossing Rust frames.
 
 use std::cell::{Cell, RefCell};
@@ -30,8 +30,9 @@ use speedyspec_hooks::{
     AddOptions, Callback, CallbackError, HookError, HookErrorKind, SharedHooks, Value,
 };
 
+use crate::boundary::{self, CallError, Thrown};
 use crate::convert::{self, ZvalHandle};
-use crate::runtime::{self, CallError, PhpError, Thrown};
+use crate::runtime::PhpError;
 
 // PHP's numeric-string parser (`Zend/zend_operators.h`), a ZEND_API symbol of
 // the linked libphp. ZEND_FASTCALL is a plain C call on x86_64 and aarch64.
@@ -131,7 +132,7 @@ pub(crate) fn module_entry() -> *mut ModuleEntry {
 /// Registers the class from the module's MINIT. Returns 0 on success.
 fn startup(_ty: i32, _module_number: i32) -> i32 {
     let registered = std::panic::catch_unwind(|| {
-        runtime::register_fiber_observers();
+        boundary::register_fiber_observers();
         let method = MethodFlags::Public | MethodFlags::Static;
         ClassBuilder::new(CLASS)
             .flags(ClassFlags::Final)
@@ -209,7 +210,7 @@ type Handler = extern "C" fn(&mut ExecuteData, &mut Zval);
 macro_rules! handler {
     ($name:ident, $body:ident) => {
         extern "C" fn $name(ex: &mut ExecuteData, retval: &mut Zval) {
-            runtime::native_entry(ex, retval, |ex, retval| {
+            boundary::native_entry(ex, retval, |ex, retval| {
                 finish(retval, $body(&Call::new(ex)))
             });
         }
@@ -251,7 +252,7 @@ fn add(call: &Call<'_>) -> Result<Ret, Fail> {
     call.arity(2, 4)?;
     let hook = call.hook_name()?;
     let callback = call.arg(1);
-    let callable = runtime::guard(|| {
+    let callable = boundary::guard(|| {
         // SAFETY: `callback` is an argument slot of the live call frame.
         unsafe { zend_is_callable(callback.cast_mut(), 0, std::ptr::null_mut()) }
     })
@@ -356,7 +357,7 @@ fn fire<T>(
     let thrown = frame.pop();
     match result {
         Ok(value) => Ok(value),
-        Err(_) if !runtime::can_enter() => Err(Fail::Silent),
+        Err(_) if !boundary::can_enter() => Err(Fail::Silent),
         Err(err) => match thrown {
             // The callback that failed was a PHP callback: rethrow its
             // exception unchanged.
@@ -372,7 +373,7 @@ fn fire<T>(
 
 /// Pushes a firing frame of the current execution context and pops it again,
 /// also when a Rust callback panics. Frames are per context (see
-/// `runtime::Engine`): a firing parked in a suspended fiber keeps its frame
+/// `boundary::Engine`): a firing parked in a suspended fiber keeps its frame
 /// in that fiber's record, so this always pops its own.
 struct FrameGuard {
     popped: bool,
@@ -380,40 +381,40 @@ struct FrameGuard {
 
 impl FrameGuard {
     fn push() -> Self {
-        runtime::push_frame();
+        boundary::push_frame();
         Self { popped: false }
     }
 
     /// Pops the frame and gives back the exception kept in it, if any.
     fn pop(mut self) -> Option<(String, ZvalHandle)> {
         self.popped = true;
-        runtime::pop_frame().and_then(|frame| frame.thrown)
+        boundary::pop_frame().and_then(|frame| frame.thrown)
     }
 }
 
 impl Drop for FrameGuard {
     fn drop(&mut self) {
         if !self.popped {
-            drop(runtime::pop_frame());
+            drop(boundary::pop_frame());
         }
     }
 }
 
 /// The `CallbackError` side of a PHP callback in the registry.
 fn run_php_callback(callable: &ZvalHandle, args: &[Value]) -> Result<Value, CallbackError> {
-    if !runtime::alive() {
+    if !boundary::alive() {
         return Err(CallbackError(
             "the PHP engine has shut down; this PHP callback can no longer run".to_owned(),
         ));
     }
-    match runtime::call_php(callable.as_ptr().cast_mut(), args) {
+    match boundary::call_php(callable.as_ptr().cast_mut(), args) {
         Ok(value) => Ok(value),
         Err(err) => {
             let message = err.describe();
             if let CallError::Thrown(Thrown::Exception { object, .. }) = err {
                 // Keep the original for a PHP caller; with none (fired from
                 // Rust), the object is dropped, which queues its release.
-                runtime::keep_in_top_frame(message.clone(), object);
+                boundary::keep_in_top_frame(message.clone(), object);
             }
             Err(CallbackError(message))
         }
@@ -444,7 +445,7 @@ fn finish(retval: &mut Zval, result: Result<Ret, Fail>) {
             }
         }
         Ok(Ret::Value(value)) => {
-            let written = runtime::guard(|| {
+            let written = boundary::guard(|| {
                 // SAFETY: as above; `value` is owned by this frame.
                 unsafe { convert::write_value(retval, &value) }
             });
@@ -468,7 +469,7 @@ fn throw(fail: Fail) {
             Fail::Value(m) => (zend_ce_value_error, m),
             Fail::Hook(m) => (EXCEPTION_CLASS.with(Cell::get), m),
             Fail::Rethrow(object) => {
-                runtime::rethrow(object);
+                boundary::rethrow(object);
                 return;
             }
             Fail::Silent => return,
@@ -480,7 +481,7 @@ fn throw(fail: Fail) {
     let message = CString::new(message.replace('\0', "\\0")).unwrap_or_default();
     let message_ptr = message.as_ptr();
     let hook_exception = EXCEPTION_CLASS.with(Cell::get);
-    let _ = runtime::guard(|| {
+    let _ = boundary::guard(|| {
         // SAFETY: throwing from inside a native function, with a message
         // owned by the enclosing frame.
         unsafe {
