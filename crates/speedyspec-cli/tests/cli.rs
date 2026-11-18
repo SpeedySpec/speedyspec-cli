@@ -183,8 +183,23 @@ fn plugin_dir_accepts_equals_form_and_comes_anywhere() {
 }
 
 #[test]
-fn plugin_list_shows_loaded() {
+fn plugin_management_lives_under_self() {
     let out = run(&["good"], &["plugin", "list"]);
+    assert_eq!(out.code, 2, "{}", out.stdout);
+    assert!(
+        out.stderr.contains("unrecognized subcommand 'plugin'"),
+        "{}",
+        out.stderr
+    );
+    let help = run(&[], &["self", "--help"]);
+    assert_eq!(help.code, 0, "{}", help.stderr);
+    assert!(help.stdout.contains("plugin"), "{}", help.stdout);
+    assert!(help.stdout.contains("update"), "{}", help.stdout);
+}
+
+#[test]
+fn plugin_list_shows_loaded() {
+    let out = run(&["good"], &["self", "plugin", "list"]);
     assert_eq!(out.code, 0, "{}", out.stderr);
     assert!(
         out.stdout.contains("speedyspec-fixture/good\t1.0.0\t"),
@@ -446,9 +461,9 @@ fn plant_good(dir: &Path) {
     }
 }
 
-/// Runs `plugin list` and `hello Ada` in `cwd` with `env` set, and checks that no plugin loaded.
+/// Runs `self plugin list` and `hello Ada` in `cwd` with `env` set, and checks that no plugin loaded.
 fn assert_nothing_loaded(cwd: &Path, env: &[(&str, &Path)], unset_home: bool) {
-    for args in [&["plugin", "list"][..], &["hello", "Ada"][..]] {
+    for args in [&["self", "plugin", "list"][..], &["hello", "Ada"][..]] {
         let mut command = Command::new(env!("CARGO_BIN_EXE_speedyspec"));
         command.current_dir(cwd);
         if unset_home {
@@ -460,7 +475,7 @@ fn assert_nothing_loaded(cwd: &Path, env: &[(&str, &Path)], unset_home: bool) {
         let output = command.args(args).output().unwrap();
         let stdout = String::from_utf8_lossy(&output.stdout);
         let stderr = String::from_utf8_lossy(&output.stderr);
-        if args[0] == "plugin" {
+        if args[0] == "self" {
             assert_eq!(output.status.code(), Some(0), "{stderr}");
             assert_eq!(stdout, "", "a plugin loaded from {}", cwd.display());
         } else {
@@ -528,7 +543,7 @@ fn closed_stdout_is_not_a_crash() {
     drop(reader);
     for args in [
         &["--version"][..],
-        &["plugin", "list"][..],
+        &["self", "plugin", "list"][..],
         &["hello", "Ada"][..],
     ] {
         let output = Command::new(env!("CARGO_BIN_EXE_speedyspec"))
@@ -614,7 +629,7 @@ fn relative_home_never_yields_a_plugin_directory() {
         .env_remove("SPEEDYSPEC_HOME")
         .env_remove("XDG_DATA_HOME")
         .env("HOME", "rel")
-        .args(["plugin", "list"])
+        .args(["self", "plugin", "list"])
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -636,7 +651,7 @@ fn relative_home_never_yields_a_plugin_directory() {
         .env_remove("SPEEDYSPEC_HOME")
         .env("XDG_DATA_HOME", "xdg")
         .env("HOME", home.path())
-        .args(["plugin", "list"])
+        .args(["self", "plugin", "list"])
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(0));
@@ -654,7 +669,7 @@ fn relative_speedyspec_home_is_ignored() {
         .env("SPEEDYSPEC_HOME", "rel")
         .env("HOME", home.path())
         .env("XDG_DATA_HOME", home.path().join("data"))
-        .args(["plugin", "list"])
+        .args(["self", "plugin", "list"])
         .output()
         .unwrap();
     assert_eq!(output.status.code(), Some(0));

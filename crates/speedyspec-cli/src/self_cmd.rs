@@ -1,7 +1,8 @@
-//! `speedyspec self update [--check]`.
+//! `speedyspec self …`: the CLI looking after itself. `self update [--check]` is here; `self
+//! plugin` (the CLI's own plugins) is dispatched from `commands.rs`, since it needs them loaded.
 //!
-//! Runs before PHP starts and before any plugin is loaded, so a broken plugin can never stand in
-//! the way of getting a fixed binary.
+//! `self update` runs before PHP starts and before any plugin is loaded, so a broken plugin can
+//! never stand in the way of getting a fixed binary.
 
 use std::io::Write;
 
@@ -31,17 +32,22 @@ pub fn clap() -> Clap {
         )
 }
 
-/// Whether the arguments name the `self` command (global flags may come first).
-pub fn is_self_command(args: &[String]) -> bool {
+/// Whether the arguments name `self update` (global flags may come first). Only that command
+/// runs before PHP starts; `self plugin` needs the loaded plugins.
+pub fn is_self_update(args: &[String]) -> bool {
+    let mut words = Vec::new();
     let mut args = args.iter();
     while let Some(arg) = args.next() {
         if arg == "--plugin-dir" {
             args.next();
         } else if !arg.starts_with('-') {
-            return arg == "self";
+            words.push(arg.as_str());
+            if words.len() == 2 {
+                break;
+            }
         }
     }
-    false
+    words == ["self", "update"]
 }
 
 fn say(line: &str) {
@@ -52,7 +58,7 @@ fn say(line: &str) {
 pub fn run(matches: &ArgMatches) -> i32 {
     match matches.subcommand() {
         Some(("update", update)) => self_update(update.get_flag("check")),
-        _ => unreachable!("clap requires a self subcommand"),
+        _ => unreachable!("commands.rs dispatches every other self subcommand"),
     }
 }
 
@@ -134,26 +140,28 @@ mod tests {
     }
 
     #[test]
-    fn finds_the_self_command_after_global_flags() {
-        assert!(is_self_command(&args(&["self", "update"])));
-        assert!(is_self_command(&args(&[
+    fn finds_self_update_after_global_flags() {
+        assert!(is_self_update(&args(&["self", "update"])));
+        assert!(is_self_update(&args(&[
             "--no-interaction",
             "self",
             "update"
         ])));
-        assert!(is_self_command(&args(&[
+        assert!(is_self_update(&args(&[
             "--plugin-dir",
             "self",
             "self",
             "update"
         ])));
-        assert!(!is_self_command(&args(&[
+        assert!(!is_self_update(&args(&[
             "--plugin-dir",
             "self",
             "app",
             "list"
         ])));
-        assert!(!is_self_command(&args(&["app", "self"])));
-        assert!(!is_self_command(&args(&["--version"])));
+        assert!(!is_self_update(&args(&["app", "self"])));
+        assert!(!is_self_update(&args(&["--version"])));
+        assert!(!is_self_update(&args(&["self", "plugin", "list"])));
+        assert!(!is_self_update(&args(&["self"])));
     }
 }
