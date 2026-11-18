@@ -296,6 +296,19 @@ pub fn statement_text(statement: &[u8]) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// Whether a connection stays on this machine (a socket or a loopback address), where it being
+/// unencrypted does not matter. The client does not use TLS yet.
+pub fn stays_on_this_machine(settings: &DatabaseConnection) -> bool {
+    if settings.socket.is_some() {
+        return true;
+    }
+    let host = settings.host.trim_start_matches('[').trim_end_matches(']');
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
 impl Connection {
     /// Connects and sets the connection's character set.
     pub fn open(settings: &DatabaseConnection) -> Result<Connection, DbError> {
@@ -619,6 +632,43 @@ mod tests {
         ));
         assert!(switches_database(b"/*!32312 USE `shop`*/"));
         assert!(!switches_database(b"/*!40101 SET NAMES utf8mb4 */"));
+    }
+
+    #[test]
+    fn loopback_and_sockets_stay_on_this_machine() {
+        let at = |host: &str, socket: Option<&str>| DatabaseConnection {
+            host: host.to_owned(),
+            database: "d".to_owned(),
+            user: "u".to_owned(),
+            password: String::new(),
+            port: 3306,
+            socket: socket.map(str::to_owned),
+            table_prefix: String::new(),
+            charset: "utf8mb4".to_owned(),
+            engine: "mysql".to_owned(),
+        };
+        for host in [
+            "localhost",
+            "LOCALHOST",
+            "127.0.0.1",
+            "127.8.9.1",
+            "::1",
+            "[::1]",
+        ] {
+            assert!(stays_on_this_machine(&at(host, None)), "{host}");
+        }
+        for host in [
+            "db.example.test",
+            "10.0.0.5",
+            "localhost.example.test",
+            "::2",
+        ] {
+            assert!(!stays_on_this_machine(&at(host, None)), "{host}");
+        }
+        assert!(stays_on_this_machine(&at(
+            "db.example.test",
+            Some("/tmp/mysql.sock")
+        )));
     }
 
     #[test]

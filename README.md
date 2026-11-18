@@ -243,6 +243,9 @@ speedyspec app db tables | size | check             --install <name>
 These find the install by name (`app installs`) and ask its app's plugin where the database is
 (`speedyspec_app_database`); speedyspec then does the work itself, so no `mysql` or `mysqldump`
 is needed on the machine. MySQL and MariaDB are supported. The password is never printed.
+The connection is not encrypted yet (no TLS): over a socket or a loopback address that does
+not matter, and for any other host speedyspec warns before connecting. A server that requires
+secure transport refuses it.
 
 - `export` writes a dump: each of the app's tables (those starting with its table prefix) is
   dropped, created and filled, binary columns as hex. It goes to stdout, or to `--to <file>`,
@@ -254,7 +257,8 @@ is needed on the machine. MySQL and MariaDB are supported. The password is never
   naming its line; the statements before it stay applied, because MySQL commits table changes
   at once.
 - `query` runs one statement: rows come out tab-separated with a header line (`NULL` for null,
-  `0x...` for binary values); anything else prints how many rows it changed.
+  `0x...` for binary values; dates, times and JSON as text); anything else prints how many rows
+  it changed.
 - `tables` lists `name`, rows (the server's estimate), data bytes and index bytes; `size` prints
   the data, index and total bytes; `check` runs `CHECK TABLE` and exits 1 when a table is not
   `OK`.

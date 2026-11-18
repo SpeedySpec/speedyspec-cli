@@ -104,6 +104,13 @@ pub fn run(runtime: &Runtime, matches: &ArgMatches) -> i32 {
             return code;
         }
     }
+    if !speedyspec_db::stays_on_this_machine(&settings) {
+        eprintln!(
+            "speedyspec: warning: the connection to {}:{} is not encrypted (speedyspec does not use TLS yet); \
+             the login and the data cross the network as they are",
+            settings.host, settings.port
+        );
+    }
     let mut connection = match Connection::open(&settings) {
         Ok(connection) => connection,
         Err(error) => return fail(error),

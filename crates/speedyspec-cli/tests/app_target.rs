@@ -159,3 +159,36 @@ fn an_install_whose_directory_is_gone_is_named() {
         listed.stderr
     );
 }
+
+#[test]
+fn an_unencrypted_connection_to_another_machine_is_warned_about() {
+    for (host, warned) in [
+        ("db.example.test", true),
+        ("127.0.0.1", false),
+        ("localhost", false),
+    ] {
+        let (home, root) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+        fs::write(
+            root.path().join("db.json"),
+            json!({"host": host, "database": "shop", "user": "shop", "password": "pw-tls-3", "port": 1})
+                .to_string(),
+        )
+        .unwrap();
+        record(home.path(), "shop", "db-app", root.path());
+        let out = Speedyspec::with_home(&["db-app"], home.path()).run(&[
+            "app",
+            "db",
+            "tables",
+            "--install",
+            "shop",
+        ]);
+        assert_eq!(out.code, 1, "{host}: the connection fails: {}", out.stderr);
+        assert_eq!(
+            out.stderr.contains("is not encrypted"),
+            warned,
+            "{host}: {}",
+            out.stderr
+        );
+        assert!(!out.stderr.contains("pw-tls-3"), "{}", out.stderr);
+    }
+}
