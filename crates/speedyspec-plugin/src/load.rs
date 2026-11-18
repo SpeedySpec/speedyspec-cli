@@ -60,6 +60,7 @@ mod tests {
                 entry: "main.php".into(),
             },
             dir: "/x".into(),
+            entry: "/x/main.php".into(),
         }
     }
 

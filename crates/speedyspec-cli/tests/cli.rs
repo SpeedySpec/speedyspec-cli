@@ -470,6 +470,51 @@ fn memory_exhaustion_in_php_script_exits_1() {
     assert!(out.stderr.contains("Allowed memory size"), "{}", out.stderr);
 }
 
+#[test]
+fn missing_plugin_dir_is_reported() {
+    let out = run(
+        &[],
+        &["--plugin-dir", "/no/such/speedyspec/dir", "--version"],
+    );
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.stdout.lines().count(), 3, "{:?}", out.stdout);
+    assert_eq!(
+        out.stderr,
+        "speedyspec: plugin directory /no/such/speedyspec/dir not found\n"
+    );
+}
+
+/// Copies the `good` fixture into `dir`.
+fn plant_good(dir: &Path) {
+    std::fs::create_dir_all(dir).unwrap();
+    for file in ["speedyspec-plugin.json", "plugin.php"] {
+        std::fs::copy(fixture("good").join(file), dir.join(file)).unwrap();
+    }
+}
+
+#[test]
+fn relative_speedyspec_home_is_ignored() {
+    // A relative SPEEDYSPEC_HOME would load plugins from the working directory.
+    let cwd = tempfile::tempdir().unwrap();
+    plant_good(&cwd.path().join("rel/plugins/good"));
+    let home = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_speedyspec"))
+        .current_dir(cwd.path())
+        .env("SPEEDYSPEC_HOME", "rel")
+        .env("HOME", home.path())
+        .env("XDG_DATA_HOME", home.path().join("data"))
+        .args(["plugin", "list"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(
+        stderr,
+        "speedyspec: SPEEDYSPEC_HOME must be an absolute path; ignoring \"rel\" and using the default data directory\n"
+    );
+}
+
 /// An exception is not a fatal error; a redeclared function is, and bails PHP out. The binary
 /// must report the plugin, keep stdout clean and carry on with the other plugins.
 #[test]

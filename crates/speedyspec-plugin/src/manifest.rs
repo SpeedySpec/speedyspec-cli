@@ -25,14 +25,16 @@ pub struct Manifest {
 pub struct Plugin {
     pub manifest: Manifest,
     pub dir: PathBuf,
+    /// The entry file's absolute, canonical path, as validated at discovery to be a regular
+    /// file inside `dir`.
+    pub entry: PathBuf,
 }
 
 impl Plugin {
-    /// Absolute, canonical path of the entry file. Falls back to the plain join if the file
-    /// has vanished since validation, so the loader reports the failure.
-    pub fn entry_path(&self) -> PathBuf {
-        let joined = self.dir.join(&self.manifest.entry);
-        joined.canonicalize().unwrap_or(joined)
+    /// The entry file validated at discovery. It is never resolved again, so what is loaded
+    /// is exactly what was checked; if the file has gone since, loading it fails.
+    pub fn entry_path(&self) -> &Path {
+        &self.entry
     }
 }
 
@@ -51,14 +53,29 @@ pub enum PluginError {
         name: String,
         problem: String,
     },
+    /// Two plugins with the same name in one directory; the first by path order is kept.
+    Duplicate {
+        name: String,
+        kept: PathBuf,
+        ignored: PathBuf,
+    },
+    /// A directory given explicitly (`--plugin-dir`) that cannot be searched.
+    Directory {
+        dir: PathBuf,
+        problem: String,
+    },
 }
 
 impl PluginError {
     /// The plugin name where known, otherwise the directory.
     pub fn plugin_label(&self) -> String {
         match self {
-            PluginError::Manifest { dir, .. } => dir.display().to_string(),
-            PluginError::Contracts { name, .. } | PluginError::Load { name, .. } => name.clone(),
+            PluginError::Manifest { dir, .. } | PluginError::Directory { dir, .. } => {
+                dir.display().to_string()
+            }
+            PluginError::Contracts { name, .. }
+            | PluginError::Load { name, .. }
+            | PluginError::Duplicate { name, .. } => name.clone(),
         }
     }
 }
@@ -71,6 +88,15 @@ impl fmt::Display for PluginError {
                 write!(f, "needs contracts {needs}, this CLI bundles {bundled}")
             }
             PluginError::Load { problem, .. } => write!(f, "{problem}"),
+            PluginError::Duplicate { kept, ignored, .. } => write!(
+                f,
+                "the plugin in {} has the same name as the one in {}, which is loaded instead",
+                ignored.display(),
+                kept.display()
+            ),
+            PluginError::Directory { dir, problem } => {
+                write!(f, "plugin directory {} {problem}", dir.display())
+            }
         }
     }
 }
@@ -97,9 +123,10 @@ fn string_field<'a>(obj: &'a serde_json::Map<String, Value>, key: &str) -> Resul
     }
 }
 
-/// Resolves `entry` and proves it is a regular file inside `dir`. Canonicalising both sides
-/// resolves `..` and symlinks, so neither can be used to point outside the plugin.
-fn check_entry(dir: &Path, entry: &str) -> Result<PathBuf, String> {
+/// Resolves `entry` and proves it is a regular file inside `dir`, returning the entry as written
+/// and its canonical path. Canonicalising both sides resolves `..` and symlinks (of the file or
+/// of any directory on the way), so none of them can be used to point outside the plugin.
+fn check_entry(dir: &Path, entry: &str) -> Result<(PathBuf, PathBuf), String> {
     if entry.is_empty() {
         return Err("field \"entry\" must not be empty".into());
     }
@@ -126,11 +153,16 @@ fn check_entry(dir: &Path, entry: &str) -> Result<PathBuf, String> {
     if !resolved.is_file() {
         return Err(format!("entry \"{entry}\" is not a regular file"));
     }
-    Ok(rel.to_path_buf())
+    Ok((rel.to_path_buf(), resolved))
 }
 
 /// Reads and validates `<dir>/speedyspec-plugin.json`.
 pub fn parse_manifest(dir: &Path) -> Result<Manifest, PluginError> {
+    read_plugin(dir).map(|plugin| plugin.manifest)
+}
+
+/// Reads and validates the plugin in `dir`, keeping the entry path it validated.
+pub(crate) fn read_plugin(dir: &Path) -> Result<Plugin, PluginError> {
     let fail = |problem: String| PluginError::Manifest {
         dir: dir.to_path_buf(),
         problem,
@@ -162,14 +194,18 @@ pub fn parse_manifest(dir: &Path) -> Result<Manifest, PluginError> {
         ))
     })?;
     let entry_raw = string_field(obj, "entry").map_err(fail)?;
-    let entry = check_entry(dir, entry_raw).map_err(fail)?;
+    let (entry, resolved) = check_entry(dir, entry_raw).map_err(fail)?;
 
-    Ok(Manifest {
-        name: name.to_string(),
-        version,
-        contracts,
-        contracts_raw: contracts_raw.to_string(),
-        entry,
+    Ok(Plugin {
+        manifest: Manifest {
+            name: name.to_string(),
+            version,
+            contracts,
+            contracts_raw: contracts_raw.to_string(),
+            entry,
+        },
+        dir: dir.to_path_buf(),
+        entry: resolved,
     })
 }
 
@@ -216,13 +252,20 @@ pub(crate) mod tests {
         assert_eq!(m.contracts, semver::VersionReq::parse("^1.0").unwrap());
         assert_eq!(m.contracts_raw, "^1.0");
         assert_eq!(m.entry, Path::new("src/main.php"));
-        let plugin = Plugin {
-            manifest: m,
-            dir: tmp.path().to_path_buf(),
-        };
+        let plugin = read_plugin(tmp.path()).unwrap();
         assert_eq!(
             plugin.entry_path(),
             tmp.path().join("src/main.php").canonicalize().unwrap()
+        );
+        // The path checked is the path kept: it is not resolved again later.
+        fs::remove_file(tmp.path().join("src/main.php")).unwrap();
+        assert_eq!(
+            plugin.entry_path(),
+            tmp.path()
+                .canonicalize()
+                .unwrap()
+                .join("src")
+                .join("main.php")
         );
     }
 
@@ -307,7 +350,24 @@ pub(crate) mod tests {
                 abs.to_str().unwrap()
             ),
         );
-        assert!(parse_manifest(&dir).is_err());
+        assert!(problem(parse_manifest(&dir).unwrap_err()).contains("must be a relative path"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_entry_through_symlinked_directory_escaping_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("plug");
+        write_plugin(&dir, "acme/hello", "main.php");
+        let outside = tmp.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("x.php"), "<?php\n").unwrap();
+        std::os::unix::fs::symlink(&outside, dir.join("sub")).unwrap();
+        write_raw(
+            &dir,
+            r#"{"name":"acme/hello","version":"1.0.0","contracts":"^1","entry":"sub/x.php"}"#,
+        );
+        assert!(problem(parse_manifest(&dir).unwrap_err()).contains("outside"));
     }
 
     #[cfg(unix)]
@@ -370,5 +430,20 @@ pub(crate) mod tests {
         };
         assert_eq!(e.to_string(), "boom");
         assert_eq!(e.plugin_label(), "a/b");
+        let e = PluginError::Duplicate {
+            name: "a/b".into(),
+            kept: "/d/one".into(),
+            ignored: "/d/two".into(),
+        };
+        assert_eq!(
+            e.to_string(),
+            "the plugin in /d/two has the same name as the one in /d/one, which is loaded instead"
+        );
+        assert_eq!(e.plugin_label(), "a/b");
+        let e = PluginError::Directory {
+            dir: "/nope".into(),
+            problem: "not found".into(),
+        };
+        assert_eq!(e.to_string(), "plugin directory /nope not found");
     }
 }

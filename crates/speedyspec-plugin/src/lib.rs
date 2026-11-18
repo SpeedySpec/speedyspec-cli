@@ -5,6 +5,6 @@ mod discover;
 mod load;
 mod manifest;
 
-pub use discover::{discover, user_plugin_dir};
+pub use discover::{SearchDir, UserPluginDir, discover, user_plugin_dir};
 pub use load::{LoadReport, Loader, load_all};
 pub use manifest::{MANIFEST_FILE, Manifest, Plugin, PluginError, parse_manifest};

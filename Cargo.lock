@@ -1257,7 +1257,6 @@ version = "0.1.0"
 dependencies = [
  "dirs",
  "semver",
- "serde",
  "serde_json",
  "tempfile",
 ]

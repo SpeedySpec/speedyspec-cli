@@ -12,7 +12,9 @@ use speedyspec_driver::{App, Command, ContractError, ObjectReader, decode_app, d
 use speedyspec_hooks::{HookError, Hooks, Key, Value};
 use speedyspec_hooks_memory::MemoryHooks;
 use speedyspec_php::{BootOptions, Output, Php, PhpError, execution_context};
-use speedyspec_plugin::{Loader, Plugin, PluginError, discover, load_all, user_plugin_dir};
+use speedyspec_plugin::{
+    Loader, Plugin, PluginError, SearchDir, discover, load_all, user_plugin_dir,
+};
 
 use crate::attribution::{AttributedHooks, Checked, Validator};
 use crate::commands::{RESERVED, clap_problem};
@@ -96,7 +98,7 @@ impl Loader for PhpLoader<'_> {
         // The owner makes the plugin's hook registrations traceable. Output stays on stderr
         // because `boot` redirects it for the whole of start-up.
         php.set_owner(Some(&plugin.manifest.name));
-        let result = php.require(&plugin.entry_path());
+        let result = php.require(plugin.entry_path());
         php.set_owner(None);
         result.map(drop).map_err(|error| load_reason(&error))
     }
@@ -127,6 +129,7 @@ fn report_skipped(error: &PluginError) {
         PluginError::Manifest { dir, problem } => {
             eprintln!("speedyspec: plugin {} skipped: {problem}", dir.display());
         }
+        PluginError::Directory { .. } => eprintln!("speedyspec: {error}"),
         other => eprintln!(
             "speedyspec: plugin {} skipped: {other}",
             other.plugin_label()
@@ -169,8 +172,12 @@ pub fn boot(args: &[String]) -> Result<Runtime, String> {
     php.redirect_output(Output::Stderr);
     let mut loaded = Vec::new();
     if !options.no_plugins {
-        let mut dirs: Vec<PathBuf> = user_plugin_dir().into_iter().collect();
-        dirs.extend(options.plugin_dirs.iter().cloned());
+        let user = user_plugin_dir();
+        if let Some(warning) = &user.warning {
+            eprintln!("speedyspec: {warning}");
+        }
+        let mut dirs: Vec<SearchDir> = user.dir.into_iter().map(SearchDir::implicit).collect();
+        dirs.extend(options.plugin_dirs.iter().cloned().map(SearchDir::explicit));
         let (plugins, manifest_errors) = discover(&dirs);
         manifest_errors.iter().for_each(report_skipped);
         let report = load_all(plugins, &bundled, &PhpLoader(&php));
