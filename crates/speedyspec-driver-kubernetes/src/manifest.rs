@@ -118,36 +118,7 @@ pub fn prepare_manifest(
     })
 }
 
-/// Why `name` cannot name an install, if it cannot: it becomes part of a Secret's name and a
-/// label value, so it must be a DNS label, and short enough to leave room for the prefix.
-pub fn install_name_problem(name: &str) -> Option<String> {
-    dns_label_problem(name, 40)
-}
-
-/// Why `name` cannot be a namespace, if it cannot.
-pub fn namespace_problem(name: &str) -> Option<String> {
-    dns_label_problem(name, 63)
-}
-
-/// Why `name` is not a DNS label of at most `longest` characters, if it is not.
-fn dns_label_problem(name: &str, longest: usize) -> Option<String> {
-    let edge = |c: Option<char>| c.is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());
-    let inside = name
-        .chars()
-        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
-    if name.is_empty()
-        || name.len() > longest
-        || !inside
-        || !edge(name.chars().next())
-        || !edge(name.chars().last())
-    {
-        return Some(format!(
-            "\"{name}\" must be 1 to {longest} lowercase letters, digits or hyphens, starting \
-             and ending with a letter or digit"
-        ));
-    }
-    None
-}
+pub use speedyspec_driver::{install_name_problem, namespace_problem};
 
 /// The name of the Secret that records an install.
 pub fn record_name(install_name: &str) -> String {

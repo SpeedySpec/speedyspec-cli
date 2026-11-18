@@ -8,6 +8,7 @@ installable "apps" through hooks. No PHP, Composer or `php.ini` is needed on the
 speedyspec --version                   # speedyspec, php and contracts versions, three lines
 speedyspec php <file> [args...]        # run a PHP file with hooks available; exit code is the script's
 speedyspec app list                    # id <TAB> label <TAB> drivers ("?" marks a driver this binary cannot run)
+speedyspec app installs                # the installs recorded on this machine: name <TAB> app <TAB> driver <TAB> location
 speedyspec app install <app> ...       # install an app a plugin provides (see "Installing an app")
 speedyspec app uninstall <name>        # remove a Kubernetes install (see "Installing into Kubernetes")
 speedyspec self plugin list            # name <TAB> version <TAB> directory
@@ -156,7 +157,7 @@ it is dropped with a message naming the plugin.
 ## Installing an app
 
 ```
-speedyspec app install [<app>] [--part <id>]... [--driver <id>] [--base <dir>] [--force] [--<option> <value>]...
+speedyspec app install [<app>] [--part <id>]... [--driver <id>] [--base <dir>] [--name <install>] [--force] [--<option> <value>]...
 ```
 
 The app, its parts and the driver are settled first: `--part` defaults to the app's default
@@ -183,6 +184,14 @@ later one. A download is given up after a minute without an answer, half an hour
 refused. A staging directory left in the base by an interrupted run (`.speedyspec-staging-*`)
 is removed by the next install there, so do not run two installs into one base at once. On success the command prints one line per destination,
 `<destination>\t<absolute path>`.
+
+A zip install is recorded so later commands find it by name: `--name` (default: the app's id;
+lowercase letters, digits and hyphens) names it, and the record is
+`$SPEEDYSPEC_HOME/installs/<name>.json` (or the platform data directory's `speedyspec/installs`).
+Installing again under the same name into the same base replaces the record. The same name for
+another base or another app is refused before anything is downloaded. `speedyspec app installs`
+lists the records (`name`, `app`, `driver`, `location`, tab-separated); Kubernetes installs keep
+their record in the cluster instead.
 
 `app install` refuses to run if a plugin hit a fatal error while loading, and it installs
 nothing when a plugin's answer on an install hook does not match its contract; the message

@@ -138,6 +138,7 @@ fn dispatch(runtime: &Runtime, args: &[String]) -> i32 {
         },
         Some(("app", sub)) => match sub.subcommand() {
             Some(("list", _)) => crate::app::list(&runtime.apps),
+            Some(("installs", _)) => crate::installs::print_list(),
             Some(("install", install)) => crate::app::install(runtime, install, prepass),
             Some(("uninstall", uninstall)) => crate::app::uninstall(uninstall),
             _ => unreachable!("clap requires an app subcommand"),
@@ -266,6 +267,10 @@ fn build_tree(plugin_commands: &[PluginCommand], install_options: &[InstallOptio
                 .subcommand_required(true)
                 .arg_required_else_help(true)
                 .subcommand(Clap::new("list").about("List the apps that can be installed"))
+                .subcommand(
+                    Clap::new("installs")
+                        .about("List the installs speedyspec recorded on this machine"),
+                )
                 .subcommand(install_clap(install_options))
                 .subcommand(uninstall_clap()),
         );

@@ -6,6 +6,7 @@ mod boot;
 mod commands;
 mod drivers;
 mod install;
+mod installs;
 mod plugin_cmd;
 mod prompt;
 mod self_cmd;

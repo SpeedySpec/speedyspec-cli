@@ -4,6 +4,7 @@
 mod contracts;
 mod driver;
 mod kubernetes;
+mod names;
 
 pub use contracts::{
     App, AppPart, Command, CommandArgument, CommandOption, ContractError, InstallOption,
@@ -11,7 +12,8 @@ pub use contracts::{
     decode_install_option, decode_zip_source, is_fetchable_url,
 };
 pub use driver::{
-    Driver, DriverError, DriverFlag, DriverInput, PluginRef, Prepared, Progress, UninstallInput,
-    UninstallPlan,
+    Driver, DriverError, DriverFlag, DriverInput, LocalInstall, PluginRef, Prepared, Progress,
+    UninstallInput, UninstallPlan,
 };
 pub use kubernetes::{KubernetesResources, WaitFor, decode_kubernetes_resources, value_to_json};
+pub use names::{install_name_problem, namespace_problem};
