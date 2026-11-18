@@ -37,7 +37,8 @@ deliberately after checking the new version (`spc --version`).
 
 `scripts/build-php.sh` (run it from anywhere; it works relative to the repo):
 
-1. Writes `craft.yml` (committed, regenerated on every run) from `php-version`:
+1. Writes `craft.yml` (generated on every run and not committed: it is in
+   `.gitignore`, so the PHP version lives only in `php-version`):
 
    ```yaml
    php-version: "8.5.12"
@@ -49,9 +50,12 @@ deliberately after checking the new version (`spc --version`).
      doctor: false
    ```
 
-2. Skips the build if `.php-build/buildroot/lib/libphp.a` exists and
-   `.php-build/buildroot/.craft.yml` matches `craft.yml` byte for byte (that
-   is how a CI cache hit avoids a rebuild).
+2. Skips the build if `.php-build/buildroot/lib/libphp.a` exists and the
+   stamp `.php-build/buildroot/.craft.yml` holds exactly `craft.yml` plus a
+   last line naming the pinned `spc` and its SHA-256
+   (`# spc: spc-macos-aarch64 sha256=...`). That is how a CI cache hit avoids
+   a rebuild, and why re-pinning `spc` (or changing `php-version`) rebuilds
+   locally too.
 3. Checks that the host has the build tools (see "Host tools" below) and
    fails with an install hint if not, unless
    `SPEEDYSPEC_ALLOW_HOST_INSTALL=1`.
@@ -69,7 +73,7 @@ deliberately after checking the new version (`spc --version`).
    `CraftCommand` runs doctor only when `craft-options.doctor` is true, which
    is the default).
 7. Writes `.php-build/buildroot/link-flags.txt` from
-   `spc spc-config <extensions> --libs`, then stamps `.craft.yml`.
+   `spc spc-config <extensions> --libs`, then writes the stamp.
 8. Fails unless `.php-build/buildroot/lib/libphp.a` exists.
 
 ### Host tools
@@ -578,8 +582,16 @@ Deviations from the original plan, and why:
 
 `.github/workflows/ci.yml` runs on `macos-latest` (arm64) and `ubuntu-latest`
 (through `scripts/linux.sh`, so tests run in the same musl container used
-locally), caches `.php-build*/spc` and `.php-build*/buildroot` keyed on
-`php-version` and `scripts/build-php.sh`, builds PHP (with
-`SPEEDYSPEC_ALLOW_HOST_INSTALL=1`), and runs
-`cargo test --workspace`. **It has never run**: the repository does not exist
-on GitHub yet.
+locally). It checks out `SpeedySpec/speedyspec-cli` and
+`SpeedySpec/speedyspec-cli-contracts` side by side into `speedyspec-cli/` and
+`speedyspec-cli-contracts/` of the workspace, runs every step in
+`speedyspec-cli/`, and sets `SPEEDYSPEC_CONTRACTS_DIR` to the contracts
+checkout for both legs: `crates/speedyspec-cli/build.rs` reads it on macOS,
+and `scripts/linux.sh` mounts that host directory at `/contracts` in its
+container (it falls back to `../speedyspec-cli-contracts` when the variable
+is unset). The workflow's token is read-only (`permissions: contents:
+read`). It caches `.php-build*/spc` and `.php-build*/buildroot` keyed on
+`php-version` and `scripts/build-php.sh` (which holds the `spc` pins), builds
+PHP (with `SPEEDYSPEC_ALLOW_HOST_INSTALL=1`), and runs
+`cargo test --workspace`. **It has never run**: the repositories do not exist
+on GitHub yet, so the workflow is correct by inspection only.

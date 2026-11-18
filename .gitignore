@@ -2,3 +2,4 @@
 /.php-build/
 /target-linux*/
 /.php-build-linux*/
+/craft.yml

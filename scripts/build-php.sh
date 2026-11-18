@@ -55,10 +55,13 @@ craft-options:
   doctor: false
 EOF
 
-# A buildroot made from this exact craft.yml is reused (CI restores it from
-# cache); anything else is rebuilt.
+# A buildroot made from this exact craft.yml by this exact spc is reused (CI
+# restores it from cache); anything else, a re-pinned spc included, is rebuilt.
 stamp="$build_dir/buildroot/.craft.yml"
-if [ -f "$build_dir/buildroot/lib/libphp.a" ] && cmp -s "$repo/craft.yml" "$stamp"; then
+stamp_content="$(cat "$repo/craft.yml")
+# spc: $spc_name sha256=$spc_sha256"
+if [ -f "$build_dir/buildroot/lib/libphp.a" ] && [ -f "$stamp" ] \
+    && [ "$(cat "$stamp")" = "$stamp_content" ]; then
     echo "build-php.sh: $build_dir/buildroot is up to date"
     exit 0
 fi
@@ -134,5 +137,5 @@ fi
 # libiconv, macOS frameworks), so record spc's own list for build.rs.
 "$spc" spc-config "$extensions" --libs --no-motd > "$build_dir/buildroot/link-flags.txt"
 
-cp "$repo/craft.yml" "$stamp"
+printf '%s\n' "$stamp_content" > "$stamp"
 echo "build-php.sh: built PHP $("$build_dir/buildroot/bin/php-config" --version) in $build_dir/buildroot"

@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+# The jobs only read the two repositories.
+permissions:
+  contents: read
+
 jobs:
   test:
     name: test (${{ matrix.name }})
@@ -21,8 +25,23 @@ jobs:
             run: scripts/linux.sh
             php-build: .php-build-linux
     runs-on: ${{ matrix.os }}
+    env:
+      # crates/speedyspec-cli/build.rs embeds the PHP contracts from this checkout;
+      # scripts/linux.sh mounts it into its container.
+      SPEEDYSPEC_CONTRACTS_DIR: ${{ github.workspace }}/speedyspec-cli-contracts
+    defaults:
+      run:
+        working-directory: speedyspec-cli
     steps:
+      # Both repositories side by side, as in local development.
       - uses: actions/checkout@v4
+        with:
+          path: speedyspec-cli
+
+      - uses: actions/checkout@v4
+        with:
+          repository: SpeedySpec/speedyspec-cli-contracts
+          path: speedyspec-cli-contracts
 
       - name: Install Rust 1.99
         if: matrix.run == ''
@@ -31,10 +50,11 @@ jobs:
       - name: Cache static PHP
         uses: actions/cache@v4
         with:
+          # Paths and hashFiles are relative to the workspace, not the working directory.
           path: |
-            ${{ matrix.php-build }}/spc
-            ${{ matrix.php-build }}/buildroot
-          key: php-${{ matrix.name }}-${{ hashFiles('php-version', 'scripts/build-php.sh') }}
+            speedyspec-cli/${{ matrix.php-build }}/spc
+            speedyspec-cli/${{ matrix.php-build }}/buildroot
+          key: php-${{ matrix.name }}-${{ hashFiles('speedyspec-cli/php-version', 'speedyspec-cli/scripts/build-php.sh') }}
 
       - name: Build static PHP
         # Runners are throwaway, so spc may install missing build tools.

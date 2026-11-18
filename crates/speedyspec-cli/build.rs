@@ -38,6 +38,9 @@ fn main() {
     if !src.is_dir() {
         fail(&format!("{} has no src/ directory", dir.display()));
     }
+    // The directory itself, so that a contract file added later (anywhere under src/, which
+    // cargo scans for changes) is embedded too, not only the files seen now.
+    println!("cargo:rerun-if-changed={}", src.display());
     let mut files = Vec::new();
     collect(&src, &mut files);
     files.sort();
