@@ -57,16 +57,8 @@ struct Bridge {
     owner: Option<String>,
 }
 
-/// One firing started from PHP. A PHP callback's exception is kept here
-/// (with the message its `CallbackError` carries) so the PHP caller can get
-/// the original object back.
-struct Frame {
-    thrown: Option<(String, ZvalHandle)>,
-}
-
 thread_local! {
     static BRIDGE: RefCell<Option<Bridge>> = const { RefCell::new(None) };
-    static FRAMES: RefCell<Vec<Frame>> = const { RefCell::new(Vec::new()) };
     static EXCEPTION_CLASS: Cell<*mut zend_class_entry> = const { Cell::new(std::ptr::null_mut()) };
 }
 
@@ -77,7 +69,6 @@ pub(crate) fn install(hooks: SharedHooks) {
 /// Forgets the registry (after the engine is gone).
 pub(crate) fn uninstall() {
     let bridge = BRIDGE.with(|b| b.borrow_mut().take());
-    FRAMES.with(|f| f.borrow_mut().clear());
     EXCEPTION_CLASS.with(|c| c.set(std::ptr::null_mut()));
     drop(bridge);
 }
@@ -140,6 +131,7 @@ pub(crate) fn module_entry() -> *mut ModuleEntry {
 /// Registers the class from the module's MINIT. Returns 0 on success.
 fn startup(_ty: i32, _module_number: i32) -> i32 {
     let registered = std::panic::catch_unwind(|| {
+        runtime::register_fiber_observers();
         let method = MethodFlags::Public | MethodFlags::Static;
         ClassBuilder::new(CLASS)
             .flags(ClassFlags::Final)
@@ -378,31 +370,31 @@ fn fire<T>(
     }
 }
 
-/// Pushes a [`Frame`] and pops it again, also when a Rust callback panics.
+/// Pushes a firing frame of the current execution context and pops it again,
+/// also when a Rust callback panics. Frames are per context (see
+/// `runtime::Engine`): a firing parked in a suspended fiber keeps its frame
+/// in that fiber's record, so this always pops its own.
 struct FrameGuard {
     popped: bool,
 }
 
 impl FrameGuard {
     fn push() -> Self {
-        FRAMES.with(|f| f.borrow_mut().push(Frame { thrown: None }));
+        runtime::push_frame();
         Self { popped: false }
     }
 
     /// Pops the frame and gives back the exception kept in it, if any.
     fn pop(mut self) -> Option<(String, ZvalHandle)> {
         self.popped = true;
-        FRAMES
-            .with(|f| f.borrow_mut().pop())
-            .and_then(|frame| frame.thrown)
+        runtime::pop_frame().and_then(|frame| frame.thrown)
     }
 }
 
 impl Drop for FrameGuard {
     fn drop(&mut self) {
         if !self.popped {
-            let frame = FRAMES.with(|f| f.borrow_mut().pop());
-            drop(frame);
+            drop(runtime::pop_frame());
         }
     }
 }
@@ -421,11 +413,7 @@ fn run_php_callback(callable: &ZvalHandle, args: &[Value]) -> Result<Value, Call
             if let CallError::Thrown(Thrown::Exception { object, .. }) = err {
                 // Keep the original for a PHP caller; with none (fired from
                 // Rust), the object is dropped, which queues its release.
-                FRAMES.with(|f| {
-                    if let Some(frame) = f.borrow_mut().last_mut() {
-                        frame.thrown = Some((message.clone(), object));
-                    }
-                });
+                runtime::keep_in_top_frame(message.clone(), object);
             }
             Err(CallbackError(message))
         }

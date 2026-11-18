@@ -375,22 +375,67 @@ a fatal error, call `exit()` or throw. The rule `src/runtime.rs` follows:
    (`finally` blocks do not run). Fired from Rust, it is the callback's error
    (`PHP code called exit(n)`).
 
-6. **A fiber cannot suspend from inside a hook callback.** The state
-   above (native depth, pending re-raise or exit, the per-firing frames)
-   assumes native calls nest strictly. A fiber suspended under one of our
-   native calls would leave that call's Rust frames parked on the fiber's C
-   stack while the rest of the program runs on. So `native_entry` blocks
-   fiber switching for the whole native call with PHP's own
-   `zend_fiber_switch_block()` / `zend_fiber_switch_unblock()`
-   (`Zend/zend_fibers.h`, a counter that `Fiber::start`, `resume` and
-   `suspend` check), balanced on every path (bailouts never cross that
-   frame; panics are caught in it). `Fiber::suspend()` (or starting or
-   resuming a fiber) in a hook callback therefore throws `FiberError`, which
-   reaches the PHP caller like any callback exception. A fiber that fires
-   hooks whose callbacks do not switch fibers, and fibers used in PHP code
-   with no hook on the stack, work as usual. Entries from Rust with no
-   native frame beneath them (`eval`, `require`, `run_file`, `Php::call`) do
-   not block: nothing of ours is on the C stack for a fiber to park.
+6. **Fibers: the unwinding state is per execution context.** Hook callbacks
+   may create, start, resume, throw into and finish fibers, and a callback
+   running inside a fiber may call `Fiber::suspend()`: the firing pauses
+   with the fiber and continues from the same callback, with the remaining
+   callbacks, when the fiber is resumed. Each fiber has its own C stack, and
+   on one stack native calls still nest strictly; only across stacks they do
+   not. So the state the rules above rely on is kept per context (the main
+   context and each fiber, i.e. each `zend_fiber_context`): how many of our
+   native calls are on that stack, the pending bailout re-raise, the parked
+   `exit()`/graceful-exit object, and the firing frames that hold a PHP
+   callback's exception for its PHP caller. Fiber observers registered from
+   our MINIT (`zend_observer_fiber_{init,switch,destroy}_register`; the
+   observer lists exist from `zend_observer_startup`, which runs before
+   module MINITs, and registering them changes nothing else) swap that state:
+   on a switch, which PHP announces on the outgoing stack just before
+   jumping, the outgoing context's record is saved under its address and the
+   incoming one's loaded (fresh for a new fiber); a destroyed context's
+   record is freed, releasing what it held; a new context at a reused address
+   drops any stale record. PHP keeps `EG(bailout)`, the VM stack and
+   `EG(current_execute_data)` per fiber itself, so a bailout never jumps
+   across stacks: inside a fiber it is caught by the fiber's own `zend_try`
+   and re-raised by PHP in the context that resumed the fiber, where the
+   guards above handle it (a Rust panic carried as a bailout follows the
+   same path and is resumed there). `exit()` in a fiber's callback reaches
+   the resumer as PHP's own error transfer and ends the script.
+   `Fiber::suspend()` from a callback with no fiber on the stack (fired from
+   Rust or from top-level code) is PHP's own `FiberError`, an ordinary
+   callback exception.
+
+   **Parked Rust frames.** While a fiber is suspended inside a hook, the Rust
+   frames of that firing (the native call, the registry, the callback
+   trampoline) sit on the fiber's stack. They hold no `RefCell` borrow, lock
+   or thread-local borrow across a call into PHP (every borrow in the bridge
+   ends before PHP is entered, and `speedyspec-hooks-memory` snapshots the
+   entries before calling any callback), so other contexts can use the
+   registry and the engine freely. When PHP destroys a suspended fiber
+   (last reference gone, cycle collection, or shutdown) it resumes it with
+   its internal graceful-exit object: `Fiber::suspend()` throws it, it
+   unwinds the callback, the trampoline parks it like an `exit()` (it is not
+   reported as one: `PhpError`/`CallbackError` say the fiber was destroyed),
+   and the native call rethrows it, so the frames return normally and
+   release what they hold. After a fatal error PHP marks every existing
+   object destructed; a fiber suspended at that time is later freed without
+   being resumed, and its stack, with our frames on it, is abandoned: never
+   run again, its Rust values leaked. None of them depends on its destructor
+   for soundness (no borrow guards, pins or locks), so this is a leak, not
+   undefined behaviour. Such a fiber can still be resumed normally while it
+   is referenced.
+
+   **What is per context and what is not.** Per context: the native depth,
+   the pending re-raise, the parked exit object, the firing frames (above).
+   Process-wide, on purpose: the release queue (a reference may be released
+   from any context, and draining runs under a guard wherever it happens, so
+   a destructor that destroys a fiber there is fine); the parked panic (at
+   most one is in flight, and it travels with the bailout from context to
+   context); `poisoned()` (a property of the engine); the entry counter;
+   `alive`; the dummy-frame function; the hook registry and the
+   `HookException` class; the owner stamp (`set_owner` names the plugin for
+   every later `Hook::add`, from whichever context, until changed); and the
+   output redirection (process stdout/stderr). ext-php-rs's bailout cleanup
+   stack is thread-wide too, but the bridge never puts anything on it.
 
 **Poisoned engine.** The engine keeps working after a bailout, as PHP's
 interactive shell does, but degraded for the rest of its single request:
@@ -414,13 +459,19 @@ filters many times is destroyed exactly when PHP drops its last reference,
 and a thousand more firings, from PHP and from Rust, do not change
 `memory_get_usage()`.
 
-**Shutdown.** Dropping `Php` drains the release queue, then ends the request,
-which destroys every PHP object, including those Rust still holds (PHP
-callbacks left in the registry, `Value::Opaque`s kept by Rust code). After
-that the bridge marks the engine dead: queued and still-held references are
-forgotten, never released (their memory belonged to the request), and a PHP
-callback left in a registry that outlives `Php` returns a `CallbackError`
-when fired instead of entering PHP.
+**Shutdown.** Dropping `Php`, in this order: (1) drains the release queue;
+(2) ends the request with everything still in place (the engine marked
+alive, the registry, the per-context records, `HookException`). PHP's
+shutdown calls every remaining destructor, and a fiber still suspended
+inside a hook is destroyed then, which runs the parked Rust frames to
+their end (see rule 6) while everything they touch still exists. The
+request then frees every PHP object, including those Rust still holds (PHP
+callbacks left in the registry, `Value::Opaque`s kept by Rust code). (3)
+Only after that is the engine marked dead: queued and still-held
+references, and the records of abandoned fibers, are forgotten, never
+released (their memory belonged to the request), and a PHP callback left in
+a registry that outlives `Php` returns a `CallbackError` when fired instead
+of entering PHP. (4) The module and SAPI shut down.
 
 ## Build time and binary size
 
@@ -444,8 +495,8 @@ x86_64 CI runner should be faster.
 
 ## Verification
 
-`cargo test -p speedyspec-php --test php` prints an `ok` line per case (35
-since Task 3's second fix round) and exits 0 on both targets.
+`cargo test -p speedyspec-php --test php` prints an `ok` line per check (48
+since Task 3's third fix round) and exits 0 on both targets.
 
 - **macOS arm64**, native: `otool -L` on the test binary lists only
   `libSystem`, `libresolv` and the CoreFoundation, CoreServices and

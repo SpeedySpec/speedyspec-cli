@@ -36,9 +36,15 @@
 //! object; when it happens below a native function it is carried back up to
 //! that function, which rethrows it, so the PHP code that called in unwinds
 //! as PHP's own `exit()` would.
+//!
+//! Each fiber runs on its own C stack and may suspend while one of our native
+//! calls is on it. The state the rules above use (native depth, pending
+//! re-raise, parked exit, firing frames) is therefore kept per execution
+//! context and swapped by fiber observers; see [`Engine`].
 
 use std::any::Any;
 use std::cell::{Cell, RefCell};
+use std::collections::BTreeMap;
 use std::ffi::{CStr, CString, c_char, c_int, c_void};
 use std::fmt;
 use std::io::Write;
@@ -78,8 +84,9 @@ unsafe extern "C" {
     fn zend_is_unwind_exit(ex: *const zend_object) -> bool;
     fn zend_is_graceful_exit(ex: *const zend_object) -> bool;
     fn zend_throw_exception_internal(exception: *mut zend_object);
-    fn zend_fiber_switch_block();
-    fn zend_fiber_switch_unblock();
+    fn zend_observer_fiber_init_register(handler: unsafe extern "C" fn(*mut c_void));
+    fn zend_observer_fiber_switch_register(handler: unsafe extern "C" fn(*mut c_void, *mut c_void));
+    fn zend_observer_fiber_destroy_register(handler: unsafe extern "C" fn(*mut c_void));
 }
 
 /// INI settings the CLI needs regardless of any php.ini, which is never read.
@@ -552,12 +559,18 @@ impl Drop for Php {
 
         // The request freed every PHP value. Any reference Rust still holds
         // or has queued points into freed memory and must never be touched.
+        // Per-context records of fibers that were never unwound (PHP only
+        // abandons a suspended fiber without unwinding it when its destructor
+        // is skipped, after a fatal error) are forgotten too: `alive` is false,
+        // so dropping them releases nothing.
         let parked_panic = ENGINE.with(|e| {
             e.alive.set(false);
             let queued = std::mem::take(&mut *e.releases.borrow_mut());
             drop(queued); // ManuallyDrop: nothing is released.
-            e.pending_exit.set(ptr::null_mut());
-            e.unwinding.set(false);
+            let current = e.take_current();
+            let saved = std::mem::take(&mut *e.contexts.borrow_mut());
+            drop(current);
+            drop(saved);
             e.panic.borrow_mut().take()
         });
         hook_class::uninstall();
@@ -586,18 +599,32 @@ impl Drop for Php {
 
 /// Per-thread engine state. PHP only ever runs on one thread, the one that
 /// booted it, and every native function and SAPI callback runs there too.
+///
+/// The first group of fields describes the *current execution context*: the
+/// main context or one fiber, i.e. one C stack. Native calls nest strictly
+/// on one stack, but not across stacks, because a fiber can suspend while
+/// one of our native calls is on its stack. So these fields are swapped by
+/// the fiber-switch observer ([`on_fiber_switch`]): the outgoing context's
+/// values are saved in `contexts`, the incoming one's loaded. Everything
+/// after them is process-wide; see `docs/php-embed.md` for why each is.
 struct Engine {
-    /// Between boot and the end of the request in `Drop`.
-    alive: Cell<bool>,
-    /// Native functions (called by PHP) currently on the stack.
+    /// Native functions (called by PHP) currently on this context's stack.
     native_depth: Cell<u32>,
     /// A guard inside a native function caught a bailout; the innermost
     /// native function must re-raise it. No PHP code runs meanwhile.
     unwinding: Cell<bool>,
-    /// `exit()` happened below a native function; that function must rethrow
-    /// this unwind-exit object (one owned reference). No PHP code runs
-    /// meanwhile.
+    /// `exit()` (or a fiber's graceful-exit unwind) happened below a native
+    /// function; that function must rethrow this object (one owned
+    /// reference). No PHP code runs meanwhile.
     pending_exit: Cell<*mut zend_object>,
+    /// Firings started from PHP in this context; see [`Frame`].
+    frames: RefCell<Vec<Frame>>,
+    /// The saved records of the contexts not running now, by
+    /// `zend_fiber_context` address.
+    contexts: RefCell<BTreeMap<usize, ContextState>>,
+
+    /// Between boot and the end of the request in `Drop`.
+    alive: Cell<bool>,
     /// A panic carried through PHP by a bailout, to resume in Rust.
     panic: RefCell<Option<Box<dyn Any + Send>>>,
     /// References waiting to be released by [`drain`].
@@ -613,10 +640,12 @@ struct Engine {
 thread_local! {
     static ENGINE: Engine = const {
         Engine {
-            alive: Cell::new(false),
             native_depth: Cell::new(0),
             unwinding: Cell::new(false),
             pending_exit: Cell::new(ptr::null_mut()),
+            frames: RefCell::new(Vec::new()),
+            contexts: RefCell::new(BTreeMap::new()),
+            alive: Cell::new(false),
             panic: RefCell::new(None),
             releases: RefCell::new(Vec::new()),
             entries: Cell::new(0),
@@ -624,6 +653,135 @@ thread_local! {
             dummy_func: Cell::new(ptr::null_mut()),
         }
     };
+}
+
+/// One firing started from PHP. A PHP callback's exception is kept here
+/// (with the message its `CallbackError` carries) so the PHP caller can get
+/// the original object back.
+pub(crate) struct Frame {
+    pub(crate) thrown: Option<(String, ZvalHandle)>,
+}
+
+/// The saved per-context part of [`Engine`] for a context that is not
+/// running. Dropping one releases what it holds (later, see
+/// [`release_later`]).
+#[derive(Default)]
+struct ContextState {
+    native_depth: u32,
+    unwinding: bool,
+    pending_exit: Option<ZvalHandle>,
+    frames: Vec<Frame>,
+}
+
+impl Engine {
+    /// Moves the current context's state out, leaving a fresh one.
+    fn take_current(&self) -> ContextState {
+        let exit = self.pending_exit.replace(ptr::null_mut());
+        ContextState {
+            native_depth: self.native_depth.replace(0),
+            unwinding: self.unwinding.replace(false),
+            // SAFETY: `pending_exit` owns one reference, which moves here.
+            pending_exit: (!exit.is_null()).then(|| unsafe { ZvalHandle::adopt_object(exit) }),
+            frames: std::mem::take(&mut *self.frames.borrow_mut()),
+        }
+    }
+
+    /// Makes `state` the current context's state. The current state must be
+    /// fresh (just taken).
+    fn load_current(&self, state: ContextState) {
+        let ContextState {
+            native_depth,
+            unwinding,
+            pending_exit,
+            frames,
+        } = state;
+        self.native_depth.set(native_depth);
+        self.unwinding.set(unwinding);
+        self.pending_exit.set(
+            pending_exit
+                .and_then(ZvalHandle::into_object)
+                .unwrap_or(ptr::null_mut()),
+        );
+        *self.frames.borrow_mut() = frames;
+    }
+}
+
+/// Registers the fiber observers. Called from the module's MINIT: the
+/// observer lists exist from `zend_observer_startup`, which
+/// `php_module_startup` runs before any module's MINIT.
+pub(crate) fn register_fiber_observers() {
+    // SAFETY: plain registration of `extern "C"` handlers with the signatures
+    // of zend_observer_fiber_{init,switch,destroy}_handler (pointers to
+    // zend_fiber_context, which we never dereference).
+    unsafe {
+        zend_observer_fiber_init_register(on_fiber_init);
+        zend_observer_fiber_switch_register(on_fiber_switch);
+        zend_observer_fiber_destroy_register(on_fiber_destroy);
+    }
+}
+
+/// Runs an observer body; a panic cannot leave an `extern "C"` function and
+/// there is no PHP code to carry it through here, so it aborts.
+fn observer(f: impl FnOnce()) {
+    if catch_unwind(AssertUnwindSafe(f)).is_err() {
+        eprintln!("speedyspec-php: panic in a fiber observer");
+        std::process::abort();
+    }
+}
+
+/// A new fiber context: forget any stale record at the same address (left by
+/// a fiber PHP freed without destroying its context).
+unsafe extern "C" fn on_fiber_init(context: *mut c_void) {
+    observer(|| {
+        let stale = ENGINE.with(|e| e.contexts.borrow_mut().remove(&(context as usize)));
+        drop(stale);
+    });
+}
+
+/// Called on the outgoing stack just before PHP jumps to `to`.
+unsafe extern "C" fn on_fiber_switch(from: *mut c_void, to: *mut c_void) {
+    observer(|| {
+        ENGINE.with(|e| {
+            let leaving = e.take_current();
+            let (stale, entering) = {
+                let mut contexts = e.contexts.borrow_mut();
+                let stale = contexts.insert(from as usize, leaving);
+                (stale, contexts.remove(&(to as usize)).unwrap_or_default())
+            };
+            e.load_current(entering);
+            drop(stale);
+        });
+    });
+}
+
+/// A fiber context is gone (after the switch away from it).
+unsafe extern "C" fn on_fiber_destroy(context: *mut c_void) {
+    observer(|| {
+        let record = ENGINE.with(|e| e.contexts.borrow_mut().remove(&(context as usize)));
+        drop(record);
+    });
+}
+
+/// Starts a firing in the current context.
+pub(crate) fn push_frame() {
+    ENGINE.with(|e| e.frames.borrow_mut().push(Frame { thrown: None }));
+}
+
+/// Ends the current context's innermost firing.
+pub(crate) fn pop_frame() -> Option<Frame> {
+    ENGINE.with(|e| e.frames.borrow_mut().pop())
+}
+
+/// Keeps a PHP callback's exception in the current context's innermost
+/// firing; with none (fired from Rust), it is dropped.
+pub(crate) fn keep_in_top_frame(message: String, object: ZvalHandle) {
+    let replaced = ENGINE.with(|e| {
+        e.frames
+            .borrow_mut()
+            .last_mut()
+            .and_then(|frame| frame.thrown.replace((message, object)))
+    });
+    drop(replaced);
 }
 
 /// How many times the bridge has entered the PHP engine since the process
@@ -720,13 +878,9 @@ fn run_native(
     retval: &mut Zval,
     body: fn(&mut ExecuteData, &mut Zval),
 ) -> bool {
-    // No fiber may switch while this native call is on the C stack: a fiber
-    // suspended under it would park its Rust frames there, and the engine
-    // state above assumes native calls nest. Fiber::start, resume and suspend
-    // throw FiberError until the call returns. The block is lifted below on
-    // every path: bailouts never cross this frame and panics are caught.
-    // SAFETY: a counter in the engine, balanced by the unblock below.
-    unsafe { zend_fiber_switch_block() };
+    // The body may suspend the fiber it runs in and be resumed much later;
+    // the per-context state is switched under it by the fiber observer, so
+    // every ENGINE access here reads this context's state.
     ENGINE.with(|e| e.native_depth.set(e.native_depth.get() + 1));
     // Releasing what the call let go of is still part of the call: a
     // destructor that bails out must be re-raised like any other bailout.
@@ -735,8 +889,6 @@ fn run_native(
         drain();
     }));
     ENGINE.with(|e| e.native_depth.set(e.native_depth.get() - 1));
-    // SAFETY: balances the block above, exactly once.
-    unsafe { zend_fiber_switch_unblock() };
     if let Err(payload) = outcome {
         // Carry the panic through the PHP frames below as a bailout.
         ENGINE.with(|e| *e.panic.borrow_mut() = Some(payload));
@@ -791,6 +943,9 @@ pub(crate) fn drain() {
 pub(crate) enum Thrown {
     /// `exit()` / `die()`, with `EG(exit_status)`.
     Exit(i32),
+    /// PHP is destroying the suspended fiber this code runs in, unwinding it
+    /// with its internal graceful-exit object. Not a process exit.
+    FiberDestroyed,
     Exception {
         object: ZvalHandle,
         class: String,
@@ -804,6 +959,12 @@ impl Thrown {
     pub(crate) fn into_php_error(self) -> PhpError {
         match self {
             Self::Exit(status) => PhpError::Exit(status),
+            Self::FiberDestroyed => PhpError::Exception {
+                class: "GracefulExit".to_owned(),
+                message: "the fiber running this code was destroyed".to_owned(),
+                file: String::new(),
+                line: 0,
+            },
             Self::Exception {
                 class,
                 message,
@@ -838,9 +999,13 @@ pub(crate) fn take_thrown() -> Option<Thrown> {
         obj
     };
     // SAFETY: `obj` is the live object EG(exception) held.
-    if unsafe { zend_is_unwind_exit(obj) || zend_is_graceful_exit(obj) } {
+    let (unwind_exit, graceful_exit) =
+        unsafe { (zend_is_unwind_exit(obj), zend_is_graceful_exit(obj)) };
+    if unwind_exit || graceful_exit {
         // SAFETY: as above.
         let status = unsafe { (*ext_php_rs_executor_globals()).exit_status };
+        // Either way the PHP code below a native function must keep
+        // unwinding with this very object: parked for that function.
         ENGINE.with(|e| {
             if e.native_depth.get() > 0 && e.pending_exit.get().is_null() {
                 e.pending_exit.set(obj);
@@ -849,7 +1014,11 @@ pub(crate) fn take_thrown() -> Option<Thrown> {
                 drop(unsafe { ZvalHandle::adopt_object(obj) });
             }
         });
-        return Some(Thrown::Exit(status));
+        return Some(if graceful_exit {
+            Thrown::FiberDestroyed
+        } else {
+            Thrown::Exit(status)
+        });
     }
     // SAFETY: we own the reference just taken from EG(exception).
     let object = unsafe { ZvalHandle::adopt_object(obj) };
@@ -1010,6 +1179,9 @@ impl CallError {
     pub(crate) fn describe(&self) -> String {
         match self {
             Self::Thrown(Thrown::Exit(status)) => format!("PHP code called exit({status})"),
+            Self::Thrown(Thrown::FiberDestroyed) => {
+                "the fiber running this callback was destroyed".to_owned()
+            }
             Self::Thrown(Thrown::Exception {
                 class,
                 message,

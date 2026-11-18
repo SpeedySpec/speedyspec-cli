@@ -26,6 +26,9 @@ use speedyspec_php::{BootOptions, Output, Php, PhpError};
 struct Ctx {
     php: Php,
     hooks: Rc<TestHooks>,
+    /// Set by a Rust callback that a fiber parked inside a hook fires while
+    /// PHP destroys it at shutdown.
+    shutdown_seen: Rc<Cell<bool>>,
 }
 
 type Case = fn(&Ctx) -> Result<(), String>;
@@ -54,19 +57,36 @@ const CASES: &[(&str, Case)] = &[
     ("exit_in_require_is_caught", case_exit_in_require_is_caught),
     ("exit_in_run_file", case_exit_in_run_file),
     ("run_file_argv", case_run_file_argv),
-    (
-        "fiber_cannot_suspend_in_callback",
-        case_fiber_cannot_suspend_in_callback,
-    ),
     ("fiber_fires_hook", case_fiber_fires_hook),
     ("fiber_without_hooks", case_fiber_without_hooks),
+    ("fiber_in_callback", case_fiber_in_callback),
+    ("fiber_suspends_in_hook", case_fiber_suspends_in_hook),
+    ("fiber_filter_suspends", case_fiber_filter_suspends),
+    (
+        "fiber_parked_while_main_works",
+        case_fiber_parked_while_main_works,
+    ),
+    ("fiber_two_parked", case_fiber_two_parked),
+    (
+        "fiber_dropped_while_parked",
+        case_fiber_dropped_while_parked,
+    ),
+    ("fiber_throw_into_parked", case_fiber_throw_into_parked),
+    ("fiber_frames_per_context", case_fiber_frames_per_context),
+    ("fiber_exit_in_callback", case_fiber_exit_in_callback),
+    (
+        "fiber_suspend_outside_fiber",
+        case_fiber_suspend_outside_fiber,
+    ),
     // Must run right before the first fatal error of the run.
     ("not_poisoned_before_fatal", case_not_poisoned_before_fatal),
     ("fatal_is_caught", case_fatal_is_caught),
     ("poisoned_after_fatal", case_poisoned_after_fatal),
+    ("fatal_while_fiber_parked", case_fatal_while_fiber_parked),
     ("fatal_inside_callback", case_fatal_inside_callback),
     ("exit_inside_callback", case_exit_inside_callback),
     ("panic_propagates", case_panic_propagates),
+    ("panic_inside_fiber", case_panic_inside_fiber),
     ("array_round_trip", case_array_round_trip),
     ("preload_is_available", case_preload_is_available),
     ("output_redirect", case_output_redirect),
@@ -76,6 +96,8 @@ const CASES: &[(&str, Case)] = &[
     ),
     ("call_and_inspect", case_call_and_inspect),
     ("refcounts_balance", case_refcounts_balance),
+    // Must stay last: it leaves a fiber parked inside a hook for shutdown.
+    ("fiber_parked_at_shutdown", case_fiber_parked_at_shutdown),
 ];
 
 fn main() -> ExitCode {
@@ -90,7 +112,11 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    let ctx = Ctx { php, hooks };
+    let ctx = Ctx {
+        php,
+        hooks,
+        shutdown_seen: Rc::default(),
+    };
 
     let mut failed = 0;
     for (name, case) in CASES {
@@ -104,8 +130,24 @@ fn main() -> ExitCode {
     }
 
     // The registry outlives the engine here, still holding PHP closures.
-    let Ctx { php, hooks } = ctx;
-    drop(php);
+    let Ctx {
+        php,
+        hooks,
+        shutdown_seen,
+    } = ctx;
+    let (out, ()) = capture(1, || drop(php));
+    match out {
+        Ok(out) if out.is_empty() && shutdown_seen.get() => {
+            println!("ok: parked_fiber_unwound_at_shutdown");
+        }
+        other => {
+            failed += 1;
+            println!(
+                "FAILED: parked_fiber_unwound_at_shutdown: output {other:?}, unwound {}",
+                shutdown_seen.get()
+            );
+        }
+    }
     match after_shutdown(&hooks) {
         Ok(()) => println!("ok: php_callbacks_inert_after_shutdown"),
         Err(why) => {
@@ -360,30 +402,230 @@ fn case_fatal_is_caught(ctx: &Ctx) -> Result<(), String> {
     eq(&stdout_of(|| ctx.php.eval("t", "echo 'alive';"))?, "alive")
 }
 
-fn case_fiber_cannot_suspend_in_callback(ctx: &Ctx) -> Result<(), String> {
-    // Fiber::suspend() in a callback of a hook fired inside a fiber throws
-    // FiberError to the PHP caller, instead of parking the bridge's frames.
+fn case_fiber_in_callback(ctx: &Ctx) -> Result<(), String> {
+    // A callback creates a fiber, which suspends back into the callback; the
+    // callback resumes it to completion and the hook returns normally.
+    eq(&require_out(ctx, "fiber_in_callback.php")?, "s,r1;done")
+}
+
+fn case_fiber_suspends_in_hook(ctx: &Ctx) -> Result<(), String> {
+    // The firing pauses with the fiber and continues from the same callback,
+    // then runs the remaining callbacks in order.
     eq(
-        &require_out(ctx, "fiber_suspend_in_callback.php")?,
-        "FiberError",
-    )?;
-    // The engine is not wedged: code and hook firings still run.
-    eq(&stdout_of(|| ctx.php.eval("t", "echo 'alive';"))?, "alive")?;
+        &require_out(ctx, "fiber_suspend_in_hook.php")?,
+        "[aparked|main|b1c]|end",
+    )
+}
+
+fn case_fiber_filter_suspends(ctx: &Ctx) -> Result<(), String> {
+    // 1 + 1 = 2 is suspended with; resumed with 10: 2 * 10 + 100.
+    eq(&require_out(ctx, "fiber_filter_suspends.php")?, "2,120")
+}
+
+fn case_fiber_parked_while_main_works(ctx: &Ctx) -> Result<(), String> {
+    eq(&require_out(ctx, "fiber_shared_park.php")?, "<xparked")?;
+    // While fiber A is parked inside `fiber.shared`: fire it from PHP, add
+    // and remove a callback, fire it from Rust, evaluate code.
     eq(
         &stdout_of(|| {
             ctx.php.eval(
                 "t",
-                "\\SpeedySpec\\Hooks\\Hook::add('fiber.after', static fn () => print('ran')); \\SpeedySpec\\Hooks\\Hook::run('fiber.after');",
+                "use SpeedySpec\\Hooks\\Hook;
+                 Hook::run('fiber.shared');
+                 echo '|';
+                 $extra = static fn () => print('z');
+                 Hook::add('fiber.shared', $extra);
+                 Hook::run('fiber.shared');
+                 echo Hook::remove('fiber.shared', $extra) ? '|R' : '|?';",
             )
         })?,
-        "ran",
+        "xy|xyz|R",
     )?;
+    let (out, fired) = capture(1, || ctx.hooks.run("fiber.shared", &[]));
+    fired.map_err(|e| e.to_string())?;
+    eq(&out?, "xy")?;
+    eq(&stdout_of(|| ctx.php.eval("t", "echo 2 + 2;"))?, "4")?;
+    // Resumed, A finishes its own firing from the snapshot it started with.
+    eq(
+        &stdout_of(|| {
+            ctx.php.eval(
+                "t",
+                "$GLOBALS['speedyspecParkedA']->resume('!');
+                 echo $GLOBALS['speedyspecParkedA']->isTerminated() ? 'T' : 'S';",
+            )
+        })?,
+        "!y>T",
+    )
+}
+
+fn case_fiber_two_parked(ctx: &Ctx) -> Result<(), String> {
+    // Parked in the order A, B; resumed B first.
+    eq(
+        &require_out(ctx, "fiber_two_parked.php")?,
+        "A1B1|-B2B!+A2A!",
+    )
+}
+
+fn case_fiber_dropped_while_parked(ctx: &Ctx) -> Result<(), String> {
+    // PHP unwinds the destroyed fiber through the parked firing (finally
+    // blocks run, the argument is released), and parking and dropping two
+    // hundred more fibers does not grow memory.
+    eq(
+        &require_out(ctx, "fiber_dropped.php")?,
+        "parked;unwound;fiber-finally;freed;dropped;0",
+    )?;
+    // A parked fiber whose last reference Rust holds is destroyed from the
+    // bridge's own release queue, at the end of the next entry into PHP.
+    let fiber = ctx
+        .php
+        .eval(
+            "t",
+            "return (static function (): Fiber
+             {
+                 $fiber = new Fiber(static function (): void
+                 {
+                     \\SpeedySpec\\Hooks\\Hook::run('fiber.drop', new stdClass());
+                 });
+                 $fiber->start();
+                 return $fiber;
+             })();",
+        )
+        .map_err(|e| e.to_string())?;
+    if ctx.php.class_of(&fiber).as_deref() != Some("Fiber") {
+        return Err(format!("expected a Fiber, got {fiber:?}"));
+    }
+    drop(fiber);
+    eq(
+        &stdout_of(|| ctx.php.eval("t", "echo 'next;';"))?,
+        "next;unwound;",
+    )?;
+
+    // Nothing is left wedged: hooks, eval and a top-level exit() still work.
     let result = ctx
         .hooks
         .filter("php.double", Value::Int(21), &[])
         .map_err(|e| e.to_string())?;
     if result != Value::Int(42) {
         return Err(format!("firing from Rust gave {result:?}"));
+    }
+    match ctx.php.eval("t", "exit(5);") {
+        Err(PhpError::Exit(5)) => {}
+        other => return Err(format!("top-level exit: {other:?}")),
+    }
+    eq(&stdout_of(|| ctx.php.eval("t", "echo 'alive';"))?, "alive")
+}
+
+fn case_fiber_throw_into_parked(ctx: &Ctx) -> Result<(), String> {
+    eq(&require_out(ctx, "fiber_throw_into.php")?, "same")
+}
+
+fn case_fiber_frames_per_context(ctx: &Ctx) -> Result<(), String> {
+    eq(
+        &require_out(ctx, "fiber_frames_per_context.php")?,
+        "from-main,from-fiber",
+    )
+}
+
+fn case_fiber_exit_in_callback(ctx: &Ctx) -> Result<(), String> {
+    // exit() in a callback inside a fiber ends the whole script.
+    let (out, result) = capture(1, || {
+        ctx.php.require(&fixture("fiber_exit_in_callback.php"))
+    });
+    eq(&out?, "")?;
+    match result {
+        Err(PhpError::Exit(6)) => {}
+        other => return Err(format!("expected Err(Exit(6)), got {other:?}")),
+    }
+    eq(&stdout_of(|| ctx.php.eval("t", "echo 'alive';"))?, "alive")
+}
+
+fn case_fiber_suspend_outside_fiber(ctx: &Ctx) -> Result<(), String> {
+    // PHP's own rule, propagated as an ordinary exception: fired from PHP...
+    eq(
+        &require_out(ctx, "fiber_suspend_outside.php")?,
+        "Cannot suspend outside of a fiber",
+    )?;
+    // ...and fired from Rust.
+    match ctx.hooks.run("fiber.outside", &[]) {
+        Err(err)
+            if err.message.contains("FiberError")
+                && err.message.contains("Cannot suspend outside of a fiber") =>
+        {
+            Ok(())
+        }
+        other => Err(format!("from Rust: {other:?}")),
+    }
+}
+
+fn case_fatal_while_fiber_parked(ctx: &Ctx) -> Result<(), String> {
+    // Park a fiber inside a hook, hit a fatal error at the top level, then
+    // resume the fiber: it completes its firing.
+    eq(
+        &stdout_of(|| {
+            ctx.php.eval(
+                "t",
+                "$GLOBALS['speedyspecParkedB'] = new Fiber(static function (): void
+                 {
+                     \\SpeedySpec\\Hooks\\Hook::run('fiber.shared');
+                     echo 'B-done';
+                 });
+                 echo $GLOBALS['speedyspecParkedB']->start();",
+            )
+        })?,
+        "xparked",
+    )?;
+    let (_, result) = capture(1, || ctx.php.require(&fixture("redeclare.php")));
+    match result {
+        Err(PhpError::Fatal { .. }) => {}
+        other => return Err(format!("expected a fatal error, got {other:?}")),
+    }
+    eq(
+        &stdout_of(|| {
+            ctx.php
+                .eval("t", "$GLOBALS['speedyspecParkedB']->resume('+');")
+        })?,
+        "+yB-done",
+    )?;
+    if ctx.php.poisoned() {
+        Ok(())
+    } else {
+        Err("not poisoned".to_owned())
+    }
+}
+
+fn case_panic_inside_fiber(ctx: &Ctx) -> Result<(), String> {
+    // A panicking Rust callback fired inside a fiber: PHP carries the bailout
+    // out of the fiber into the resuming context, where the panic resumes.
+    let hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let (out, caught) = capture(1, || {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ctx.php.require(&fixture("fiber_panic.php"))
+        }))
+    });
+    std::panic::set_hook(hook);
+    match caught {
+        Err(payload) if matches!(payload.downcast_ref::<PanicMarker>(), Some(PanicMarker(7))) => {}
+        Err(_) => return Err("a different panic came out".to_owned()),
+        Ok(result) => return Err(format!("no panic came out: {result:?}")),
+    }
+    if out?.contains("not reached") {
+        return Err("PHP kept running after the panic".to_owned());
+    }
+    eq(&stdout_of(|| ctx.php.eval("t", "echo 'alive';"))?, "alive")
+}
+
+fn case_fiber_parked_at_shutdown(ctx: &Ctx) -> Result<(), String> {
+    // Leaves a fiber parked inside a hook; main() checks, after dropping
+    // `Php`, that PHP unwound it through the parked firing.
+    let seen = ctx.shutdown_seen.clone();
+    add_rust(ctx, "fiber.shutdown.seen", move |_| {
+        seen.set(true);
+        Ok(Value::Null)
+    })?;
+    eq(&require_out(ctx, "fiber_parked_at_shutdown.php")?, "parked")?;
+    if ctx.shutdown_seen.get() {
+        return Err("the fiber was unwound too early".to_owned());
     }
     Ok(())
 }
