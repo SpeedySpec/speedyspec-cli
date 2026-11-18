@@ -14,8 +14,7 @@ use speedyspec_php::{PHP_VERSION, PhpError};
 use crate::boot::{CONTRACTS_VERSION, Runtime, boot};
 use crate::drivers;
 
-/// Names a plugin command may not take. `self` has no subcommands yet but is reserved for the
-/// plan that adds them; `help` is clap's own.
+/// Names a plugin command may not take: the built-in commands, and `help`, which is clap's own.
 pub(crate) const RESERVED: &[&str] = &["app", "plugin", "self", "php", "help"];
 
 /// Names no plugin argument or option may take: they would clash with the global flags.
@@ -30,6 +29,12 @@ const GLOBAL_NAMES: &[&str] = &[
 /// Runs the whole program and returns its exit code. Runtime (and with it PHP) is dropped
 /// before returning, so PHP shuts down cleanly and its output is flushed.
 pub fn run(args: &[String]) -> ExitCode {
+    // `self` needs neither PHP nor plugins; a broken plugin must not stop an update.
+    if crate::self_cmd::is_self_command(args) {
+        let code = run_without_plugins(args);
+        let _ = std::io::stdout().flush();
+        return ExitCode::from(exit_byte(i64::from(code)));
+    }
     let code = match boot(args) {
         Ok(runtime) => {
             let code = dispatch(&runtime, args);
@@ -58,6 +63,24 @@ fn handler_status(status: i64) -> i32 {
 /// An exit status as the operating system will see it.
 fn exit_byte(status: i64) -> u8 {
     u8::try_from(status.rem_euclid(256)).expect("rem_euclid(256) fits a byte")
+}
+
+/// Parses the arguments with the built-in commands only and runs `self`.
+fn run_without_plugins(args: &[String]) -> i32 {
+    let tree = build_tree(&[], &[]);
+    match tree
+        .try_get_matches_from(std::iter::once("speedyspec".to_owned()).chain(args.iter().cloned()))
+    {
+        Ok(matches) => match matches.subcommand() {
+            Some(("self", sub)) => crate::self_cmd::run(sub),
+            _ => unreachable!("is_self_command found self"),
+        },
+        Err(error) => {
+            let code = error.exit_code();
+            let _ = error.print();
+            code
+        }
+    }
 }
 
 fn dispatch(runtime: &Runtime, args: &[String]) -> i32 {
@@ -94,7 +117,7 @@ fn dispatch(runtime: &Runtime, args: &[String]) -> i32 {
         let _ = write!(
             std::io::stdout().lock(),
             "speedyspec {}\nphp {PHP_VERSION}\ncontracts {CONTRACTS_VERSION}\n",
-            env!("CARGO_PKG_VERSION")
+            crate::self_cmd::VERSION
         );
         return 0;
     }
@@ -104,6 +127,7 @@ fn dispatch(runtime: &Runtime, args: &[String]) -> i32 {
             2
         }
         Some(("php", sub)) => run_php(runtime, sub),
+        Some(("self", sub)) => crate::self_cmd::run(sub),
         Some(("app", sub)) => match sub.subcommand() {
             Some(("list", _)) => crate::app::list(&runtime.apps),
             Some(("install", install)) => crate::app::install(runtime, install, prepass),
@@ -202,6 +226,7 @@ fn build_tree(plugin_commands: &[PluginCommand], install_options: &[InstallOptio
                         .help("Arguments for the script"),
                 ),
         )
+        .subcommand(crate::self_cmd::clap())
         .subcommand(
             Clap::new("app")
                 .about("Work with the apps plugins provide")

@@ -33,7 +33,12 @@ impl Speedyspec {
 
     /// As `new`, but with a `SPEEDYSPEC_HOME` the test keeps (to run several commands on it).
     pub fn with_home(plugins: &[&str], home: &Path) -> Speedyspec {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_speedyspec"));
+        Self::at(Path::new(env!("CARGO_BIN_EXE_speedyspec")), plugins, home)
+    }
+
+    /// As `with_home`, running another executable (a copy of the binary, say).
+    pub fn at(exe: &Path, plugins: &[&str], home: &Path) -> Speedyspec {
+        let mut command = Command::new(exe);
         command
             .current_dir(env!("CARGO_MANIFEST_DIR"))
             .env("SPEEDYSPEC_HOME", home)

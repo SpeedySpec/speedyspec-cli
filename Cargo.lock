@@ -1978,6 +1978,7 @@ dependencies = [
  "rpassword",
  "semver",
  "serde_json",
+ "sha2",
  "speedyspec-driver",
  "speedyspec-driver-kubernetes",
  "speedyspec-driver-zip",
@@ -1986,6 +1987,7 @@ dependencies = [
  "speedyspec-hooks-memory",
  "speedyspec-php",
  "speedyspec-plugin",
+ "speedyspec-selfupdate",
  "speedyspec-testkit",
  "tempfile",
 ]

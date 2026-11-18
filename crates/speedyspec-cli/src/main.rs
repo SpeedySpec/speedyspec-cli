@@ -8,6 +8,7 @@ mod drivers;
 mod install;
 mod plugin_cmd;
 mod prompt;
+mod self_cmd;
 
 use std::process::ExitCode;
 

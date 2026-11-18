@@ -13,6 +13,7 @@ speedyspec app uninstall <name>   # remove a Kubernetes install (see "Installing
 speedyspec plugin list            # name <TAB> version <TAB> directory
 speedyspec plugin install <src>   # install a plugin from a zip URL or a GitHub release
 speedyspec plugin remove <name>   # remove an installed plugin
+speedyspec self update [--check]  # replace this binary with the latest release (see "Updating speedyspec")
 speedyspec <plugin command> ...   # whatever loaded plugins added
 speedyspec                        # no arguments: help on stderr, exit 2
 ```
@@ -286,6 +287,31 @@ directory as `<vendor>.<name>`; an installed plugin of the same name is replaced
 new one has validated. Both commands work when an installed plugin is broken, and with
 `--no-plugins`. Only plugins in the user plugin directory can be removed. The name must be a plugin name
 (`vendor/package`); anything else is refused before any path is looked at.
+
+## Updating speedyspec
+
+```
+speedyspec self update --check    # say whether a newer release exists; changes nothing
+speedyspec self update            # download it, check it, and put it in place of this binary
+```
+
+`self update` asks GitHub for the latest release of `SpeedySpec/speedyspec-cli` and downloads the
+binary for this machine (`speedyspec-linux-x86_64`, `speedyspec-linux-aarch64`,
+`speedyspec-macos-x86_64` or `speedyspec-macos-aarch64`). Before anything changes it checks that
+the download is no larger than the release says, that its SHA-256 matches the release's
+`SHA256SUMS`, and that it runs and reports the release's version. Only then is it renamed over
+the running binary, in one step; when you run speedyspec through a symlink, the file the link
+points to is replaced and the link is left as it is. If any check fails, nothing is changed.
+
+The binary's directory must be writable by you. When it is not (`/usr/local/bin`, say), the
+command says so before downloading anything: run `sudo speedyspec self update`, or download the
+binary yourself from
+`https://github.com/SpeedySpec/speedyspec-cli/releases/latest/download/<binary name>`.
+
+No credentials are needed. GitHub limits anonymous API calls; if it refuses, set `GITHUB_TOKEN`
+(sent to `api.github.com` only). `self update` starts no PHP and loads no plugin, so a broken
+plugin cannot stop you from getting a fixed binary. A release whose binaries are still being
+uploaded (in the minutes after it is published) is reported as such; try again shortly.
 
 ## Hooks fired in this version
 

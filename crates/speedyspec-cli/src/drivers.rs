@@ -8,7 +8,10 @@ use speedyspec_driver_zip::ZipDriver;
 
 /// Every driver this binary can run.
 pub fn all() -> Vec<Rc<dyn Driver>> {
-    vec![Rc::new(ZipDriver::new()), Rc::new(KubernetesDriver::new())]
+    vec![
+        Rc::new(ZipDriver::new()),
+        Rc::new(KubernetesDriver::new().cli_version(env!("SPEEDYSPEC_VERSION"))),
+    ]
 }
 
 /// Their ids, without building them.

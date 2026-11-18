@@ -14,6 +14,7 @@ const DIR_ENV: &str = "SPEEDYSPEC_CONTRACTS_DIR";
 const DEFAULT_DIR: &str = "../../../speedyspec-cli-contracts";
 
 fn main() {
+    embed_version();
     println!("cargo:rerun-if-env-changed={DIR_ENV}");
     println!("cargo:rerun-if-changed=build.rs");
 
@@ -64,6 +65,26 @@ fn main() {
     generated.push_str("];\n");
     let out = PathBuf::from(env::var("OUT_DIR").expect("cargo sets it")).join("contracts.rs");
     fs::write(&out, generated).expect("OUT_DIR is writable");
+}
+
+/// The product version, from `version.txt` at the repository root (release-please keeps it).
+fn embed_version() {
+    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").expect("cargo sets it"));
+    let file = manifest_dir.join("../../version.txt");
+    println!("cargo:rerun-if-changed={}", file.display());
+    let text = fs::read_to_string(&file).unwrap_or_else(|e| {
+        eprintln!("error: speedyspec-cli cannot read {}: {e}", file.display());
+        std::process::exit(1)
+    });
+    let version = text.trim();
+    if semver::Version::parse(version).is_err() {
+        eprintln!(
+            "error: {} holds {version:?}, which is not a version (major.minor.patch)",
+            file.display()
+        );
+        std::process::exit(1);
+    }
+    println!("cargo:rustc-env=SPEEDYSPEC_VERSION={version}");
 }
 
 fn read_version(composer: &Path) -> String {
