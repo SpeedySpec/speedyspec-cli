@@ -4,11 +4,14 @@
 //! applied, so an install that fails part-way can still be found and removed.
 
 use serde_json::Value as Json;
-use speedyspec_driver::{KubernetesResources, PluginRef, Progress};
+use std::time::{Duration, Instant};
+
+use speedyspec_driver::{KubernetesResources, PluginRef, Progress, WaitFor};
 
 use crate::cluster::ClusterError;
 use crate::connect::Connection;
 use crate::manifest::{InstallIdentity, ResourceId, prepare_manifest, record_name};
+use crate::readiness::{Readiness, default_wait, readiness};
 use crate::record::{Record, Recorded, SCHEMA, Status};
 
 /// What an install is, beyond the resources.
@@ -188,4 +191,123 @@ fn place(
             .map_err(|error| error.message(&id.display()))?;
     }
     Ok(())
+}
+
+/// Waits for the install's workloads, then marks the record installed, or failed with what was
+/// not ready and why. Nothing is rolled back.
+pub fn wait_and_finish(
+    connection: &Connection,
+    applied: &Applied,
+    wait_for: Option<&[WaitFor]>,
+    identity: &InstallIdentity<'_>,
+    timeout: Duration,
+    interval: Duration,
+    progress: &mut dyn Progress,
+) -> Result<(), String> {
+    let outcome = targets(applied, wait_for)
+        .and_then(|targets| wait(connection, &targets, timeout, interval, progress));
+    let mut record = read_record(connection, identity)?
+        .ok_or_else(|| format!("the record of install {} has disappeared", identity.name))?;
+    match &outcome {
+        Ok(()) => {
+            record.status = Status::Installed;
+            record.message = None;
+        }
+        Err(problem) => {
+            record.status = Status::Failed;
+            record.message = Some(problem.clone());
+        }
+    }
+    let written = write_record(connection, &record, identity.namespace);
+    match (outcome, written) {
+        (Ok(()), written) => written,
+        (Err(problem), Ok(())) => Err(problem),
+        (Err(problem), Err(unrecorded)) => Err(format!("{problem}\n{unrecorded}")),
+    }
+}
+
+/// What to wait on, with the condition to wait for where one was given.
+fn targets(
+    applied: &Applied,
+    wait_for: Option<&[WaitFor]>,
+) -> Result<Vec<(ResourceId, Option<String>)>, String> {
+    let Some(wait_for) = wait_for else {
+        return Ok(default_wait(&applied.resources)
+            .into_iter()
+            .map(|id| (id, None))
+            .collect());
+    };
+    wait_for
+        .iter()
+        .map(|wait| {
+            applied
+                .resources
+                .iter()
+                .find(|id| {
+                    id.kind == wait.kind
+                        && id.name == wait.name
+                        && wait
+                            .namespace
+                            .as_ref()
+                            .is_none_or(|ns| id.namespace.as_ref() == Some(ns))
+                })
+                .map(|id| (id.clone(), wait.condition.clone()))
+                .ok_or_else(|| {
+                    format!(
+                        "cannot wait for {} \"{}\": it was not installed",
+                        wait.kind, wait.name
+                    )
+                })
+        })
+        .collect()
+}
+
+fn wait(
+    connection: &Connection,
+    targets: &[(ResourceId, Option<String>)],
+    timeout: Duration,
+    interval: Duration,
+    progress: &mut dyn Progress,
+) -> Result<(), String> {
+    let started = Instant::now();
+    // The last reason reported for each target, so a line is printed only when it changes.
+    let mut reasons: Vec<Option<String>> = vec![None; targets.len()];
+    loop {
+        let mut waiting = Vec::new();
+        for (index, (id, condition)) in targets.iter().enumerate() {
+            let state = match connection.get(id) {
+                Ok(object) => readiness(&id.kind, &object, condition.as_deref()),
+                Err(ClusterError::NotFound) => Readiness::NotYet("not found yet".to_owned()),
+                Err(error) => Readiness::NotYet(error.message(&id.display())),
+            };
+            match state {
+                Readiness::Ready => {
+                    if reasons[index].take().is_some() {
+                        progress.step(&format!("{} is ready", id.display()));
+                    }
+                }
+                Readiness::Failed(reason) => {
+                    return Err(format!("{} failed: {reason}", id.display()));
+                }
+                Readiness::NotYet(reason) => {
+                    if reasons[index].as_deref() != Some(reason.as_str()) {
+                        progress.step(&format!("waiting for {}: {reason}", id.display()));
+                        reasons[index] = Some(reason.clone());
+                    }
+                    waiting.push(format!("{} ({reason})", id.display()));
+                }
+            }
+        }
+        if waiting.is_empty() {
+            return Ok(());
+        }
+        if started.elapsed() >= timeout {
+            return Err(format!(
+                "not ready after {}s: {}",
+                timeout.as_secs(),
+                waiting.join(", ")
+            ));
+        }
+        std::thread::sleep(interval);
+    }
 }

@@ -5,7 +5,10 @@ mod support;
 use std::time::Duration;
 
 use serde_json::json;
-use speedyspec_driver_kubernetes::{InstallIdentity, Status, apply_install};
+use speedyspec_driver::WaitFor;
+use speedyspec_driver_kubernetes::{
+    Applied, InstallIdentity, Status, apply_install, wait_and_finish,
+};
 use speedyspec_testkit::FakeCluster;
 use support::{
     SHOP, Steps, answer, connection, options, plugins, record, recorded_names, secret, settings,
@@ -507,5 +510,223 @@ fn reports_progress_without_bodies() {
         steps.0.contains(&"applying shop/Deployment/web".to_owned()),
         "{:?}",
         steps.0
+    );
+}
+
+// ---- waiting ------------------------------------------------------------------------------
+
+const QUICK: Duration = Duration::from_millis(50);
+
+fn ready_deployment() -> serde_json::Value {
+    json!({"observedGeneration": 1, "updatedReplicas": 1, "availableReplicas": 1})
+}
+
+fn install(cluster: &FakeCluster, resources: Vec<serde_json::Value>) -> Applied {
+    let connection = connection(cluster);
+    let plugins = plugins();
+    apply_install(
+        &connection,
+        &answer(resources),
+        &options(SHOP, &plugins),
+        &mut Steps::default(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn waits_until_a_deployment_is_available() {
+    let cluster = FakeCluster::start();
+    let applied = install(&cluster, vec![settings(), web()]);
+    let connection = connection(&cluster);
+    let mut steps = Steps::default();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            std::thread::sleep(Duration::from_millis(150));
+            cluster.set_status(
+                "apps/v1",
+                "Deployment",
+                Some("shop"),
+                "web",
+                ready_deployment(),
+            );
+        });
+        wait_and_finish(
+            &connection,
+            &applied,
+            None,
+            &SHOP,
+            Duration::from_secs(5),
+            QUICK,
+            &mut steps,
+        )
+        .unwrap();
+    });
+    assert_eq!(record(&cluster, "shop", "shop").status, Status::Installed);
+    let text = steps.0.join("\n");
+    assert!(
+        text.contains("shop/Deployment/web") && text.contains("0 of 1"),
+        "{text}"
+    );
+}
+
+#[test]
+fn timeout_marks_the_record_failed() {
+    let cluster = FakeCluster::start();
+    let applied = install(&cluster, vec![web()]);
+    let connection = connection(&cluster);
+    let error = wait_and_finish(
+        &connection,
+        &applied,
+        None,
+        &SHOP,
+        Duration::from_millis(300),
+        QUICK,
+        &mut Steps::default(),
+    )
+    .unwrap_err();
+    assert!(error.contains("shop/Deployment/web"), "{error}");
+    assert!(
+        error.contains("not yet seen by its controller") || error.contains("0 of 1"),
+        "{error}"
+    );
+    let record = record(&cluster, "shop", "shop");
+    assert_eq!(record.status, Status::Failed);
+    assert_eq!(record.message.as_deref(), Some(error.as_str()));
+    assert!(
+        cluster
+            .object("apps/v1", "Deployment", Some("shop"), "web")
+            .is_some(),
+        "nothing is rolled back"
+    );
+}
+
+#[test]
+fn failed_job_stops_the_wait_at_once() {
+    let cluster = FakeCluster::start();
+    let job = json!({"apiVersion": "batch/v1", "kind": "Job", "metadata": {"name": "migrate"},
+                     "spec": {"template": {"spec": {"containers": [], "restartPolicy": "Never"}}}});
+    let applied = install(&cluster, vec![job]);
+    cluster.set_status(
+        "batch/v1",
+        "Job",
+        Some("shop"),
+        "migrate",
+        json!({"conditions": [{"type": "Failed", "status": "True", "message": "BackoffLimitExceeded"}]}),
+    );
+    let connection = connection(&cluster);
+    let started = std::time::Instant::now();
+    let error = wait_and_finish(
+        &connection,
+        &applied,
+        None,
+        &SHOP,
+        Duration::from_secs(30),
+        QUICK,
+        &mut Steps::default(),
+    )
+    .unwrap_err();
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "must not wait out the timeout"
+    );
+    assert!(
+        error.contains("shop/Job/migrate") && error.contains("BackoffLimitExceeded"),
+        "{error}"
+    );
+    assert_eq!(record(&cluster, "shop", "shop").status, Status::Failed);
+}
+
+#[test]
+fn explicit_empty_wait_returns_immediately() {
+    let cluster = FakeCluster::start();
+    let applied = install(&cluster, vec![web()]);
+    let connection = connection(&cluster);
+    let gets_before = cluster
+        .requests()
+        .iter()
+        .filter(|r| r.path.contains("deployments") && r.method == "GET")
+        .count();
+    wait_and_finish(
+        &connection,
+        &applied,
+        Some(&[]),
+        &SHOP,
+        Duration::from_secs(5),
+        QUICK,
+        &mut Steps::default(),
+    )
+    .unwrap();
+    let gets_after = cluster
+        .requests()
+        .iter()
+        .filter(|r| r.path.contains("deployments") && r.method == "GET")
+        .count();
+    assert_eq!(gets_before, gets_after, "the workload was never looked at");
+    assert_eq!(record(&cluster, "shop", "shop").status, Status::Installed);
+}
+
+#[test]
+fn waits_on_a_custom_condition() {
+    let cluster = FakeCluster::start();
+    cluster.define("example.test", "v1", "Widget", "widgets", true);
+    let widget =
+        json!({"apiVersion": "example.test/v1", "kind": "Widget", "metadata": {"name": "w"}});
+    let applied = install(&cluster, vec![widget]);
+    let connection = connection(&cluster);
+    let wait = [WaitFor {
+        kind: "Widget".to_owned(),
+        name: "w".to_owned(),
+        namespace: None,
+        condition: Some("Available".to_owned()),
+    }];
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            std::thread::sleep(Duration::from_millis(150));
+            cluster.set_status(
+                "example.test/v1",
+                "Widget",
+                Some("shop"),
+                "w",
+                json!({"conditions": [{"type": "Available", "status": "True"}]}),
+            );
+        });
+        wait_and_finish(
+            &connection,
+            &applied,
+            Some(&wait),
+            &SHOP,
+            Duration::from_secs(5),
+            QUICK,
+            &mut Steps::default(),
+        )
+        .unwrap();
+    });
+    assert_eq!(record(&cluster, "shop", "shop").status, Status::Installed);
+}
+
+#[test]
+fn a_wait_that_names_nothing_applied_is_an_error() {
+    let cluster = FakeCluster::start();
+    let applied = install(&cluster, vec![settings()]);
+    let connection = connection(&cluster);
+    let wait = [WaitFor {
+        kind: "Deployment".to_owned(),
+        name: "ghost".to_owned(),
+        namespace: None,
+        condition: None,
+    }];
+    let error = wait_and_finish(
+        &connection,
+        &applied,
+        Some(&wait),
+        &SHOP,
+        Duration::from_secs(1),
+        QUICK,
+        &mut Steps::default(),
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("Deployment") && error.contains("ghost"),
+        "{error}"
     );
 }

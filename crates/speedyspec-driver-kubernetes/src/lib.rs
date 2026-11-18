@@ -5,13 +5,15 @@ mod cluster;
 mod connect;
 mod install;
 mod manifest;
+mod readiness;
 mod record;
 
 pub use cluster::ClusterError;
 pub use connect::{ConnectError, ConnectFlags, Connection, connect};
-pub use install::{Applied, InstallOptions, apply_install};
+pub use install::{Applied, InstallOptions, apply_install, wait_and_finish};
 pub use manifest::{
     InstallIdentity, ResourceId, identify, install_name_problem, namespace_problem,
     prepare_manifest, record_name,
 };
+pub use readiness::{KNOWN_KINDS, Readiness, default_wait, parse_timeout, readiness};
 pub use record::{Record, Recorded, SCHEMA, Status};
