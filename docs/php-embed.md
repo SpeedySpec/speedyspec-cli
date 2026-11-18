@@ -363,6 +363,36 @@ a fatal error, call `exit()` or throw. The rule `src/runtime.rs` follows:
    (`finally` blocks do not run). Fired from Rust, it is the callback's error
    (`PHP code called exit(n)`).
 
+6. **A fiber cannot suspend from inside a hook callback.** The state
+   above (native depth, pending re-raise or exit, the per-firing frames)
+   assumes native calls nest strictly. A fiber suspended under one of our
+   native calls would leave that call's Rust frames parked on the fiber's C
+   stack while the rest of the program runs on. So `native_entry` blocks
+   fiber switching for the whole native call with PHP's own
+   `zend_fiber_switch_block()` / `zend_fiber_switch_unblock()`
+   (`Zend/zend_fibers.h`, a counter that `Fiber::start`, `resume` and
+   `suspend` check), balanced on every path (bailouts never cross that
+   frame; panics are caught in it). `Fiber::suspend()` (or starting or
+   resuming a fiber) in a hook callback therefore throws `FiberError`, which
+   reaches the PHP caller like any callback exception. A fiber that fires
+   hooks whose callbacks do not switch fibers, and fibers used in PHP code
+   with no hook on the stack, work as usual. Entries from Rust with no
+   native frame beneath them (`eval`, `require`, `run_file`, `Php::call`) do
+   not block: nothing of ours is on the C stack for a fiber to park.
+
+**Poisoned engine.** The engine keeps working after a bailout, as PHP's
+interactive shell does, but degraded for the rest of its single request:
+`_zend_bailout` turns the cycle collector off (`gc_protect(1)`) and sets
+`CG(unclean_shutdown)`, so reference cycles are no longer freed; a fatal
+error during compilation leaves that file open (`CG(open_files)`) and its
+compiler state behind until the request ends; a fatal error can strike
+part-way through an engine operation and leave its structures half-updated;
+and PHP marks every object existing at a fatal error as destructed, so their
+destructors never run. `Php::poisoned()` is set the first time any bailout is
+caught (a fatal error, or a Rust panic carried through PHP) and never
+cleared, so the caller can decide whether to carry on. `exit()` does not
+poison: in PHP 8 it unwinds as an exception, not a bailout.
+
 **Reference counts.** A PHP object or resource reaching Rust becomes a
 `Value::Opaque` holding one counted reference (`convert::ZvalHandle`);
 passing it back to PHP copies the zval and adds a reference, so the same
@@ -398,8 +428,8 @@ x86_64 CI runner should be faster.
 
 ## Verification
 
-`cargo test -p speedyspec-php --test php` prints an `ok` line per case (29
-since Task 3) and exits 0 on both targets.
+`cargo test -p speedyspec-php --test php` prints an `ok` line per case (34
+since Task 3's fix round) and exits 0 on both targets.
 
 - **macOS arm64**, native: `otool -L` on the test binary lists only
   `libSystem`, `libresolv` and the CoreFoundation, CoreServices and

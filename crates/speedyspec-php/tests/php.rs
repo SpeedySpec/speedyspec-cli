@@ -53,7 +53,16 @@ const CASES: &[(&str, Case)] = &[
     ("exit_in_require_is_caught", case_exit_in_require_is_caught),
     ("exit_in_run_file", case_exit_in_run_file),
     ("run_file_argv", case_run_file_argv),
+    (
+        "fiber_cannot_suspend_in_callback",
+        case_fiber_cannot_suspend_in_callback,
+    ),
+    ("fiber_fires_hook", case_fiber_fires_hook),
+    ("fiber_without_hooks", case_fiber_without_hooks),
+    // Must run right before the first fatal error of the run.
+    ("not_poisoned_before_fatal", case_not_poisoned_before_fatal),
     ("fatal_is_caught", case_fatal_is_caught),
+    ("poisoned_after_fatal", case_poisoned_after_fatal),
     ("fatal_inside_callback", case_fatal_inside_callback),
     ("exit_inside_callback", case_exit_inside_callback),
     ("panic_propagates", case_panic_propagates),
@@ -336,6 +345,58 @@ fn case_fatal_is_caught(ctx: &Ctx) -> Result<(), String> {
 
     // The engine is still usable after the bailout.
     eq(&stdout_of(|| ctx.php.eval("t", "echo 'alive';"))?, "alive")
+}
+
+fn case_fiber_cannot_suspend_in_callback(ctx: &Ctx) -> Result<(), String> {
+    // Fiber::suspend() in a callback of a hook fired inside a fiber throws
+    // FiberError to the PHP caller, instead of parking the bridge's frames.
+    eq(
+        &require_out(ctx, "fiber_suspend_in_callback.php")?,
+        "FiberError",
+    )?;
+    // The engine is not wedged: code and hook firings still run.
+    eq(&stdout_of(|| ctx.php.eval("t", "echo 'alive';"))?, "alive")?;
+    eq(
+        &stdout_of(|| {
+            ctx.php.eval(
+                "t",
+                "\\SpeedySpec\\Hooks\\Hook::add('fiber.after', static fn () => print('ran')); \\SpeedySpec\\Hooks\\Hook::run('fiber.after');",
+            )
+        })?,
+        "ran",
+    )?;
+    let result = ctx
+        .hooks
+        .filter("php.double", Value::Int(21), &[])
+        .map_err(|e| e.to_string())?;
+    if result != Value::Int(42) {
+        return Err(format!("firing from Rust gave {result:?}"));
+    }
+    Ok(())
+}
+
+fn case_fiber_fires_hook(ctx: &Ctx) -> Result<(), String> {
+    eq(&require_out(ctx, "fiber_fires_hook.php")?, "2,11")
+}
+
+fn case_fiber_without_hooks(ctx: &Ctx) -> Result<(), String> {
+    eq(&require_out(ctx, "fiber_without_hooks.php")?, "1,2,done:3")
+}
+
+fn case_not_poisoned_before_fatal(ctx: &Ctx) -> Result<(), String> {
+    if ctx.php.poisoned() {
+        Err("poisoned before any fatal error".to_owned())
+    } else {
+        Ok(())
+    }
+}
+
+fn case_poisoned_after_fatal(ctx: &Ctx) -> Result<(), String> {
+    if ctx.php.poisoned() {
+        Ok(())
+    } else {
+        Err("not poisoned after a fatal error".to_owned())
+    }
 }
 
 fn case_fatal_inside_callback(ctx: &Ctx) -> Result<(), String> {

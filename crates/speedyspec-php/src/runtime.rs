@@ -78,6 +78,8 @@ unsafe extern "C" {
     fn zend_is_unwind_exit(ex: *const zend_object) -> bool;
     fn zend_is_graceful_exit(ex: *const zend_object) -> bool;
     fn zend_throw_exception_internal(exception: *mut zend_object);
+    fn zend_fiber_switch_block();
+    fn zend_fiber_switch_unblock();
 }
 
 /// INI settings the CLI needs regardless of any php.ini, which is never read.
@@ -130,7 +132,8 @@ pub enum PhpError {
         file: String,
         line: u32,
     },
-    /// PHP hit a fatal error and abandoned the code it was running.
+    /// PHP hit a fatal error and abandoned the code it was running. The
+    /// engine is usable afterwards but degraded; see [`Php::poisoned`].
     Fatal {
         message: String,
         file: String,
@@ -420,6 +423,22 @@ impl Php {
         Some(props)
     }
 
+    /// True once PHP has bailed out (a fatal error, or a Rust panic carried
+    /// through PHP) at least once; never cleared.
+    ///
+    /// The engine keeps working after a bailout, but degraded for the rest of
+    /// its single request: PHP turns the cycle collector off (`gc_protect`),
+    /// so reference cycles are no longer freed; a fatal error during
+    /// compilation leaves the file it was compiling open and its compiler
+    /// state behind; a fatal error part-way through an engine operation can
+    /// leave engine structures half-updated; and destructors of every object
+    /// that existed at the time of a fatal error never run. `exit()` does not
+    /// poison: in PHP 8 it unwinds as an exception, not a bailout. The caller
+    /// decides whether to keep going.
+    pub fn poisoned(&self) -> bool {
+        ENGINE.with(|e| e.poisoned.get())
+    }
+
     /// Names the plugin that later `Hook::add` calls are registered for, until
     /// changed. Hook errors from a failing callback name its owner.
     pub fn set_owner(&self, owner: Option<&str>) {
@@ -585,6 +604,8 @@ struct Engine {
     releases: RefCell<Vec<ManuallyDrop<Zval>>>,
     /// How many times [`guard`] has entered PHP.
     entries: Cell<u64>,
+    /// A bailout has happened; see [`Php::poisoned`].
+    poisoned: Cell<bool>,
     /// Gives a dummy frame a `func`; see [`call_php`].
     dummy_func: Cell<*mut zend_function>,
 }
@@ -599,6 +620,7 @@ thread_local! {
             panic: RefCell::new(None),
             releases: RefCell::new(Vec::new()),
             entries: Cell::new(0),
+            poisoned: Cell::new(false),
             dummy_func: Cell::new(ptr::null_mut()),
         }
     };
@@ -657,6 +679,9 @@ pub(crate) fn guard<R>(f: impl FnOnce() -> R) -> Result<R, Interrupted> {
         Ok(Ok(value)) => Ok(value),
         Ok(Err(payload)) => resume_unwind(payload),
         Err(_) => {
+            // Every bailout, a panic carried through PHP included, leaves the
+            // engine degraded for the rest of the request.
+            ENGINE.with(|e| e.poisoned.set(true));
             if let Some(payload) = ENGINE.with(|e| e.panic.borrow_mut().take()) {
                 resume_unwind(payload);
             }
@@ -695,6 +720,13 @@ fn run_native(
     retval: &mut Zval,
     body: fn(&mut ExecuteData, &mut Zval),
 ) -> bool {
+    // No fiber may switch while this native call is on the C stack: a fiber
+    // suspended under it would park its Rust frames there, and the engine
+    // state above assumes native calls nest. Fiber::start, resume and suspend
+    // throw FiberError until the call returns. The block is lifted below on
+    // every path: bailouts never cross this frame and panics are caught.
+    // SAFETY: a counter in the engine, balanced by the unblock below.
+    unsafe { zend_fiber_switch_block() };
     ENGINE.with(|e| e.native_depth.set(e.native_depth.get() + 1));
     // Releasing what the call let go of is still part of the call: a
     // destructor that bails out must be re-raised like any other bailout.
@@ -703,6 +735,8 @@ fn run_native(
         drain();
     }));
     ENGINE.with(|e| e.native_depth.set(e.native_depth.get() - 1));
+    // SAFETY: balances the block above, exactly once.
+    unsafe { zend_fiber_switch_unblock() };
     if let Err(payload) = outcome {
         // Carry the panic through the PHP frames below as a bailout.
         ENGINE.with(|e| *e.panic.borrow_mut() = Some(payload));
