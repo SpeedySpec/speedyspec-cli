@@ -87,6 +87,8 @@ const CASES: &[(&str, Case)] = &[
     ),
     // Must run right before the first fatal error of the run.
     ("not_poisoned_before_fatal", case_not_poisoned_before_fatal),
+    // The first bailout of the run: memory exhaustion must poison by itself.
+    ("oom_is_fatal", case_oom_is_fatal),
     ("fatal_is_caught", case_fatal_is_caught),
     ("poisoned_after_fatal", case_poisoned_after_fatal),
     ("warning_goes_to_stderr", case_warning_goes_to_stderr),
@@ -845,6 +847,104 @@ fn case_not_poisoned_before_fatal(ctx: &Ctx) -> Result<(), String> {
     } else {
         Ok(())
     }
+}
+
+/// Code that exhausts the default 128M `memory_limit`.
+const OOM: &str = "(function () { $a = []; while (true) { $a[] = str_repeat('x', 1000000); } })();";
+
+fn is_oom(result: &Result<Value, PhpError>) -> bool {
+    matches!(result, Err(PhpError::Fatal { message, .. }) if message.contains("Allowed memory size"))
+}
+
+fn case_oom_is_fatal(ctx: &Ctx) -> Result<(), String> {
+    // This PHP reports memory exhaustion as a "delayed OOM": it unwinds with
+    // exit status 255 and leaves EG(delayed_oom) set, which makes every
+    // later zend_call_function fail. It must come back as a fatal error,
+    // poison the engine and leave it usable.
+    let (out, (err, result)) = capture(1, || capture(2, || ctx.php.eval("oom", OOM)));
+    eq(&out?, "")?;
+    if !is_oom(&result) {
+        return Err(format!(
+            "top level: expected a memory fatal, got {result:?}"
+        ));
+    }
+    if !err?.contains("Allowed memory size") {
+        return Err("PHP did not report the memory fatal on stderr".to_owned());
+    }
+    if !ctx.php.poisoned() {
+        return Err("not poisoned after memory exhaustion".to_owned());
+    }
+    eq(&stdout_of(|| ctx.php.eval("t", "echo 'alive';"))?, "alive")?;
+
+    // PHP callbacks still run, fired from PHP and from Rust.
+    eq(
+        &stdout_of(|| {
+            ctx.php.eval(
+                "t",
+                "\\SpeedySpec\\Hooks\\Hook::add('oom.after', static fn (int $v): int => $v + 1);
+                 echo \\SpeedySpec\\Hooks\\Hook::filter('oom.after', 1);",
+            )
+        })?,
+        "2",
+    )?;
+    match ctx.hooks.filter("oom.after", Value::Int(5), &[]) {
+        Ok(Value::Int(6)) => {}
+        other => return Err(format!("firing from Rust after OOM: {other:?}")),
+    }
+
+    // In a callback fired from PHP it abandons the PHP caller as a fatal
+    // error, not as exit(255).
+    let (out, result) = capture(1, || quiet(|| ctx.php.require(&fixture("nested_oom.php"))));
+    if out?.contains("not reached") {
+        return Err("PHP kept running after memory exhaustion in a callback".to_owned());
+    }
+    if !is_oom(&result) {
+        return Err(format!("from PHP: expected a memory fatal, got {result:?}"));
+    }
+    // Fired from Rust it is that callback's error.
+    match quiet(|| ctx.hooks.run("nested.oom", &[])) {
+        Err(err)
+            if err.kind == HookErrorKind::Callback
+                && err.message.contains("Allowed memory size") => {}
+        other => return Err(format!("from Rust: unexpected {other:?}")),
+    }
+    // A value from Rust that crosses the limit while it is converted: PHP
+    // handles the queued error at the start of the call it was meant for.
+    let big = Value::Str("x".repeat(200_000_000));
+    let called = quiet(|| ctx.php.call(&Value::Str("strlen".into()), &[big]));
+    if !is_oom(&called) {
+        return Err(format!(
+            "argument from Rust: expected a memory fatal, got {called:?}"
+        ));
+    }
+    // Top-level code whose last statement crosses the limit.
+    let tail = quiet(|| {
+        ctx.php.eval(
+            "t",
+            "$GLOBALS['speedyspecBig'] = str_repeat('x', 200000000);",
+        )
+    });
+    let _ = ctx.php.eval("t", "unset($GLOBALS['speedyspecBig']);");
+    if !is_oom(&tail) {
+        return Err(format!(
+            "last statement: expected a memory fatal, got {tail:?}"
+        ));
+    }
+    // Php::call reports it the same way.
+    let closure = ctx
+        .php
+        .eval(
+            "t",
+            &format!("return static function (): void {{ {OOM} }};"),
+        )
+        .map_err(|e| e.to_string())?;
+    let called = quiet(|| ctx.php.call(&closure, &[]));
+    if !is_oom(&called) {
+        return Err(format!(
+            "Php::call: expected a memory fatal, got {called:?}"
+        ));
+    }
+    eq(&stdout_of(|| ctx.php.eval("t", "echo 'alive';"))?, "alive")
 }
 
 fn case_poisoned_after_fatal(ctx: &Ctx) -> Result<(), String> {

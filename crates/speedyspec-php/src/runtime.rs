@@ -37,7 +37,7 @@ use speedyspec_hooks::{SharedHooks, Value};
 
 use crate::boundary::{
     CallError, ENGINE, call_php, class_name, discard_exception, drain, fatal_error, find_function,
-    guard, release_later, table_as_zval, take_thrown,
+    guard, handle_queued_oom, release_later, table_as_zval, take_thrown,
 };
 use crate::convert;
 use crate::hook_class;
@@ -367,8 +367,8 @@ impl Php {
         Some(props)
     }
 
-    /// True once PHP has bailed out (a fatal error, or a Rust panic carried
-    /// through PHP) at least once; never cleared.
+    /// True once PHP has bailed out (a fatal error, memory exhaustion, or a
+    /// Rust panic carried through PHP) at least once; never cleared.
     ///
     /// The engine keeps working after a bailout, but degraded for the rest of
     /// its single request: PHP turns the cycle collector off (`gc_protect`),
@@ -377,8 +377,11 @@ impl Php {
     /// state behind; a fatal error part-way through an engine operation can
     /// leave engine structures half-updated; and destructors of every object
     /// that existed at the time of a fatal error never run. `exit()` does not
-    /// poison: in PHP 8 it unwinds as an exception, not a bailout. The caller
-    /// decides whether to keep going.
+    /// poison: in PHP 8 it unwinds as an exception, not a bailout. Memory
+    /// exhaustion does: PHP unwinds with the same object as `exit()`, but
+    /// reports a fatal error (a bailout of its own) on the way, and it is
+    /// returned as [`PhpError::Fatal`]. The caller decides whether to keep
+    /// going.
     pub fn poisoned(&self) -> bool {
         ENGINE.with(|e| e.poisoned.get())
     }
@@ -437,6 +440,7 @@ impl Php {
                 (*eg).no_extensions = true;
                 zend_execute(op, retval_ptr);
                 (*eg).no_extensions = false;
+                handle_queued_oom();
                 zend_destroy_static_vars(op);
                 destroy_op_array(op);
                 _efree(op.cast());

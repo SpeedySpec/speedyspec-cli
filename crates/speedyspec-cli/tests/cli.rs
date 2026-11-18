@@ -336,6 +336,45 @@ fn working_directory_plugins_are_not_loaded() {
     assert_eq!(out.code, 2);
 }
 
+/// Memory exhaustion while loading is a fatal error of that plugin. PHP unwinds it like
+/// `exit(255)`, but it must not be reported as one, nor leave the engine refusing every later
+/// call, which would take the healthy plugin's command and app down with it.
+#[test]
+fn memory_exhaustion_at_load_is_survived() {
+    let out = run(&["oom", "good"], &["hello", "Ada"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.stdout, "hello Ada\n");
+    let skipped: Vec<&str> = out
+        .stderr
+        .lines()
+        .filter(|line| line.starts_with("speedyspec: plugin speedyspec-fixture/oom skipped"))
+        .collect();
+    assert_eq!(skipped.len(), 1, "{}", out.stderr);
+    assert!(skipped[0].contains("Allowed memory size"), "{}", skipped[0]);
+    assert!(!out.stderr.contains("exit(255)"), "{}", out.stderr);
+    assert!(!out.stderr.contains("refused"), "{}", out.stderr);
+    assert!(
+        !out.stderr.contains("speedyspec-fixture/good"),
+        "{}",
+        out.stderr
+    );
+
+    let out = run(&["oom", "good"], &["app", "list"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.stdout, "demo\tDemo\tzip?\n");
+}
+
+#[test]
+fn memory_exhaustion_in_php_script_exits_1() {
+    let out = run(
+        &[],
+        &["php", fixture("oom").join("plugin.php").to_str().unwrap()],
+    );
+    assert_eq!(out.code, 1, "{}", out.stderr);
+    assert_eq!(out.stdout, "");
+    assert!(out.stderr.contains("Allowed memory size"), "{}", out.stderr);
+}
+
 /// An exception is not a fatal error; a redeclared function is, and bails PHP out. The binary
 /// must report the plugin, keep stdout clean and carry on with the other plugins.
 #[test]

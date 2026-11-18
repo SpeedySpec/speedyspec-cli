@@ -47,10 +47,11 @@ use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::ptr;
 
 use ext_php_rs::ffi::{
-    _call_user_function_impl, E_COMPILE_ERROR, E_CORE_ERROR, E_ERROR, E_PARSE, E_RECOVERABLE_ERROR,
-    E_USER_ERROR, ZEND_RESULT_CODE_SUCCESS, ext_php_rs_executor_globals,
-    ext_php_rs_process_globals, zend_execute_data, zend_function, zend_hash_str_find, zend_object,
-    zend_read_property, zend_string, zval, zval_ptr_dtor,
+    _call_user_function_impl, _zend_oom_state_ZEND_OOM_STATE_HANDLED,
+    _zend_oom_state_ZEND_OOM_STATE_NONE, _zend_oom_state_ZEND_OOM_STATE_PENDING, E_COMPILE_ERROR,
+    E_CORE_ERROR, E_ERROR, E_PARSE, E_RECOVERABLE_ERROR, E_USER_ERROR, ZEND_RESULT_CODE_SUCCESS,
+    ext_php_rs_executor_globals, ext_php_rs_process_globals, zend_execute_data, zend_function,
+    zend_hash_str_find, zend_object, zend_read_property, zend_string, zval, zval_ptr_dtor,
 };
 use ext_php_rs::types::Zval;
 use ext_php_rs::zend::{ExecuteData, bailout, try_catch};
@@ -68,6 +69,8 @@ unsafe extern "C" {
     fn zend_observer_fiber_init_register(handler: unsafe extern "C" fn(*mut c_void));
     fn zend_observer_fiber_switch_register(handler: unsafe extern "C" fn(*mut c_void, *mut c_void));
     fn zend_observer_fiber_destroy_register(handler: unsafe extern "C" fn(*mut c_void));
+    // ZEND_FASTCALL is a plain C call on x86_64 and aarch64.
+    fn zend_handle_delayed_oom();
 }
 
 // ---------------------------------------------------------------------------
@@ -111,6 +114,11 @@ pub(crate) struct Engine {
     pub(crate) poisoned: Cell<bool>,
     /// Gives a dummy frame a `func`; see [`call_php`].
     pub(crate) dummy_func: Cell<*mut zend_function>,
+    /// The unwind-exit object PHP threw for a memory exhaustion, by address
+    /// (never dereferenced), with the fatal error it stands for, while it is
+    /// on its way to the PHP code below a native function. See
+    /// [`settle_delayed_oom`].
+    oom_exit: RefCell<Option<(usize, Fatal)>>,
 }
 
 thread_local! {
@@ -127,6 +135,7 @@ thread_local! {
             entries: Cell::new(0),
             poisoned: Cell::new(false),
             dummy_func: Cell::new(ptr::null_mut()),
+            oom_exit: RefCell::new(None),
         }
     };
 }
@@ -323,6 +332,10 @@ pub(crate) fn guard<R>(f: impl FnOnce() -> R) -> Result<R, Interrupted> {
             // Every bailout, a panic carried through PHP included, leaves the
             // engine degraded for the rest of the request.
             ENGINE.with(|e| e.poisoned.set(true));
+            // A memory exhaustion PHP handled with no PHP frame bails out
+            // after recording the fatal error; end its handling (see
+            // settle_delayed_oom) so later calls work.
+            settle_delayed_oom();
             if let Some(payload) = ENGINE.with(|e| e.panic.borrow_mut().take()) {
                 resume_unwind(payload);
             }
@@ -426,6 +439,9 @@ pub(crate) fn drain() {
 pub(crate) enum Thrown {
     /// `exit()` / `die()`, with `EG(exit_status)`.
     Exit(i32),
+    /// Memory exhaustion: PHP reported the fatal error and unwinds with its
+    /// exit object; see [`settle_delayed_oom`].
+    Fatal(Fatal),
     /// PHP is destroying the suspended fiber this code runs in, unwinding it
     /// with its internal graceful-exit object. Not a process exit.
     FiberDestroyed,
@@ -442,6 +458,7 @@ impl Thrown {
     pub(crate) fn into_php_error(self) -> PhpError {
         match self {
             Self::Exit(status) => PhpError::Exit(status),
+            Self::Fatal(fatal) => fatal.into_php_error(),
             Self::FiberDestroyed => PhpError::Exception {
                 class: "GracefulExit".to_owned(),
                 message: "the fiber running this code was destroyed".to_owned(),
@@ -487,20 +504,34 @@ pub(crate) fn take_thrown() -> Option<Thrown> {
     if unwind_exit || graceful_exit {
         // SAFETY: as above.
         let status = unsafe { (*ext_php_rs_executor_globals()).exit_status };
+        // A memory exhaustion unwinds with the same object as exit(); tell
+        // them apart before the object moves on.
+        let oom = if unwind_exit {
+            out_of_memory(obj)
+        } else {
+            None
+        };
         // Either way the PHP code below a native function must keep
         // unwinding with this very object: parked for that function.
         ENGINE.with(|e| {
             if e.native_depth.get() > 0 && e.pending_exit.get().is_null() {
                 e.pending_exit.set(obj);
+                if let Some(fatal) = &oom {
+                    // Recognised again by the next take_thrown that sees it,
+                    // in this context or the one a fiber hands it to.
+                    *e.oom_exit.borrow_mut() = Some((obj as usize, fatal.clone()));
+                }
             } else {
+                // The object is released here, so no later exit can be it.
+                e.oom_exit.borrow_mut().take();
                 // SAFETY: our reference, adopted and queued for release.
                 drop(unsafe { ZvalHandle::adopt_object(obj) });
             }
         });
-        return Some(if graceful_exit {
-            Thrown::FiberDestroyed
-        } else {
-            Thrown::Exit(status)
+        return Some(match (graceful_exit, oom) {
+            (true, _) => Thrown::FiberDestroyed,
+            (false, Some(fatal)) => Thrown::Fatal(fatal),
+            (false, None) => Thrown::Exit(status),
         });
     }
     // SAFETY: we own the reference just taken from EG(exception).
@@ -604,6 +635,24 @@ pub(crate) unsafe fn class_name(obj: *mut zend_object) -> String {
     unsafe { String::from_utf8_lossy(convert::str_bytes((*(*obj).ce).name)).into_owned() }
 }
 
+/// A PHP fatal error: message, file and line.
+#[derive(Clone, Debug)]
+pub(crate) struct Fatal {
+    message: String,
+    file: String,
+    line: u32,
+}
+
+impl Fatal {
+    fn into_php_error(self) -> PhpError {
+        PhpError::Fatal {
+            message: self.message,
+            file: self.file,
+            line: self.line,
+        }
+    }
+}
+
 /// The last error PHP recorded, as the fatal error a bailout came from.
 pub(crate) fn fatal_error(interrupted: Interrupted) -> PhpError {
     if let Interrupted::Refused = interrupted {
@@ -613,6 +662,11 @@ pub(crate) fn fatal_error(interrupted: Interrupted) -> PhpError {
             line: 0,
         };
     }
+    last_fatal().into_php_error()
+}
+
+/// The last error PHP recorded, if it is a fatal one.
+fn last_fatal() -> Fatal {
     const FATAL: u32 =
         E_ERROR | E_CORE_ERROR | E_COMPILE_ERROR | E_USER_ERROR | E_RECOVERABLE_ERROR | E_PARSE;
     // SAFETY: plain reads of the core globals on the engine's thread; the
@@ -621,7 +675,7 @@ pub(crate) fn fatal_error(interrupted: Interrupted) -> PhpError {
         let pg = ext_php_rs_process_globals();
         let kind = u32::try_from((*pg).last_error_type).unwrap_or(0);
         if kind & FATAL == 0 || (*pg).last_error_message.is_null() {
-            return PhpError::Fatal {
+            return Fatal {
                 message: "PHP bailed out".to_owned(),
                 file: String::new(),
                 line: 0,
@@ -634,10 +688,83 @@ pub(crate) fn fatal_error(interrupted: Interrupted) -> PhpError {
                 String::from_utf8_lossy(convert::str_bytes(s)).into_owned()
             }
         };
-        PhpError::Fatal {
+        Fatal {
             message: text((*pg).last_error_message),
             file: text((*pg).last_error_file),
             line: u32::try_from((*pg).last_error_lineno).unwrap_or(0),
+        }
+    }
+}
+
+/// Ends PHP's handling of a memory exhaustion it has reported, so the engine
+/// keeps working; true if there was one.
+///
+/// This PHP handles memory exhaustion as a "delayed OOM"
+/// (`Zend/zend_alloc.c`, `zend_mm_check_limit` and `zend_handle_delayed_oom`):
+/// the allocation that crosses `memory_limit` succeeds and queues the error,
+/// and the next VM interrupt or `zend_call_function` handles it. With PHP code
+/// on the stack it throws the unwind-exit object (exit status 255) and reports
+/// `E_ERROR` "Allowed memory size of ... exhausted", which bails out to a
+/// `zend_try` of its own, so the engine is degraded as after any fatal error;
+/// with none it bails out to the caller. Either way it leaves
+/// `EG(delayed_oom).state` at `ZEND_OOM_STATE_HANDLED`, which PHP resets only
+/// in `php_request_shutdown` (`main/main.c`); until then every
+/// `zend_call_function` returns FAILURE (`Zend/zend_execute_API.c`, the
+/// `ZEND_HAS_OOM()` check). speedyspec never ends its request, so this resets
+/// it to `ZEND_OOM_STATE_NONE` as request shutdown does (the message and file
+/// were already freed by `zend_mm_oom_info_dtor`) and poisons the engine.
+fn settle_delayed_oom() -> bool {
+    // SAFETY: plain access to the executor globals on the engine's thread.
+    let handled = unsafe {
+        let oom = &raw mut (*ext_php_rs_executor_globals()).delayed_oom;
+        if (*oom).state == _zend_oom_state_ZEND_OOM_STATE_HANDLED {
+            (*oom).state = _zend_oom_state_ZEND_OOM_STATE_NONE;
+            true
+        } else {
+            false
+        }
+    };
+    if handled {
+        ENGINE.with(|e| e.poisoned.set(true));
+    }
+    handled
+}
+
+/// If the unwind-exit object `obj` stands for a memory exhaustion (just
+/// handled, or recognised from an earlier [`take_thrown`] that parked it), the
+/// fatal error PHP reported for it.
+fn out_of_memory(obj: *mut zend_object) -> Option<Fatal> {
+    if settle_delayed_oom() {
+        // zend_handle_delayed_oom reports the error right after throwing.
+        return Some(last_fatal());
+    }
+    ENGINE.with(|e| {
+        let marked = e.oom_exit.borrow();
+        match marked.as_ref() {
+            Some((address, fatal)) if *address == obj as usize => Some(fatal.clone()),
+            _ => None,
+        }
+    })
+}
+
+/// Lets PHP handle a memory exhaustion that is still queued once top-level
+/// code has finished, as `zend_execute_scripts` does after each file
+/// (`Zend/zend.c`). Otherwise the next, unrelated call would report it. With
+/// no PHP code on the stack PHP records the fatal error and bails out (the
+/// guard settles it); with a frame it throws the unwind-exit object, which
+/// [`take_thrown`] recognises.
+///
+/// # Safety
+///
+/// Called inside a [`guard`], since PHP may bail out.
+pub(crate) unsafe fn handle_queued_oom() {
+    // SAFETY: plain read of the executor globals; a bailout from PHP's own
+    // handler lands in the caller's guard.
+    unsafe {
+        if (*ext_php_rs_executor_globals()).delayed_oom.state
+            == _zend_oom_state_ZEND_OOM_STATE_PENDING
+        {
+            zend_handle_delayed_oom();
         }
     }
 }
@@ -662,6 +789,7 @@ impl CallError {
     pub(crate) fn describe(&self) -> String {
         match self {
             Self::Thrown(Thrown::Exit(status)) => format!("PHP code called exit({status})"),
+            Self::Thrown(Thrown::Fatal(fatal)) => fatal.clone().into_php_error().to_string(),
             Self::Thrown(Thrown::FiberDestroyed) => {
                 "the fiber running this callback was destroyed".to_owned()
             }
@@ -745,6 +873,11 @@ pub(crate) fn call_php(callable: *mut zval, args: &[Value]) -> Result<Value, Cal
         Ok(Err(why)) => return Err(CallError::Convert(why.to_string())),
         Ok(Ok(true)) => {}
         Ok(Ok(false)) => {
+            // zend_call_function also fails, with the unwind-exit object
+            // thrown, when it handles a queued memory exhaustion first.
+            if let Some(thrown) = take_thrown() {
+                return Err(CallError::Thrown(thrown));
+            }
             return Err(CallError::Convert(
                 "PHP refused the call (the executor is inactive)".to_owned(),
             ));
