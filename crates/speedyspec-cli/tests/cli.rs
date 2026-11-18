@@ -63,7 +63,7 @@ fn php_command_runs_a_file_with_hooks() {
     let script = dir.path().join("hooks.php");
     std::fs::write(
         &script,
-        "<?php\nadd_filter('answer', fn (int $v): int => $v + 2);\necho apply_filters('answer', 40);\n",
+        "<?php\nuse SpeedySpec\\Hooks\\Hook;\nHook::add('answer', fn (int $v): int => $v + 2);\necho Hook::filter('answer', 40);\n",
     )
     .unwrap();
     let out = run(&[], &["php", script.to_str().unwrap()]);

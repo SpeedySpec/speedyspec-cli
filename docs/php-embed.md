@@ -14,7 +14,7 @@ page records how that is built and why, as established by the first proof
 | `runtime.rs` | `Php` (boot, eval, require, run_file, call, inspection, shutdown), `PhpError`, `BootOptions`, `Output`. |
 | `boundary.rs` | Everything that keeps PHP's error handling on PHP's side: the per-thread `Engine` state, the fiber observers, `guard`, `native_entry`/`run_native`, the release queue (`release_later`, `drain`, `settle_stray`), `Thrown`/`take_thrown` and memory-exhaustion handling, and `call_php`. |
 | `sapi.rs` | The SAPI's fixed INI entries and its output, flush and log callbacks. |
-| `hook_class.rs` | The `speedyspec` module: `SpeedySpec\Hooks\Hook`, its global aliases and their argument handling. |
+| `hook_class.rs` | The `speedyspec` module: `SpeedySpec\Hooks\Hook` and its argument handling. No global functions, so WordPress can declare its own. |
 | `convert.rs` | `zval` <-> `Value` conversion and `ZvalHandle`. |
 
 ## Versions
@@ -242,16 +242,15 @@ order, before anything else runs.
 **Native functions and classes** are registered as one PHP module, exactly
 like a built-in extension. `#[php_module]` (in `src/hook_class.rs`)
 generates `get_module() -> *mut zend_module_entry` from a `ModuleBuilder`;
-`php_module_startup` hands that module to PHP, which registers its functions
-during startup and runs its MINIT, where the class is registered:
+`php_module_startup` hands that module to PHP, which runs its MINIT during
+startup, where the class is registered (the module declares no global
+functions):
 
 ```rust
 #[php_module]
 #[php(startup = startup)]            // our MINIT hook, run before ext-php-rs's own
 pub fn module(module: ModuleBuilder) -> ModuleBuilder {
-    module
-        .function(add_signature("add_action", hook_add))   // FunctionBuilder + raw handler
-        // ... add_filter, remove_*, has_*, do_action, apply_filters, did_action
+    module                           // no global functions
 }
 
 fn startup(_ty: i32, _module_number: i32) -> i32 {
@@ -268,12 +267,12 @@ fn startup(_ty: i32, _module_number: i32) -> i32 {
 The handlers are hand-written `extern "C" fn(&mut ExecuteData, &mut Zval)`
 rather than `#[php_function]` / `#[php_impl]`, because every native entry
 must go through `boundary::native_entry` (see "Bailouts, exceptions and exit()"
-below). The global aliases and the methods share one handler each. Arguments
+below). Arguments
 are read from the frame directly and type errors are thrown as PHP's own
 `TypeError`, `ArgumentCountError` and `ValueError`.
 
 Parameter types: `$hook` must be a string, always. `$priority` (`add`,
-`remove` and their aliases) and `$acceptedArgs` (`add` and its aliases)
+`remove`) and `$acceptedArgs` (`add`)
 accept any integer-valued number whatever the caller's `strict_types`, as
 WordPress does: an int, a float with an integral value (`20.0`), or a
 numeric string with an integral value (`'20'`, `' 20'`, `'-5'`, `'20.0'`),
@@ -370,7 +369,7 @@ per call).
 A call from Rust when no PHP code is running has no current frame, and
 `zend_call_function` then turns an uncaught exception into a fatal error, as
 it must for `{main}`. The bridge therefore calls from a zeroed dummy frame
-whose `func` is an internal function (`apply_filters`), which is what a call
+whose `func` is an internal function (`strlen`), which is what a call
 from inside a native function looks like; the exception stays in
 `EG(exception)` and is taken out by Rust.
 

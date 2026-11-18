@@ -42,8 +42,7 @@ const CASES: &[(&str, Case)] = &[
     ("filter_from_php", case_filter_from_php),
     ("priority_order", case_priority_order),
     ("accepted_args", case_accepted_args),
-    ("aliases_share_registry", case_aliases_share_registry),
-    ("aliases_all", case_aliases_all),
+    ("own_hook_functions", case_own_hook_functions),
     ("std_handles", case_std_handles),
     (
         "remove_closure_by_identity",
@@ -248,12 +247,11 @@ fn case_accepted_args(ctx: &Ctx) -> Result<(), String> {
     eq(&require_out(ctx, "accepted_args.php")?, "2")
 }
 
-fn case_aliases_share_registry(ctx: &Ctx) -> Result<(), String> {
-    eq(&require_out(ctx, "aliases_share_registry.php")?, "y1")
-}
-
-fn case_aliases_all(ctx: &Ctx) -> Result<(), String> {
-    eq(&require_out(ctx, "aliases_all.php")?, "yftnf|5,7y|ytn|rr22")
+fn case_own_hook_functions(ctx: &Ctx) -> Result<(), String> {
+    eq(
+        &require_out(ctx, "own_hook_functions.php")?,
+        "mine|nnnnnnn|21",
+    )
 }
 
 fn case_std_handles(ctx: &Ctx) -> Result<(), String> {

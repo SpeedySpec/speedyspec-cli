@@ -1,6 +1,7 @@
 //! The PHP side of the hook registry: the final class
-//! `SpeedySpec\Hooks\Hook` with static methods, and its WordPress-named
-//! global aliases, all backed by the [`SharedHooks`] passed to `Php::boot`.
+//! `SpeedySpec\Hooks\Hook` with static methods, backed by the [`SharedHooks`]
+//! passed to `Php::boot`. There are no global functions: WordPress declares its
+//! own `add_action` and friends, and must be able to load beside this.
 //!
 //! A PHP callable registered here is wrapped in a Rust [`Callback`] that
 //! calls it through [`boundary::call_php`]; Rust callbacks in the same
@@ -107,21 +108,13 @@ pub(crate) fn find_exception_class() -> Result<(), PhpError> {
 // ---------------------------------------------------------------------------
 // Registration
 
-/// The module `php_module_startup` registers: the global aliases here, the
-/// class from [`startup`].
+/// The module `php_module_startup` registers. It declares no global functions, so
+/// code that brings its own `add_action` and friends (WordPress) loads without a clash;
+/// the class comes from [`startup`].
 #[php_module]
 #[php(startup = startup)]
 pub fn module(module: ModuleBuilder) -> ModuleBuilder {
     module
-        .function(add_signature("add_action", hook_add))
-        .function(add_signature("add_filter", hook_add))
-        .function(remove_signature("remove_action", hook_remove))
-        .function(remove_signature("remove_filter", hook_remove))
-        .function(has_signature("has_action", hook_has))
-        .function(has_signature("has_filter", hook_has))
-        .function(run_signature("do_action", hook_run))
-        .function(filter_signature("apply_filters", hook_filter))
-        .function(ran_signature("did_action", hook_ran))
 }
 
 /// The module entry for `php_module_startup`.

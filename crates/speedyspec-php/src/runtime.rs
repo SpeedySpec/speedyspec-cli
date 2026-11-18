@@ -73,7 +73,7 @@ const HOOK_EXCEPTION_LABEL: &str = "speedyspec://hook-exception";
 
 /// An internal function whose `zend_function` gives a dummy frame something
 /// to point at; any internal function would do.
-const DUMMY_FRAME_FUNCTION: &str = "apply_filters";
+const DUMMY_FRAME_FUNCTION: &str = "strlen";
 
 static BOOTED: AtomicBool = AtomicBool::new(false);
 
