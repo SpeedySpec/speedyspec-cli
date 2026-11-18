@@ -30,7 +30,7 @@ const GLOBAL_NAMES: &[&str] = &[
 /// before returning, so PHP shuts down cleanly and its output is flushed.
 pub fn run(args: &[String]) -> ExitCode {
     // `self` needs neither PHP nor plugins; a broken plugin must not stop an update.
-    if crate::self_cmd::is_self_update(args) {
+    if crate::self_cmd::runs_before_plugins(args) {
         let code = run_without_plugins(args);
         let _ = std::io::stdout().flush();
         return ExitCode::from(exit_byte(i64::from(code)));
@@ -73,7 +73,7 @@ fn run_without_plugins(args: &[String]) -> i32 {
     {
         Ok(matches) => match matches.subcommand() {
             Some(("self", sub)) => crate::self_cmd::run(sub),
-            _ => unreachable!("is_self_update found self update"),
+            _ => unreachable!("runs_before_plugins found a self command"),
         },
         Err(error) => {
             let code = error.exit_code();

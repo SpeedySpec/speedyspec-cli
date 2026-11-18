@@ -9,6 +9,8 @@ mod install;
 mod installs;
 mod plugin_cmd;
 mod prompt;
+mod runner;
+mod runner_child;
 mod self_cmd;
 
 use std::process::ExitCode;
