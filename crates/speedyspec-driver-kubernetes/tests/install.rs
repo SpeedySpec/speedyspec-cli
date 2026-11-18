@@ -564,9 +564,10 @@ fn waits_until_a_deployment_is_available() {
     assert_eq!(record(&cluster, "shop", "shop").status, Status::Installed);
     let text = steps.0.join("\n");
     assert!(
-        text.contains("shop/Deployment/web") && text.contains("0 of 1"),
+        text.contains("waiting for shop/Deployment/web: not yet seen by its controller"),
         "{text}"
     );
+    assert!(text.contains("shop/Deployment/web is ready"), "{text}");
 }
 
 #[test]
