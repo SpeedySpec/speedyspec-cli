@@ -5,6 +5,18 @@ the main thread. PHP code calls back into functions implemented in Rust. This
 page records how that is built and why, as established by the first proof
 (`crates/speedyspec-php`, test `tests/php.rs`).
 
+## Source layout
+
+`crates/speedyspec-php/src/`:
+
+| File | What it holds |
+| --- | --- |
+| `runtime.rs` | `Php` (boot, eval, require, run_file, call, inspection, shutdown), `PhpError`, `BootOptions`, `Output`. |
+| `boundary.rs` | Everything that keeps PHP's error handling on PHP's side: the per-thread `Engine` state, the fiber observers, `guard`, `native_entry`/`run_native`, the release queue (`release_later`, `drain`, `settle_stray`), `Thrown`/`take_thrown` and memory-exhaustion handling, and `call_php`. |
+| `sapi.rs` | The SAPI's fixed INI entries and its output, flush and log callbacks. |
+| `hook_class.rs` | The `speedyspec` module: `SpeedySpec\Hooks\Hook`, its global aliases and their argument handling. |
+| `convert.rs` | `zval` <-> `Value` conversion and `ZvalHandle`. |
+
 ## Versions
 
 | Piece | Version | Pinned in |
@@ -203,7 +215,8 @@ path is therefore `target-linux/x86_64-unknown-linux-musl/debug/...`.
 ext-php-rs's `Embed::run` uses PHP's stock embed SAPI, which offers no way to
 add a module, and its `php_embed_module` cannot ignore php.ini without
 patching. speedyspec therefore starts the engine itself with a minimal SAPI,
-the same sequence ext-php-rs's own SAPI tests use (`src/runtime.rs`):
+the same sequence ext-php-rs's own SAPI tests use (`src/runtime.rs`, with the
+callbacks and INI entries in `src/sapi.rs`):
 
 ```rust
 let sapi = SapiBuilder::new("speedyspec", "SpeedySpec")
@@ -254,7 +267,7 @@ fn startup(_ty: i32, _module_number: i32) -> i32 {
 
 The handlers are hand-written `extern "C" fn(&mut ExecuteData, &mut Zval)`
 rather than `#[php_function]` / `#[php_impl]`, because every native entry
-must go through `runtime::native_entry` (see "Bailouts, exceptions and exit()"
+must go through `boundary::native_entry` (see "Bailouts, exceptions and exit()"
 below). The global aliases and the methods share one handler each. Arguments
 are read from the frame directly and type errors are thrown as PHP's own
 `TypeError`, `ArgumentCountError` and `ValueError`.
@@ -343,8 +356,9 @@ return PHP's errors as `PhpError` values:
 
 An uncaught exception is `PhpError::Exception { class, message, file, line }`
 (read from the Throwable's properties); `exit()`/`die()` is `Exit(status)`; a
-fatal error (a bailout) is `Fatal { message, file, line }` from PHP's last
-recorded error. PHP itself also reports a fatal error on stderr (see "INI");
+fatal error is `Fatal { message, file, line }` from PHP's last recorded error.
+A fatal error is normally a bailout; memory exhaustion is the exception, see
+"Memory exhaustion" below. PHP itself also reports a fatal error on stderr (see "INI");
 exceptions it does not see as uncaught, so it reports nothing for them, and
 a script's uncaught exception from `run_file` leaves only the script's own
 output on stdout. The engine keeps working after a fatal error, as
@@ -362,11 +376,12 @@ from inside a native function looks like; the exception stays in
 
 ## Bailouts, exceptions and exit() across the Rust boundary
 
-A PHP fatal error is a bailout: a `longjmp` to the innermost `zend_try`. A
+A PHP fatal error is (with the one exception of memory exhaustion, below) a
+bailout: a `longjmp` to the innermost `zend_try`. A
 `longjmp` over a Rust frame skips that frame's destructors (and is undefined
 behaviour if any of them would have run). Hook callbacks make this real:
 PHP calls `Hook::run` (Rust), which fires a PHP callback (PHP), which can hit
-a fatal error, call `exit()` or throw. The rule `src/runtime.rs` follows:
+a fatal error, call `exit()` or throw. The rule `src/boundary.rs` follows:
 
 1. **Every entry into PHP goes through `guard`.** It is a plain `zend_try`
    (ext-php-rs `try_catch`, not `try_catch_first`, so it saves and restores
@@ -457,10 +472,10 @@ a fatal error, call `exit()` or throw. The rule `src/runtime.rs` follows:
    entries before calling any callback), so other contexts can use the
    registry and the engine freely. When PHP destroys a suspended fiber
    (last reference gone, cycle collection, or shutdown) it resumes it with
-   its internal graceful-exit object (the harness covers all three: the
+   its internal graceful-exit object (the harness covers all four: the
    last reference dropped by `unset`, a reference cycle destroyed by
-   `gc_collect_cycles()`, and a fiber still parked at shutdown, as well as
-   the last reference held by Rust and released from the bridge's queue):
+   `gc_collect_cycles()`, a fiber still parked at shutdown, and the last
+   reference held by Rust and released from the bridge's queue):
    `Fiber::suspend()` throws it, it unwinds the callback, the trampoline
    parks it like an `exit()` (it is not reported as one: `PhpError`/`CallbackError` say the fiber was destroyed),
    and the native call rethrows it, so the frames return normally and
@@ -474,16 +489,24 @@ a fatal error, call `exit()` or throw. The rule `src/runtime.rs` follows:
 
    **What is per context and what is not.** Per context: the native depth,
    the pending re-raise, the parked exit object, the firing frames (above).
-   Process-wide, on purpose: the release queue (a reference may be released
+   Process-wide, on purpose: `BOOTED` (the engine starts once per process);
+   the release queue (a reference may be released
    from any context, and draining runs under a guard wherever it happens, so
    a destructor that destroys a fiber there is fine); the parked panic (at
    most one is in flight, and it travels with the bailout from context to
-   context); `poisoned()` (a property of the engine); the entry counter;
-   `alive`; the dummy-frame function; the hook registry and the
+   context); `poisoned()` (a property of the engine); the memory-exhaustion
+   marker (the unwind-exit object of a memory exhaustion on its way down,
+   which a fiber hands to its resumer; see "Memory exhaustion"); the entry
+   counter; `alive`; the dummy-frame function; the hook registry and the
    `HookException` class; the owner stamp (`set_owner` names the plugin for
    every later `Hook::add`, from whichever context, until changed); and the
    output redirection (process stdout/stderr). ext-php-rs's bailout cleanup
    stack is thread-wide too, but the bridge never puts anything on it.
+   `speedyspec_php::execution_context()` exposes which context is running
+   (`EG(current_fiber_context)`, the address the observers key on) for
+   callers that keep per-context state of their own: the CLI's
+   `AttributedHooks` uses it to know which plugin's callback is running in
+   the current context while another context is suspended mid-callback.
 
 **Poisoned engine.** The engine keeps working after a bailout, as PHP's
 interactive shell does, but degraded for the rest of its single request:
@@ -494,9 +517,53 @@ compiler state behind until the request ends; a fatal error can strike
 part-way through an engine operation and leave its structures half-updated;
 and PHP marks every object existing at a fatal error as destructed, so their
 destructors never run. `Php::poisoned()` is set the first time any bailout is
-caught (a fatal error, or a Rust panic carried through PHP) and never
-cleared, so the caller can decide whether to carry on. `exit()` does not
-poison: in PHP 8 it unwinds as an exception, not a bailout.
+caught (a fatal error, memory exhaustion, or a Rust panic carried through
+PHP) and never cleared, so the caller can decide whether to carry on.
+`exit()` does not poison: in PHP 8 it unwinds as an exception, not a bailout.
+Memory exhaustion does, although it also unwinds like `exit()`: see below.
+
+**Memory exhaustion.** This PHP handles crossing `memory_limit` as a
+"delayed OOM" (`Zend/zend_alloc.c`: `zend_mm_check_limit` lets the allocation
+succeed and calls `zend_mm_delayed_error`, which records the message in
+`EG(delayed_oom)`, sets its state to `ZEND_OOM_STATE_PENDING` and raises the
+VM interrupt). The next VM interrupt check, `zend_call_function` or the end
+of `zend_execute_scripts` calls `zend_handle_delayed_oom`, which, with PHP
+code on the stack, throws the unwind-exit object (so `EG(exit_status)` is
+255) and reports `E_ERROR` "Allowed memory size of ... exhausted", which
+bails out to a `zend_try` of its own: so the engine is degraded exactly as
+after any fatal error, and the error is on stderr as usual. With no PHP
+frame it reports the error and bails out to our guard instead. Either way it
+leaves `EG(delayed_oom).state` at `ZEND_OOM_STATE_HANDLED`, which
+`php_request_shutdown` (`main/main.c`) resets to `ZEND_OOM_STATE_NONE`; until
+then `zend_call_function` calls `zend_handle_delayed_oom` (a no-op once
+handled) and returns FAILURE for every call (`Zend/zend_execute_API.c`, the
+`ZEND_HAS_OOM()` check at the top of `zend_call_function`). Left alone, one
+plugin running out of memory would therefore disable every PHP callback for
+the rest of the run and be reported as `exit(255)`. The boundary
+(`boundary::settle_delayed_oom`, `take_thrown`) instead: recognises the
+unwind exit by the HANDLED state, reports `PhpError::Fatal` (or the
+callback's error) from PHP's last recorded error, resets the state to
+`ZEND_OOM_STATE_NONE` as request shutdown would (the message and file were
+already freed by `zend_mm_oom_info_dtor`), and sets `poisoned()`. When the
+unwind exit is parked below a native function it is remembered by address,
+so the outer `take_thrown` that sees it again (in the same context, or in
+the context a fiber hands it to) still reports the fatal error. `call_php`
+looks for a thrown exit when `zend_call_function` fails, and `Php::execute`
+lets PHP handle an OOM still queued when top-level code ends, as
+`zend_execute_scripts` does, so it is not reported by the next, unrelated
+call. Exhausting the hard limit (`zend_mm_hard_limit_error`) or the system's
+memory ends the process (`_exit`/`abort`), as it does in the PHP CLI.
+
+**One request for the whole run.** speedyspec opens one request at boot and
+ends it only when `Php` is dropped. Any engine state that PHP resets only in
+`php_request_shutdown` or `php_request_startup` therefore persists for the
+whole run, where a PHP script would get a fresh one per request:
+`EG(delayed_oom)` was one (handled above); others are the disabled cycle
+collector and open compile state after a bailout (see "Poisoned engine"),
+`ini_set` changes, `memory_limit` usage, the included-files table and the
+last recorded error. **When bumping PHP, audit what `php_request_shutdown`
+resets** (`main/main.c`) for new state of this kind that a long-lived request
+would need to reset itself.
 
 **Reference counts.** A PHP object or resource reaching Rust becomes a
 `Value::Opaque` holding one counted reference (`convert::ZvalHandle`);
@@ -543,7 +610,8 @@ x86_64 CI runner should be faster.
 
 ## Verification
 
-`cargo test -p speedyspec-php --test php` prints an `ok` line per check (57
+`cargo test -p speedyspec-php --test php` prints an `ok` line per check (63
+since the final review fix wave; it was 57
 since Task 3's fifth fix round) and exits 0 on both targets.
 
 - **macOS arm64**, native: `otool -L` on the test binary lists only
