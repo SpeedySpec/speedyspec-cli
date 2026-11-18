@@ -37,10 +37,7 @@ deliberately after checking the new version (`spc --version`).
 
 `scripts/build-php.sh` (run it from anywhere; it works relative to the repo):
 
-1. Downloads `spc` for the host from
-   `https://dl.static-php.dev/static-php-cli/spc-bin/nightly/` into
-   `.php-build/spc` and checks its SHA-256.
-2. Writes `craft.yml` (committed, regenerated on every run) from `php-version`:
+1. Writes `craft.yml` (committed, regenerated on every run) from `php-version`:
 
    ```yaml
    php-version: "8.5.12"
@@ -48,17 +45,62 @@ deliberately after checking the new version (`spc --version`).
    sapi:
      - embed
      - cli
+   craft-options:
+     doctor: false
    ```
 
-3. Skips the build if `.php-build/buildroot/lib/libphp.a` exists and
+2. Skips the build if `.php-build/buildroot/lib/libphp.a` exists and
    `.php-build/buildroot/.craft.yml` matches `craft.yml` byte for byte (that
    is how a CI cache hit avoids a rebuild).
-4. Otherwise runs `spc craft <repo>/craft.yml` inside `.php-build/`. `craft`
-   runs `spc doctor --auto-fix`, `spc download --with-php=8.5.12 ...` and
-   `spc build ... --build-embed --build-cli`.
-5. Writes `.php-build/buildroot/link-flags.txt` from
+3. Checks that the host has the build tools (see "Host tools" below) and
+   fails with an install hint if not, unless
+   `SPEEDYSPEC_ALLOW_HOST_INSTALL=1`.
+4. Downloads `spc` for the host from
+   `https://dl.static-php.dev/static-php-cli/spc-bin/nightly/` into
+   `.php-build/spc` and checks its SHA-256.
+5. With `SPEEDYSPEC_ALLOW_HOST_INSTALL=1`, runs `spc doctor --auto-fix`.
+   Otherwise, if no `pkg-config` is on `PATH` or in `.php-build/pkgroot`,
+   runs `spc install-pkg pkg-config`, which builds one into
+   `.php-build/pkgroot` (inside the repository).
+6. Runs `spc craft <repo>/craft.yml` inside `.php-build/`. `craft` runs
+   `spc download --with-php=8.5.12 ...` and
+   `spc build ... --build-embed --build-cli`. `craft-options: doctor: false`
+   stops it from running its own `spc doctor --auto-fix` first (static-php-cli's
+   `CraftCommand` runs doctor only when `craft-options.doctor` is true, which
+   is the default).
+7. Writes `.php-build/buildroot/link-flags.txt` from
    `spc spc-config <extensions> --libs`, then stamps `.craft.yml`.
-6. Fails unless `.php-build/buildroot/lib/libphp.a` exists.
+8. Fails unless `.php-build/buildroot/lib/libphp.a` exists.
+
+### Host tools
+
+By default `scripts/build-php.sh` installs and changes nothing outside the
+repository. static-php-cli's `spc doctor` installs missing tools with
+Homebrew or the distro package manager, and so does plain `spc doctor`:
+without `--auto-fix` it asks "Do you want to fix it?", and when there is no
+terminal to answer it goes ahead. (`--auto-fix=never` only reports, and it
+still exits 0, so it cannot gate a build.) That is how this proof's first
+build installed `bison` 3.8.2 with Homebrew on the development Mac. The
+script therefore never lets spc run doctor unless asked. It checks for the
+same commands itself, read-only:
+
+- macOS: `curl make re2c flex git autoconf automake tar libtool unzip xz
+  gzip bzip2 cmake glibtoolize`, plus bison 3 or newer (on `PATH` or in
+  Homebrew's keg-only `/opt/homebrew/opt/bison/bin`; macOS's own bison is
+  2.3). Hint:
+  `brew install autoconf automake bison bzip2 cmake flex git libtool make re2c xz`.
+- Linux: `curl make re2c flex git autoconf automake tar unzip xz gzip bzip2
+  cmake gcc g++ patch libtoolize perl which`, plus bison 3+. Hint: use the
+  package manager, or build in the container (`scripts/linux.sh`). Doctor
+  also checks things such as Linux headers and, on non-Alpine hosts, the musl
+  toolchain, which this list does not cover; there spc fails during the build
+  instead.
+
+`SPEEDYSPEC_ALLOW_HOST_INSTALL=1` skips the check and runs
+`spc doctor --auto-fix`, which may install packages on the machine.
+`scripts/linux.sh` sets it inside its container, which is thrown away after
+each run. `ci.yml` sets it for the build step, because CI runners are
+throwaway too.
 
 Notes on the settings:
 
@@ -73,10 +115,6 @@ Notes on the settings:
   `--enable-zts` build option, which `craft.yml` does not set. `php -i`
   reports `Thread Safety => disabled`.
 - **Debug off, symbols stripped** are static-php-cli defaults.
-- **`spc doctor --auto-fix` installs missing build tools.** On macOS it uses
-  Homebrew (on this machine it installed `bison` 3.8.2) and builds its own
-  `pkg-config` under `.php-build/pkgroot`. On Alpine it would `apk add`; the
-  image built by `scripts/linux.sh` already has the tools.
 - static-php-cli configures PHP with
   `--with-config-file-path=/usr/local/etc/php` and a matching scan dir. That
   does not matter: the runtime tells PHP to ignore php.ini (below).
@@ -310,6 +348,7 @@ Deviations from the original plan, and why:
 `.github/workflows/ci.yml` runs on `macos-latest` (arm64) and `ubuntu-latest`
 (through `scripts/linux.sh`, so tests run in the same musl container used
 locally), caches `.php-build*/spc` and `.php-build*/buildroot` keyed on
-`php-version` and `scripts/build-php.sh`, builds PHP, and runs
+`php-version` and `scripts/build-php.sh`, builds PHP (with
+`SPEEDYSPEC_ALLOW_HOST_INSTALL=1`), and runs
 `cargo test --workspace`. **It has never run**: the repository does not exist
 on GitHub yet.

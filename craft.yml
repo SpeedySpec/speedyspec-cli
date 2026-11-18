@@ -4,3 +4,7 @@ extensions: "ctype,curl,filter,mbstring,openssl,phar,tokenizer,zip,zlib"
 sapi:
   - embed
   - cli
+# craft must not run spc doctor --auto-fix, which installs host packages;
+# build-php.sh checks the tools itself (see SPEEDYSPEC_ALLOW_HOST_INSTALL).
+craft-options:
+  doctor: false

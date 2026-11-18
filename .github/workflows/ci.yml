@@ -37,6 +37,9 @@ jobs:
           key: php-${{ matrix.name }}-${{ hashFiles('php-version', 'scripts/build-php.sh') }}
 
       - name: Build static PHP
+        # Runners are throwaway, so spc may install missing build tools.
+        env:
+          SPEEDYSPEC_ALLOW_HOST_INSTALL: "1"
         run: ${{ matrix.run }} scripts/build-php.sh
 
       - name: Test

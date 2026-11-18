@@ -10,6 +10,8 @@
 # and every path inside the container is the default one.
 #
 # SPEEDYSPEC_LINUX_PLATFORM picks the container platform (default linux/amd64).
+# The container is thrown away after each run, so build-php.sh may install
+# missing tools in it (SPEEDYSPEC_ALLOW_HOST_INSTALL=1).
 set -euo pipefail
 
 if [ "$#" -eq 0 ]; then
@@ -73,5 +75,6 @@ exec docker run --rm ${tty_flag[@]+"${tty_flag[@]}"} \
     --volume "$target_dir:/work/target" \
     --volume "speedyspec-cargo-registry-${platform##*/}:/usr/local/cargo/registry" \
     --env CARGO_BUILD_TARGET="$rust_target" \
+    --env SPEEDYSPEC_ALLOW_HOST_INSTALL=1 \
     --workdir /work \
     "$image" "$@"
