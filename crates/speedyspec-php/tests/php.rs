@@ -43,6 +43,8 @@ const CASES: &[(&str, Case)] = &[
     ("priority_order", case_priority_order),
     ("accepted_args", case_accepted_args),
     ("aliases_share_registry", case_aliases_share_registry),
+    ("aliases_all", case_aliases_all),
+    ("std_handles", case_std_handles),
     (
         "remove_closure_by_identity",
         case_remove_closure_by_identity,
@@ -123,6 +125,10 @@ const CASES: &[(&str, Case)] = &[
         case_backend_error_is_exception,
     ),
     ("call_and_inspect", case_call_and_inspect),
+    (
+        "stray_destructor_exception",
+        case_stray_destructor_exception,
+    ),
     ("refcounts_balance", case_refcounts_balance),
     // Must stay last: it leaves a fiber parked inside a hook for shutdown.
     ("fiber_parked_at_shutdown", case_fiber_parked_at_shutdown),
@@ -238,6 +244,27 @@ fn case_accepted_args(ctx: &Ctx) -> Result<(), String> {
 
 fn case_aliases_share_registry(ctx: &Ctx) -> Result<(), String> {
     eq(&require_out(ctx, "aliases_share_registry.php")?, "y1")
+}
+
+fn case_aliases_all(ctx: &Ctx) -> Result<(), String> {
+    eq(&require_out(ctx, "aliases_all.php")?, "yftnf|5,7y|ytn|rr22")
+}
+
+fn case_std_handles(ctx: &Ctx) -> Result<(), String> {
+    // STDIN, STDOUT and STDERR exist and are writable, as in the PHP CLI.
+    // (They are `php://std*` streams, which under a non-CLI SAPI are dup()s of
+    // fds 0-2 taken at boot, so this harness's fd capture cannot see what is
+    // written to them; the CLI tests check where the bytes go.)
+    eq(
+        &stdout_of(|| {
+            ctx.php.eval(
+                "t",
+                "echo is_resource(STDIN) && is_resource(STDOUT) && is_resource(STDERR) ? 'y' : 'n';
+                 echo fwrite(STDERR, '');",
+            )
+        })?,
+        "y0",
+    )
 }
 
 fn case_remove_closure_by_identity(ctx: &Ctx) -> Result<(), String> {
@@ -527,7 +554,8 @@ fn case_fiber_dropped_while_parked(ctx: &Ctx) -> Result<(), String> {
         "parked;unwound;fiber-finally;freed;dropped;0",
     )?;
     // A parked fiber whose last reference Rust holds is destroyed from the
-    // bridge's own release queue, at the end of the next entry into PHP.
+    // bridge's own release queue, at the start of the next entry into PHP
+    // (which settles what Rust let go of before running anything).
     let fiber = ctx
         .php
         .eval(
@@ -549,7 +577,7 @@ fn case_fiber_dropped_while_parked(ctx: &Ctx) -> Result<(), String> {
     drop(fiber);
     eq(
         &stdout_of(|| ctx.php.eval("t", "echo 'next;';"))?,
-        "next;unwound;",
+        "unwound;next;",
     )?;
 
     // Nothing is left wedged: hooks, eval and a top-level exit() still work.
@@ -732,9 +760,11 @@ fn case_fiber_abandoned_after_fatal(ctx: &Ctx) -> Result<(), String> {
         "resumed;",
     )?;
     let after = speedyspec_php::fiber_records();
-    if after + 1 != parked {
+    // Whether the new fiber lands on an abandoned fiber's address depends on
+    // the allocator; it must never add a record.
+    if after > parked {
         return Err(format!(
-            "expected the new fiber to retire one stale record: {parked} -> {after}"
+            "a finished fiber left a record behind: {parked} -> {after}"
         ));
     }
     Ok(())
@@ -1203,7 +1233,35 @@ fn case_backend_error_is_exception(ctx: &Ctx) -> Result<(), String> {
     ctx.hooks.backend_down.set(true);
     let out = require_out(ctx, "backend_error.php");
     ctx.hooks.backend_down.set(false);
-    eq(&out?, "down")
+    // The message names the hook (and the owner, when there is one).
+    eq(&out?, "backend.down: down")?;
+    // A Rust callback's error, fired from PHP, names its owner too.
+    ctx.hooks
+        .add(
+            "rust.fails",
+            Rc::new(|_: &[Value]| Err(CallbackError("nope".into()))),
+            AddOptions {
+                owner: Some("acme/rust".into()),
+                ..AddOptions::default()
+            },
+        )
+        .map_err(|e| e.to_string())?;
+    eq(
+        &stdout_of(|| {
+            ctx.php.eval(
+                "t",
+                "try
+                 {
+                     \\SpeedySpec\\Hooks\\Hook::run('rust.fails');
+                 }
+                 catch (\\SpeedySpec\\Hooks\\HookException $e)
+                 {
+                     echo $e->getMessage();
+                 }",
+            )
+        })?,
+        "rust.fails: nope (registered by acme/rust)",
+    )
 }
 
 fn case_call_and_inspect(ctx: &Ctx) -> Result<(), String> {
@@ -1261,6 +1319,61 @@ fn case_call_and_inspect(ctx: &Ctx) -> Result<(), String> {
         }
         other => Err(format!("thrower: {other:?}")),
     }
+}
+
+fn case_stray_destructor_exception(ctx: &Ctx) -> Result<(), String> {
+    // An object whose destructor throws, released by Rust between calls: the
+    // exception belongs to no call. It is logged and cleared, and the next
+    // call, inspection and eval are not blamed for it.
+    let thrower = || {
+        ctx.php.eval(
+            "t",
+            "return new class
+             {
+                 public function __destruct()
+                 {
+                     throw new RuntimeException('from a destructor');
+                 }
+             };",
+        )
+    };
+    let discarded = |err: Result<String, String>| -> Result<(), String> {
+        let err = err?;
+        if err.contains("speedyspec: discarded an uncaught RuntimeException (from a destructor)")
+            && !err.contains("PHP Fatal error")
+        {
+            Ok(())
+        } else {
+            Err(format!("stderr: {err:?}"))
+        }
+    };
+
+    drop(thrower().map_err(|e| e.to_string())?);
+    let (err, upper) = capture(2, || {
+        ctx.php
+            .call(&Value::Str("strtoupper".into()), &[Value::Str("ab".into())])
+    });
+    match upper {
+        Ok(Value::Str(s)) if s == "AB" => {}
+        other => return Err(format!("call after a stray exception: {other:?}")),
+    }
+    discarded(err)?;
+
+    let object = ctx
+        .php
+        .eval("t", "return new class { public $a = 1; };")
+        .map_err(|e| e.to_string())?;
+    drop(thrower().map_err(|e| e.to_string())?);
+    let (err, props) = capture(2, || ctx.php.properties_of(&object));
+    if props != Some(vec![("a".to_owned(), Value::Int(1))]) {
+        return Err(format!("properties_of after a stray exception: {props:?}"));
+    }
+    discarded(err)?;
+
+    drop(thrower().map_err(|e| e.to_string())?);
+    let (err, out) = capture(2, || stdout_of(|| ctx.php.eval("t", "echo 'clean';")));
+    eq(&out?, "clean")?;
+    discarded(err)
 }
 
 fn case_refcounts_balance(ctx: &Ctx) -> Result<(), String> {

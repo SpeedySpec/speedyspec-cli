@@ -73,6 +73,21 @@ fn php_command_runs_a_file_with_hooks() {
 }
 
 #[test]
+fn php_command_has_std_handles() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("handles.php");
+    std::fs::write(
+        &script,
+        "<?php\nfwrite(STDERR, 'to stderr');\nfwrite(STDOUT, 'to stdout');\n",
+    )
+    .unwrap();
+    let out = run(&[], &["php", script.to_str().unwrap()]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.stdout, "to stdout");
+    assert_eq!(out.stderr, "to stderr");
+}
+
+#[test]
 fn php_command_passes_arguments_through() {
     let dir = tempfile::tempdir().unwrap();
     let script = dir.path().join("argv.php");

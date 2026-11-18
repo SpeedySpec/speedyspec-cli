@@ -366,8 +366,17 @@ fn fire<T>(
             {
                 Err(Fail::Rethrow(object))
             }
-            _ => Err(Fail::Hook(err.message)),
+            _ => Err(Fail::Hook(hook_message(&err))),
         },
+    }
+}
+
+/// The `HookException` message for a hook failure that is not a PHP
+/// callback's own exception: `<hook>: <message>`, plus the owner when known.
+fn hook_message(err: &HookError) -> String {
+    match &err.owner {
+        Some(owner) => format!("{}: {} (registered by {owner})", err.hook, err.message),
+        None => format!("{}: {}", err.hook, err.message),
     }
 }
 

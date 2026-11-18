@@ -37,7 +37,7 @@ use speedyspec_hooks::{SharedHooks, Value};
 
 use crate::boundary::{
     CallError, ENGINE, call_php, class_name, discard_exception, drain, fatal_error, find_function,
-    guard, handle_queued_oom, release_later, table_as_zval, take_thrown,
+    guard, handle_queued_oom, release_later, settle_stray, table_as_zval, take_thrown,
 };
 use crate::convert;
 use crate::hook_class;
@@ -53,6 +53,20 @@ class HookException extends \RuntimeException
 {
 }
 ";
+
+/// The CLI's `STDIN`, `STDOUT` and `STDERR` constants, evaluated at boot: PHP's
+/// CLI SAPI defines them (`sapi/cli/php_cli.c`, `cli_register_file_handles`)
+/// and scripts expect `fwrite(STDERR, ...)` to work. They are plain
+/// `php://std*` streams on the process's file descriptors, so a write to
+/// `STDOUT` reaches fd 1 directly and is not affected by
+/// [`Php::redirect_output`], exactly as `php://stdout` is not.
+const STD_HANDLES_PHP: &str = r"\define('STDIN', \fopen('php://stdin', 'rb'));
+\define('STDOUT', \fopen('php://stdout', 'wb'));
+\define('STDERR', \fopen('php://stderr', 'wb'));
+";
+
+/// Stands in for the file name of [`STD_HANDLES_PHP`] in PHP's messages.
+const STD_HANDLES_LABEL: &str = "speedyspec://std-handles";
 
 /// Stands in for the file name of [`HOOK_EXCEPTION_PHP`] in PHP's messages.
 const HOOK_EXCEPTION_LABEL: &str = "speedyspec://hook-exception";
@@ -162,7 +176,8 @@ pub struct Php {
 
 impl Php {
     /// Starts PHP, opens the request that all later calls run in, defines
-    /// `SpeedySpec\Hooks\HookException` and evaluates `options.preload`.
+    /// `SpeedySpec\Hooks\HookException` and the CLI's `STDIN`, `STDOUT` and
+    /// `STDERR` constants, and evaluates `options.preload`.
     ///
     /// php.ini and the INI scan directory are never read. Like the PHP CLI,
     /// the engine skips a leading `#!` line in every file it compiles.
@@ -229,6 +244,11 @@ impl Php {
             _zend_compile_position_ZEND_COMPILE_POSITION_AFTER_OPEN_TAG,
         )?;
         hook_class::find_exception_class()?;
+        php.execute(
+            STD_HANDLES_LABEL,
+            STD_HANDLES_PHP.as_bytes(),
+            _zend_compile_position_ZEND_COMPILE_POSITION_AFTER_OPEN_TAG,
+        )?;
         for (name, source) in options.preload {
             php.execute(
                 name,
@@ -304,6 +324,7 @@ impl Php {
     /// Calls a PHP callable (a function name, a `[class, method]` array, a
     /// closure or an invokable object) with `args` and returns its result.
     pub fn call(&self, callable: &Value, args: &[Value]) -> Result<Value, PhpError> {
+        settle_stray();
         let mut target = ManuallyDrop::new(Zval::new());
         let target_ptr: *mut zval = &raw mut *target;
         let written = guard(|| {
@@ -316,7 +337,9 @@ impl Php {
             Err(interrupted) => Err(CallError::Interrupted(interrupted)),
         };
         release_later(target);
-        drain();
+        // Releasing the target can run a destructor; its exception is not
+        // this call's.
+        settle_stray();
         outcome.map_err(CallError::into_php_error)
     }
 
@@ -333,6 +356,7 @@ impl Php {
     /// properties cannot be converted.
     pub fn properties_of(&self, value: &Value) -> Option<Vec<(String, Value)>> {
         let obj = convert::handle_of(value)?.object()?;
+        settle_stray();
         // Fetching the table can run PHP code (a lazy object initialises).
         let table = guard(|| {
             // SAFETY: the handle keeps `obj` alive; every object has handlers
@@ -345,7 +369,7 @@ impl Php {
         };
         if let Some(thrown) = take_thrown() {
             drop(thrown);
-            drain();
+            settle_stray();
             return None;
         }
         let mut props = Vec::new();
@@ -407,6 +431,7 @@ impl Php {
     ) -> Result<Value, PhpError> {
         let label = CString::new(label).map_err(|_| PhpError::NulByte)?;
         let label_ptr = label.as_ptr();
+        settle_stray();
 
         // Owned here, outside every guard; the guards only see pointers.
         let mut retval = ManuallyDrop::new(Zval::new());
@@ -491,8 +516,10 @@ impl Php {
 
 impl Drop for Php {
     fn drop(&mut self) {
-        // Release everything Rust has let go of while PHP code may still run.
-        drain();
+        // Release everything Rust has let go of while PHP code may still run,
+        // and clear an exception a destructor left, which shutdown must not
+        // find pending.
+        settle_stray();
         // SAFETY: ends the request on the booting thread. Native functions
         // still work during it (shutdown functions and destructors may fire
         // hooks); PHP catches bailouts in each shutdown step itself.

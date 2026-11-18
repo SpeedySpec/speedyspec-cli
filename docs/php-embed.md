@@ -305,6 +305,16 @@ entries mirror PHP's CLI SAPI (`html_errors=0`, `implicit_flush=1`,
   panicking (a failed write, such as EPIPE, is ignored) since it is
   `extern "C"`. A plugin that sets `error_log` itself sends its diagnostics
   there instead.
+- `STDIN`, `STDOUT` and `STDERR` are defined at boot, as the CLI SAPI
+  does, as `php://stdin`, `php://stdout` and `php://stderr` streams. Under a
+  SAPI not named cli those are `dup()`s of file descriptors 0, 1 and 2 taken
+  at boot. `fwrite(STDERR, ...)` therefore reaches the process's stderr.
+  **Known gap:** `fwrite(STDOUT, ...)`, like any `php://stdout` stream,
+  writes to fd 1 directly, past the SAPI's output callback, so
+  `Php::redirect_output` does not move it: a plugin that writes to `STDOUT`
+  while loading (or from `speedyspec_init` and the start-up filters) puts
+  those bytes on stdout. Moving that needs an fd-level redirect, which is
+  not done.
 - `register_argc_argv=0`: under any SAPI other than `cli`, PHP 8.5 would
   derive `$_SERVER['argv']` from the query string and emit a deprecation, so
   `Php::run_file` sets `$argv`, `$argc`, `$_SERVER['argv']` and
@@ -361,9 +371,11 @@ a fatal error, call `exit()` or throw. The rule `src/runtime.rs` follows:
    (argument zvals, the return zval, the op array, strings) is owned by the
    caller, outside the closure, and released normally afterwards. A bailout
    therefore only ever skips the closure's own frame, which owns nothing.
-   Converting a Rust value to a zval allocates PHP memory, which can bail out
-   on `memory_limit`, so it runs inside the guard too, with frames that own
-   nothing (`convert::write_value`).
+   Converting a Rust value to a zval allocates PHP memory, so it runs inside
+   the guard too, with frames that own nothing (`convert::write_value`). (In
+   this PHP an allocation does not bail out: crossing `memory_limit` queues
+   a delayed OOM, see "Memory exhaustion" below, and exhausting the hard
+   limit or the system's memory ends the process.)
 2. **Every native function PHP calls goes through `native_entry`.** When a
    guard inside it catches a bailout, it sets a flag instead of continuing;
    the method then returns normally through all its Rust frames, dropping
@@ -381,7 +393,15 @@ a fatal error, call `exit()` or throw. The rule `src/runtime.rs` follows:
    destructor or the cycle collector, that is PHP code. Dropping a handle to
    a PHP value queues the reference; the queue is drained, each value under
    its own guard, at the end of every native call and every `Php` method and
-   PHP callback.
+   PHP callback, and at the start of every top-level `Php` entry. With no PHP
+   code running a release is made from the same dummy frame as a call from
+   Rust, so a destructor's exception stays in `EG(exception)` instead of
+   becoming a fatal error. Outside any call (released between calls, or the
+   callable itself released after the call) such an exception belongs to no
+   one: `boundary::settle_stray` logs it to stderr
+   (`speedyspec: discarded an uncaught ...`) and clears it, at the start and
+   end of each top-level entry and before shutdown, so the next call is not
+   blamed for it.
 5. **Exceptions and `exit()` are values, not jumps.** An exception is left in
    `EG(exception)` by PHP and taken out by the code that called in. A PHP
    callback's exception becomes that callback's `CallbackError`; when the

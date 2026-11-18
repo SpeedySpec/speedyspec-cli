@@ -8,9 +8,14 @@
 //! hook is the object that went in. Converting back reverses each rule.
 //!
 //! Reading a `zval` ([`to_value`]) never allocates PHP memory and never runs
-//! PHP code. Writing one ([`write_value`]) allocates PHP memory, which can
-//! bail out when `memory_limit` is exceeded, so it must run inside
-//! [`crate::boundary::guard`]; its frames own nothing with a destructor.
+//! PHP code. Writing one ([`write_value`]) allocates PHP memory. In this PHP
+//! that does not bail out: an allocation that crosses `memory_limit`
+//! succeeds and queues a delayed OOM, which PHP reports at its next check
+//! (see `boundary::settle_delayed_oom`), and exhausting the hard limit or the
+//! system's memory ends the process. It still runs inside
+//! [`crate::boundary::guard`], and its frames own nothing with a destructor,
+//! so that the rule "every entry into the engine is guarded" has no
+//! exceptions.
 
 use std::fmt;
 use std::mem::ManuallyDrop;
@@ -326,9 +331,10 @@ unsafe fn is_hole(slot: *const zval) -> bool {
 /// releasing it. On error `out` may hold a partly built array, which the
 /// caller still owns and must release.
 ///
-/// Allocates PHP memory, which can bail out, so call it only inside
-/// [`crate::boundary::guard`]. It owns nothing with a destructor in any frame,
-/// so a bailout leaks only PHP memory, which the engine reclaims.
+/// Allocates PHP memory, so call it only inside [`crate::boundary::guard`]
+/// (see the module docs for why allocation does not bail out here). It owns
+/// nothing with a destructor in any frame, so even a bailout would leak only
+/// PHP memory, which the engine reclaims.
 ///
 /// # Safety
 ///

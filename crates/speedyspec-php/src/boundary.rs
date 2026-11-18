@@ -42,6 +42,7 @@ use std::any::Any;
 use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::ffi::{CStr, c_void};
+use std::io::Write;
 use std::mem::{ManuallyDrop, MaybeUninit};
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::ptr;
@@ -429,7 +430,16 @@ pub(crate) fn release_later(zv: ManuallyDrop<Zval>) {
 /// a destructor). Stops while PHP must not be entered; the queue is kept for
 /// the next drain. An exception thrown by a destructor is left in
 /// `EG(exception)` for the caller, as PHP itself does.
+///
+/// With no PHP code running, the release is made from a dummy frame, as
+/// [`call_php`] calls: without a frame, `zend_call_function` turns a
+/// destructor's exception into a fatal error ("Uncaught ...", a bailout that
+/// poisons the engine; `zend_throw_exception_internal` in
+/// `Zend/zend_exceptions.c`). With the frame it stays in `EG(exception)`,
+/// where the caller reports it ([`take_thrown`]) or, outside any call,
+/// [`settle_stray`] logs and clears it.
 pub(crate) fn drain() {
+    let dummy_func = ENGINE.with(|e| e.dummy_func.get());
     loop {
         if !can_enter() {
             return;
@@ -438,8 +448,24 @@ pub(crate) fn drain() {
             return;
         };
         let zv_ptr: *mut zval = &raw mut *zv;
-        // SAFETY: we own this reference; `zv` lives in this frame.
-        let _ = guard(|| unsafe { zval_ptr_dtor(zv_ptr) });
+        let _ = guard(|| {
+            // SAFETY: we own this reference; `zv` lives in this frame. The
+            // dummy frame lives in this closure's frame for the duration of
+            // the release; a bailout resets EG(current_execute_data) itself.
+            unsafe {
+                let eg = ext_php_rs_executor_globals();
+                let mut dummy = MaybeUninit::<zend_execute_data>::zeroed();
+                let installed = (*eg).current_execute_data.is_null() && !dummy_func.is_null();
+                if installed {
+                    (*dummy.as_mut_ptr()).func = dummy_func;
+                    (*eg).current_execute_data = dummy.as_mut_ptr();
+                }
+                zval_ptr_dtor(zv_ptr);
+                if installed {
+                    (*eg).current_execute_data = ptr::null_mut();
+                }
+            }
+        });
     }
 }
 
@@ -552,6 +578,47 @@ pub(crate) fn take_thrown() -> Option<Thrown> {
         file,
         line,
     })
+}
+
+/// Releases what Rust has let go of and clears an exception that releasing
+/// (or an earlier release) left in `EG(exception)`, logging it to stderr.
+///
+/// Called at the start and end of every top-level `Php` entry. A destructor
+/// that throws while a value is released outside any PHP call leaves its
+/// exception pending; the next `zend_call_function` would then return at
+/// once and that exception would be reported as the next call's. Inside a
+/// native function (some PHP code below us will see the exception) this
+/// does nothing.
+pub(crate) fn settle_stray() {
+    if ENGINE.with(|e| e.native_depth.get()) > 0 {
+        return;
+    }
+    // A released exception object can have a throwing destructor of its own;
+    // a few rounds settle any sane chain.
+    for _ in 0..8 {
+        drain();
+        let Some(thrown) = take_thrown() else {
+            return;
+        };
+        let what = match &thrown {
+            Thrown::Exception {
+                class,
+                message,
+                file,
+                line,
+                ..
+            } => format!("an uncaught {class} ({message}) thrown in {file}:{line}"),
+            Thrown::Exit(status) => format!("exit({status})"),
+            Thrown::Fatal(fatal) => format!("a fatal error ({})", fatal.message),
+            Thrown::FiberDestroyed => "a fiber's unwinding".to_owned(),
+        };
+        let mut stderr = std::io::stderr().lock();
+        let _ = writeln!(
+            stderr,
+            "speedyspec: discarded {what} while releasing a PHP value outside any call"
+        );
+        drop(thrown);
+    }
 }
 
 /// Drops whatever is left in `EG(exception)` after a bailout. A leftover
