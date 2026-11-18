@@ -43,6 +43,30 @@ pub struct Prepared {
     pub state: Box<dyn Any>,
 }
 
+/// A plugin that answered a driver's filter, for drivers that record where an install came from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PluginRef {
+    pub name: String,
+    pub version: String,
+}
+
+/// What the user gave `app uninstall`.
+pub struct UninstallInput<'a> {
+    /// The install's name.
+    pub name: &'a str,
+    /// The driver's uninstall flags that were given, by name; a switch that was given is `"1"`.
+    pub flags: &'a BTreeMap<String, String>,
+    pub interactive: bool,
+}
+
+/// What an uninstall will remove, found without changing anything.
+pub struct UninstallPlan {
+    /// Shown to the user before they confirm.
+    pub summary: Vec<String>,
+    /// The driver's own, handed back to [`Driver::uninstall`].
+    pub state: Box<dyn Any>,
+}
+
 /// Why a driver could not prepare or install; the message is shown to the user as it is.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DriverError(pub String);
@@ -84,9 +108,37 @@ pub trait Driver {
         prepared: &Prepared,
         answer: &Value,
         reader: &dyn ObjectReader,
+        plugins: &[PluginRef],
         progress: &mut dyn Progress,
     ) -> Result<Value, DriverError>;
 
     /// What `install` returned, as lines of command output for the user.
     fn report(&self, result: &Value) -> Vec<String>;
+
+    /// Flags `app uninstall` accepts for this driver. Empty means the driver cannot uninstall.
+    fn uninstall_flags(&self) -> Vec<DriverFlag> {
+        Vec::new()
+    }
+
+    /// Finds the install and says what removing it will delete. Changes nothing.
+    fn plan_uninstall(&self, input: &UninstallInput<'_>) -> Result<UninstallPlan, DriverError> {
+        let _ = input;
+        Err(DriverError(format!(
+            "the {} driver cannot uninstall",
+            self.id()
+        )))
+    }
+
+    /// Removes what `plan_uninstall` found. Returns lines of command output.
+    fn uninstall(
+        &self,
+        plan: &UninstallPlan,
+        progress: &mut dyn Progress,
+    ) -> Result<Vec<String>, DriverError> {
+        let _ = (plan, progress);
+        Err(DriverError(format!(
+            "the {} driver cannot uninstall",
+            self.id()
+        )))
+    }
 }

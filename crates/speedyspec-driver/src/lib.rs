@@ -9,4 +9,7 @@ pub use contracts::{
     ObjectReader, ZipSource, decode_app, decode_apps, decode_command, decode_commands,
     decode_install_option, decode_zip_source, is_fetchable_url,
 };
-pub use driver::{Driver, DriverError, DriverFlag, DriverInput, Prepared, Progress};
+pub use driver::{
+    Driver, DriverError, DriverFlag, DriverInput, PluginRef, Prepared, Progress, UninstallInput,
+    UninstallPlan,
+};

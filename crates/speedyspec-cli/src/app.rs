@@ -5,7 +5,9 @@ use std::io::{IsTerminal, Write};
 use std::rc::Rc;
 
 use clap::ArgMatches;
-use speedyspec_driver::{App, Driver, DriverInput, InstallOption, Progress, decode_install_option};
+use speedyspec_driver::{
+    App, Driver, DriverInput, InstallOption, PluginRef, Progress, decode_install_option,
+};
 use speedyspec_hooks::{Hooks, Key, Value};
 use speedyspec_php::Output;
 
@@ -438,6 +440,21 @@ pub fn install(runtime: &Runtime, matches: &ArgMatches, prepass: Option<Prepass>
     let answer = runtime
         .hooks
         .filter(&hook, driver.seed(), std::slice::from_ref(&request));
+    // Who answered, before the validators (and this list with them) are cleared.
+    let plugins: Vec<PluginRef> = runtime
+        .hooks
+        .take_contributors()
+        .into_iter()
+        .map(|name| {
+            let version = runtime
+                .loaded
+                .iter()
+                .find(|plugin| plugin.manifest.name == name)
+                .map(|plugin| plugin.manifest.version.to_string())
+                .unwrap_or_default();
+            PluginRef { name, version }
+        })
+        .collect();
     runtime.hooks.clear_validators();
     runtime.php.redirect_output(Output::Stdout);
     let rejections = runtime.hooks.take_rejections();
@@ -454,7 +471,7 @@ pub fn install(runtime: &Runtime, matches: &ArgMatches, prepass: Option<Prepass>
     };
 
     let reader = PhpReader(&runtime.php);
-    let result = match driver.install(&prepared, &answer, &reader, &mut StderrProgress) {
+    let result = match driver.install(&prepared, &answer, &reader, &plugins, &mut StderrProgress) {
         Ok(result) => result,
         Err(error) => {
             eprintln!("speedyspec: {error}");
