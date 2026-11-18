@@ -1,0 +1,377 @@
+//! Drives the built `speedyspec` binary. Every run gets an empty `SPEEDYSPEC_HOME`, so the
+//! developer's own plugins never load, and plugins come from the fixtures by `--plugin-dir`.
+
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+struct Run {
+    code: i32,
+    stdout: String,
+    stderr: String,
+}
+
+fn fixture(name: &str) -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/plugins")
+        .join(name)
+}
+
+/// Runs `speedyspec` in `cwd` with the fixtures named in `plugins` passed by `--plugin-dir`, in
+/// order, ahead of `args`.
+fn run_in(cwd: &Path, plugins: &[&str], args: &[&str]) -> Run {
+    let home = tempfile::tempdir().expect("temp home");
+    let mut command = Command::new(env!("CARGO_BIN_EXE_speedyspec"));
+    command.current_dir(cwd).env("SPEEDYSPEC_HOME", home.path());
+    for plugin in plugins {
+        command.arg("--plugin-dir").arg(fixture(plugin));
+    }
+    let output = command.args(args).output().expect("speedyspec runs");
+    Run {
+        code: output.status.code().expect("exited normally"),
+        stdout: String::from_utf8(output.stdout).expect("stdout is UTF-8"),
+        stderr: String::from_utf8(output.stderr).expect("stderr is UTF-8"),
+    }
+}
+
+fn run(plugins: &[&str], args: &[&str]) -> Run {
+    run_in(Path::new(env!("CARGO_MANIFEST_DIR")), plugins, args)
+}
+
+#[test]
+fn version_prints_three_lines() {
+    let out = run(&[], &["--version"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let lines: Vec<&str> = out.stdout.lines().collect();
+    assert_eq!(lines.len(), 3, "{:?}", out.stdout);
+    assert!(lines[0].starts_with("speedyspec "), "{}", lines[0]);
+    assert!(lines[1].starts_with("php 8."), "{}", lines[1]);
+    assert_eq!(lines[2], "contracts 1.0.0");
+    assert_eq!(out.stderr, "");
+}
+
+#[test]
+fn runs_with_no_plugins_at_all() {
+    let out = run(&[], &["app", "list"]);
+    assert_eq!(out.code, 0);
+    assert_eq!(out.stdout, "");
+    assert!(out.stderr.contains("No apps"), "{}", out.stderr);
+}
+
+#[test]
+fn php_command_runs_a_file_with_hooks() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("hooks.php");
+    std::fs::write(
+        &script,
+        "<?php\nadd_filter('answer', fn (int $v): int => $v + 2);\necho apply_filters('answer', 40);\n",
+    )
+    .unwrap();
+    let out = run(&[], &["php", script.to_str().unwrap()]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.stdout, "42");
+    assert_eq!(out.stderr, "");
+}
+
+#[test]
+fn php_command_passes_arguments_through() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("argv.php");
+    std::fs::write(
+        &script,
+        "<?php\necho implode(',', array_slice($argv, 1));\n",
+    )
+    .unwrap();
+    let out = run(
+        &[],
+        &[
+            "php",
+            script.to_str().unwrap(),
+            "--flag",
+            "x",
+            "--no-plugins",
+        ],
+    );
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.stdout, "--flag,x,--no-plugins");
+}
+
+#[test]
+fn php_command_exit_code_is_scripts() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("exit.php");
+    std::fs::write(&script, "<?php\nexit(4);\n").unwrap();
+    let out = run(&[], &["php", script.to_str().unwrap()]);
+    assert_eq!(out.code, 4);
+}
+
+#[test]
+fn php_command_missing_file_fails_with_one_line() {
+    let out = run(&[], &["php", "/no/such/file.php"]);
+    assert_eq!(out.code, 1);
+    assert_eq!(out.stdout, "");
+    assert!(out.stderr.starts_with("speedyspec: "), "{}", out.stderr);
+    assert_eq!(out.stderr.lines().count(), 1, "{}", out.stderr);
+}
+
+#[test]
+fn plugin_app_is_listed() {
+    let out = run(&["good"], &["app", "list"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.stdout, "demo\tDemo\tzip?\n");
+}
+
+#[test]
+fn plugin_command_runs() {
+    let out = run(&["good"], &["hello", "Ada"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.stdout, "hello Ada\n");
+    let out = run(&["good"], &["hello", "Ada", "--shout"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.stdout, "HELLO ADA\n");
+}
+
+#[test]
+fn plugin_command_appears_in_help() {
+    let out = run(&["good"], &["--help"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(out.stdout.contains("hello"), "{}", out.stdout);
+    assert!(out.stdout.contains("--plugin-dir"), "{}", out.stdout);
+}
+
+#[test]
+fn plugin_command_has_its_own_help() {
+    let out = run(&["good"], &["hello", "--help"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(out.stdout.contains("Greets someone."), "{}", out.stdout);
+    assert!(out.stdout.contains("--shout"), "{}", out.stdout);
+}
+
+#[test]
+fn missing_required_argument_is_usage_error() {
+    let out = run(&["good"], &["hello"]);
+    assert_eq!(out.code, 2);
+    assert_eq!(out.stdout, "");
+}
+
+#[test]
+fn plugin_dir_accepts_equals_form_and_comes_anywhere() {
+    let home = tempfile::tempdir().unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_speedyspec"))
+        .env("SPEEDYSPEC_HOME", home.path())
+        .arg("hello")
+        .arg(format!("--plugin-dir={}", fixture("good").display()))
+        .arg("Ada")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "hello Ada\n");
+}
+
+#[test]
+fn plugin_list_shows_loaded() {
+    let out = run(&["good"], &["plugin", "list"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(
+        out.stdout.contains("speedyspec-fixture/good\t1.0.0\t"),
+        "{}",
+        out.stdout
+    );
+}
+
+#[test]
+fn no_plugins_flag_skips_loading() {
+    let out = run(&["good"], &["--no-plugins", "hello", "Ada"]);
+    assert_eq!(out.code, 2);
+    assert_eq!(out.stdout, "");
+}
+
+#[test]
+fn load_output_goes_to_stderr() {
+    let out = run(&["noisy"], &["--version"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.stdout.lines().count(), 3, "{:?}", out.stdout);
+    assert!(!out.stdout.contains("loading noisy"), "{}", out.stdout);
+    assert!(out.stderr.contains("loading noisy"), "{}", out.stderr);
+}
+
+#[test]
+fn exit_at_load_skips_and_names_plugin() {
+    let out = run(&["exits", "good"], &["hello", "Ada"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.stdout, "hello Ada\n");
+    assert!(
+        out.stderr
+            .contains("speedyspec: plugin speedyspec-fixture/exits skipped"),
+        "{}",
+        out.stderr
+    );
+    assert!(out.stderr.contains("exit(7)"), "{}", out.stderr);
+}
+
+#[test]
+fn fatal_at_load_skips_and_names_plugin() {
+    let out = run(&["fatal", "good"], &["hello", "Ada"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.stdout, "hello Ada\n");
+    assert!(
+        out.stderr
+            .contains("speedyspec: plugin speedyspec-fixture/fatal skipped"),
+        "{}",
+        out.stderr
+    );
+    assert!(
+        out.stderr.contains("undefined_function_xyz"),
+        "{}",
+        out.stderr
+    );
+}
+
+#[test]
+fn contract_range_mismatch_is_reported() {
+    let out = run(&["needs-v2"], &["--version"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(out.stderr.contains("^2.0"), "{}", out.stderr);
+    assert!(out.stderr.contains("1.0.0"), "{}", out.stderr);
+    assert!(!out.stderr.contains("must never load"), "{}", out.stderr);
+    assert_eq!(out.stdout.lines().count(), 3, "{:?}", out.stdout);
+}
+
+#[test]
+fn wrong_filter_return_is_reported() {
+    let out = run(&["bad-apps"], &["--version"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(
+        out.stderr.contains("speedyspec-fixture/bad-apps"),
+        "{}",
+        out.stderr
+    );
+    assert!(out.stderr.contains("speedyspec_apps"), "{}", out.stderr);
+    assert_eq!(out.stdout.lines().count(), 3, "{:?}", out.stdout);
+}
+
+#[test]
+fn bad_field_names_plugin_hook_and_field() {
+    let out = run(&["bad-app-field"], &["--version"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(
+        out.stderr.contains("speedyspec-fixture/bad-app-field"),
+        "{}",
+        out.stderr
+    );
+    assert!(out.stderr.contains("speedyspec_apps"), "{}", out.stderr);
+    assert!(out.stderr.contains("[0].id"), "{}", out.stderr);
+}
+
+#[test]
+fn builtin_wins_over_plugin_command() {
+    let out = run(&["clash"], &["app", "list"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.stdout, "");
+    assert!(out.stderr.contains("No apps"), "{}", out.stderr);
+    assert!(
+        out.stderr
+            .contains(r#"command "app" from a plugin ignored"#),
+        "{}",
+        out.stderr
+    );
+}
+
+#[test]
+fn first_plugin_wins_duplicate_command() {
+    let out = run(&["good", "clash"], &["hello", "Ada"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.stdout, "hello Ada\n");
+    assert!(
+        out.stderr
+            .contains(r#"command "hello" from a plugin ignored"#),
+        "{}",
+        out.stderr
+    );
+}
+
+#[test]
+fn exit_in_handler_is_exit_code() {
+    let out = run(&["exit-handler"], &["quit"]);
+    assert_eq!(out.code, 5);
+    assert_eq!(out.stdout, "");
+}
+
+#[test]
+fn exception_in_handler_is_reported() {
+    let out = run(&["throws"], &["boom"]);
+    assert_eq!(out.code, 1);
+    assert_eq!(out.stdout, "");
+    assert!(
+        out.stderr
+            .contains("speedyspec: boom: RuntimeException: kaboom"),
+        "{}",
+        out.stderr
+    );
+}
+
+#[test]
+fn unknown_command_is_usage_error() {
+    let out = run(&[], &["nope"]);
+    assert_eq!(out.code, 2);
+    assert_eq!(out.stdout, "");
+}
+
+#[test]
+fn no_arguments_prints_help_and_is_usage_error() {
+    let out = run(&["good"], &[]);
+    assert_eq!(out.code, 2);
+    assert!(out.stderr.contains("Usage"), "{}", out.stderr);
+    assert!(out.stderr.contains("hello"), "{}", out.stderr);
+}
+
+#[test]
+fn working_directory_plugins_are_not_loaded() {
+    let cwd = tempfile::tempdir().unwrap();
+    let plugin = cwd.path().join(".speedyspec/plugins/good");
+    std::fs::create_dir_all(&plugin).unwrap();
+    for file in ["speedyspec-plugin.json", "plugin.php"] {
+        std::fs::copy(fixture("good").join(file), plugin.join(file)).unwrap();
+    }
+    let out = run_in(cwd.path(), &[], &["hello", "Ada"]);
+    assert_eq!(out.code, 2);
+}
+
+/// An exception is not a fatal error; a redeclared function is, and bails PHP out. The binary
+/// must report the plugin, keep stdout clean and carry on with the other plugins.
+#[test]
+fn real_fatal_error_at_load_is_survived() {
+    let dir = tempfile::tempdir().unwrap();
+    let plugin = dir.path().join("redeclares");
+    std::fs::create_dir(&plugin).unwrap();
+    std::fs::write(
+        plugin.join("speedyspec-plugin.json"),
+        r#"{"name":"speedyspec-fixture/redeclares","version":"1.0.0","contracts":"^1.0","entry":"plugin.php"}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        plugin.join("plugin.php"),
+        "<?php\nfunction twice() {}\nfunction twice() {}\n",
+    )
+    .unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_speedyspec"))
+        .env("SPEEDYSPEC_HOME", home.path())
+        .arg("--plugin-dir")
+        .arg(&plugin)
+        .arg("--plugin-dir")
+        .arg(fixture("good"))
+        .args(["hello", "Ada"])
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "hello Ada\n");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("plugin speedyspec-fixture/redeclares skipped"),
+        "{stderr}"
+    );
+    assert!(
+        stderr.contains("Cannot redeclare function twice()"),
+        "{stderr}"
+    );
+}

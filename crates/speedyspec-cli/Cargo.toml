@@ -1,0 +1,27 @@
+[package]
+name = "speedyspec-cli"
+version = "0.1.0"
+description = "The speedyspec command line: a statically linked PHP interpreter that PHP plugins extend."
+edition.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "speedyspec"
+path = "src/main.rs"
+
+[dependencies]
+speedyspec-driver = { path = "../speedyspec-driver" }
+speedyspec-hooks = { path = "../speedyspec-hooks" }
+speedyspec-hooks-memory = { path = "../speedyspec-hooks-memory" }
+speedyspec-php = { path = "../speedyspec-php" }
+speedyspec-plugin = { path = "../speedyspec-plugin" }
+# The command tree is built at run time from what plugins contribute, so the
+# builder API is used; `string` lets plugin-supplied names become clap ids.
+clap = { version = "4", default-features = false, features = ["std", "help", "usage", "error-context", "suggestions", "string"] }
+semver = "1"
+
+[build-dependencies]
+serde_json = "1"
+
+[dev-dependencies]
+tempfile = "3"

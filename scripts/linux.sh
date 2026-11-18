@@ -9,6 +9,9 @@
 # /work/.php-build and /work/target, so they never mix with the host's builds
 # and every path inside the container is the default one.
 #
+# The sibling checkout ../speedyspec-cli-contracts, when present, is mounted
+# read-only at /contracts (see SPEEDYSPEC_CONTRACTS_DIR in crates/speedyspec-cli/build.rs).
+#
 # SPEEDYSPEC_LINUX_PLATFORM picks the container platform (default linux/amd64).
 # The container is thrown away after each run, so build-php.sh may install
 # missing tools in it (SPEEDYSPEC_ALLOW_HOST_INSTALL=1).
@@ -63,6 +66,15 @@ EOF
 
 mkdir -p "$php_build_dir" "$target_dir"
 
+# speedyspec-cli embeds the PHP contracts from a sibling checkout, which is
+# outside the repository mounted at /work, so mount it separately.
+contracts_flags=()
+contracts_dir="$repo/../speedyspec-cli-contracts"
+if [ -d "$contracts_dir" ]; then
+    contracts_dir="$(cd "$contracts_dir" && pwd)"
+    contracts_flags=(--volume "$contracts_dir:/contracts:ro" --env SPEEDYSPEC_CONTRACTS_DIR=/contracts)
+fi
+
 tty_flag=()
 if [ -t 0 ] && [ -t 1 ]; then
     tty_flag=(--tty --interactive)
@@ -74,6 +86,7 @@ exec docker run --rm ${tty_flag[@]+"${tty_flag[@]}"} \
     --volume "$php_build_dir:/work/.php-build" \
     --volume "$target_dir:/work/target" \
     --volume "speedyspec-cargo-registry-${platform##*/}:/usr/local/cargo/registry" \
+    ${contracts_flags[@]+"${contracts_flags[@]}"} \
     --env CARGO_BUILD_TARGET="$rust_target" \
     --env SPEEDYSPEC_ALLOW_HOST_INSTALL=1 \
     --workdir /work \

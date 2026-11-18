@@ -1,0 +1,6 @@
+{
+    "name": "speedyspec-fixture/needs-v2",
+    "version": "1.0.0",
+    "contracts": "^2.0",
+    "entry": "plugin.php"
+}
