@@ -2,8 +2,10 @@
 //! platform, check it against the release's `SHA256SUMS`, and put it in place of the running one.
 
 mod release;
+mod replace;
 
 pub use release::{
     Asset, Check, REPOSITORY, Release, SUMS, UpdateError, Version, asset_name, check,
     current_asset, latest_release, parse_sums,
 };
+pub use replace::{install, target_executable, writable_problem};

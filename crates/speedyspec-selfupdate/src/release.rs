@@ -78,11 +78,25 @@ pub(crate) struct Limited<W> {
     pub(crate) inner: W,
     pub(crate) limit: u64,
     pub(crate) written: u64,
+    /// Set once a write was refused for going past `limit`.
+    pub(crate) refused: bool,
+}
+
+impl<W> Limited<W> {
+    pub(crate) fn new(inner: W, limit: u64) -> Self {
+        Limited {
+            inner,
+            limit,
+            written: 0,
+            refused: false,
+        }
+    }
 }
 
 impl<W: Write> Write for Limited<W> {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         if self.written + buf.len() as u64 > self.limit {
+            self.refused = true;
             return Err(io::Error::other(format!("more than {} bytes", self.limit)));
         }
         let n = self.inner.write(buf)?;
@@ -98,11 +112,7 @@ impl<W: Write> Write for Limited<W> {
 /// The latest release (GitHub leaves out drafts and pre-releases).
 pub fn latest_release(fetch: &dyn Fetch, api_base: &str) -> Result<Release, UpdateError> {
     let url = format!("{api_base}/repos/{REPOSITORY}/releases/latest");
-    let mut body = Limited {
-        inner: Vec::new(),
-        limit: MAX_DESCRIPTION,
-        written: 0,
-    };
+    let mut body = Limited::new(Vec::new(), MAX_DESCRIPTION);
     match fetch.fetch(&url, &mut body) {
         Ok(_) => {}
         Err(FetchError::Status { status: 404, .. }) => {
