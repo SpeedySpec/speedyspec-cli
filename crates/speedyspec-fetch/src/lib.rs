@@ -1,10 +1,24 @@
-//! Downloading over HTTPS.
+//! Downloading over HTTPS, shared by the zip driver, `plugin install` and `self update`.
 
 use std::fmt;
 use std::io::{self, Write};
 use std::time::Duration;
 
 use speedyspec_driver::is_fetchable_url;
+
+/// The GitHub API, unless `SPEEDYSPEC_GITHUB_API` names another (tests point it at a local server).
+const GITHUB_API: &str = "https://api.github.com";
+
+/// The base URL of the GitHub API to use, without a trailing slash.
+pub fn github_api_base() -> Result<String, String> {
+    match std::env::var("SPEEDYSPEC_GITHUB_API") {
+        Ok(base) if is_fetchable_url(&base) => Ok(base.trim_end_matches('/').to_owned()),
+        Ok(base) if !base.is_empty() => Err(format!(
+            "SPEEDYSPEC_GITHUB_API must be an https:// URL; got \"{base}\""
+        )),
+        _ => Ok(GITHUB_API.to_owned()),
+    }
+}
 
 /// How many redirects one download follows.
 const MAX_REDIRECTS: usize = 10;
@@ -181,6 +195,22 @@ fn resolve(base: &str, location: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn github_api_base_defaults_and_overrides() {
+        // SAFETY: the only test in this crate that touches the variable.
+        unsafe { std::env::remove_var("SPEEDYSPEC_GITHUB_API") };
+        assert_eq!(github_api_base().unwrap(), "https://api.github.com");
+        unsafe { std::env::set_var("SPEEDYSPEC_GITHUB_API", "http://127.0.0.1:9") };
+        assert_eq!(github_api_base().unwrap(), "http://127.0.0.1:9");
+        unsafe { std::env::set_var("SPEEDYSPEC_GITHUB_API", "http://example.com") };
+        assert!(
+            github_api_base()
+                .unwrap_err()
+                .contains("SPEEDYSPEC_GITHUB_API must be an https:// URL")
+        );
+        unsafe { std::env::remove_var("SPEEDYSPEC_GITHUB_API") };
+    }
 
     #[test]
     fn token_goes_only_to_the_github_api() {

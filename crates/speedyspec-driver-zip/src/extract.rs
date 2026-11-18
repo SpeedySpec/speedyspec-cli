@@ -7,7 +7,7 @@ use std::path::{Component, Path, PathBuf};
 
 use sha2::{Digest, Sha256};
 
-use crate::fetch::{Fetch, FetchError};
+use speedyspec_fetch::{Fetch, FetchError};
 
 /// What to download and how to unpack it.
 #[derive(Clone, Copy, Debug)]

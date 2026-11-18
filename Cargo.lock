@@ -1978,13 +1978,16 @@ dependencies = [
  "rpassword",
  "semver",
  "serde_json",
+ "sha2",
  "speedyspec-driver",
  "speedyspec-driver-kubernetes",
  "speedyspec-driver-zip",
+ "speedyspec-fetch",
  "speedyspec-hooks",
  "speedyspec-hooks-memory",
  "speedyspec-php",
  "speedyspec-plugin",
+ "speedyspec-selfupdate",
  "speedyspec-testkit",
  "tempfile",
 ]
@@ -2018,11 +2021,19 @@ version = "0.1.0"
 dependencies = [
  "sha2",
  "speedyspec-driver",
+ "speedyspec-fetch",
  "speedyspec-hooks",
  "speedyspec-testkit",
  "tempfile",
- "ureq",
  "zip",
+]
+
+[[package]]
+name = "speedyspec-fetch"
+version = "0.1.0"
+dependencies = [
+ "speedyspec-driver",
+ "ureq",
 ]
 
 [[package]]
@@ -2057,6 +2068,18 @@ dependencies = [
  "dirs",
  "semver",
  "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "speedyspec-selfupdate"
+version = "0.1.0"
+dependencies = [
+ "semver",
+ "serde_json",
+ "sha2",
+ "speedyspec-fetch",
+ "speedyspec-testkit",
  "tempfile",
 ]
 

@@ -21,7 +21,6 @@ use crate::prompt::confirm;
 
 /// The release asset a plugin author publishes for the CLI to install.
 const RELEASE_ASSET: &str = "speedyspec-plugin.zip";
-const GITHUB_API: &str = "https://api.github.com";
 
 /// Where a plugin comes from.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -184,15 +183,7 @@ fn try_install(matches: &ArgMatches) -> Result<(), i32> {
             strip_components: 0,
         },
         Source::GitHub { owner, repo, tag } => {
-            let api_base = match std::env::var("SPEEDYSPEC_GITHUB_API") {
-                Ok(base) if is_fetchable_url(&base) => base.trim_end_matches('/').to_owned(),
-                Ok(base) if !base.is_empty() => {
-                    return Err(fail(format!(
-                        "SPEEDYSPEC_GITHUB_API must be an https:// URL; got \"{base}\""
-                    )));
-                }
-                _ => GITHUB_API.to_owned(),
-            };
+            let api_base = speedyspec_fetch::github_api_base().map_err(fail)?;
             resolve_github(&owner, &repo, tag.as_deref(), &api_base, &fetch).map_err(fail)?
         }
     };

@@ -23,6 +23,7 @@ spc_base_url="https://dl.static-php.dev/static-php-cli/spc-bin/nightly"
 
 case "$(uname -s)-$(uname -m)" in
     Darwin-arm64)   spc_name="spc-macos-aarch64";  spc_sha256="9eba2e6e0d1aebabd6ff8efc6711dd0bad335ba41e29ce36e06ea5a6c5d57731" ;;
+    Darwin-x86_64)  spc_name="spc-macos-x86_64";   spc_sha256="07ff81f18cbb34f24ca2ba95f5c0554d407b9fd782dd9081b25b1250160ab0f5" ;;
     Linux-x86_64)   spc_name="spc-linux-x86_64";   spc_sha256="c138f3e4a68479597e11ca14d5209346c54758ccd09005e7a6a6f1e63b7f9f71" ;;
     Linux-aarch64)  spc_name="spc-linux-aarch64";  spc_sha256="26f483093b97da2925e4e993036c59509eab28656346b505d2d0a11271faae99" ;;
     *) echo "build-php.sh: unsupported host $(uname -s)-$(uname -m)" >&2; exit 1 ;;
@@ -37,6 +38,14 @@ sha256_of() {
 }
 
 php_version="$(tr -d '[:space:]' < "$repo/php-version")"
+
+# The oldest macOS the binary runs on. Must match .cargo/config.toml, which sets
+# it for the Rust side; it is part of the stamp so a change rebuilds PHP.
+deployment_target=""
+if [ "$(uname -s)" = "Darwin" ]; then
+    export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-12.0}"
+    deployment_target="$MACOSX_DEPLOYMENT_TARGET"
+fi
 extensions="ctype,curl,filter,mbstring,openssl,phar,tokenizer,zip,zlib"
 
 # `cli` is built only because ext-php-rs's build script runs `php -i` to read
@@ -59,7 +68,8 @@ EOF
 # restores it from cache); anything else, a re-pinned spc included, is rebuilt.
 stamp="$build_dir/buildroot/.craft.yml"
 stamp_content="$(cat "$repo/craft.yml")
-# spc: $spc_name sha256=$spc_sha256"
+# spc: $spc_name sha256=$spc_sha256
+# macOS deployment target: ${deployment_target:-none}"
 if [ -f "$build_dir/buildroot/lib/libphp.a" ] && [ -f "$stamp" ] \
     && [ "$(cat "$stamp")" = "$stamp_content" ]; then
     echo "build-php.sh: $build_dir/buildroot is up to date"

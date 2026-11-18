@@ -9,10 +9,10 @@
 # /work/.php-build and /work/target, so they never mix with the host's builds
 # and every path inside the container is the default one.
 #
-# The PHP contracts checkout is mounted read-only at /contracts (see
-# SPEEDYSPEC_CONTRACTS_DIR in crates/speedyspec-cli/build.rs): the host directory
-# in SPEEDYSPEC_CONTRACTS_DIR when that is set (CI sets it), otherwise the
-# sibling checkout ../speedyspec-cli-contracts when present.
+# The PHP contracts come from .contracts/ inside the repository (see
+# scripts/fetch-contracts.sh), which the container sees at /work/.contracts.
+# When SPEEDYSPEC_CONTRACTS_DIR names a checkout on the host, that directory is
+# mounted read-only at /contracts and used instead.
 #
 # SPEEDYSPEC_LINUX_PLATFORM picks the container platform (default linux/amd64).
 # The container is thrown away after each run, so build-php.sh may install
@@ -68,10 +68,8 @@ EOF
 
 mkdir -p "$php_build_dir" "$target_dir"
 
-# speedyspec-cli embeds the PHP contracts from a checkout outside the
-# repository mounted at /work, so mount it separately. A host path in
-# SPEEDYSPEC_CONTRACTS_DIR means nothing inside the container, so it chooses
-# what is mounted and the container gets /contracts instead.
+# A host path in SPEEDYSPEC_CONTRACTS_DIR means nothing inside the container,
+# so it chooses what is mounted and the container gets /contracts instead.
 contracts_flags=()
 if [ -n "${SPEEDYSPEC_CONTRACTS_DIR:-}" ]; then
     contracts_dir="$SPEEDYSPEC_CONTRACTS_DIR"
@@ -79,10 +77,6 @@ if [ -n "${SPEEDYSPEC_CONTRACTS_DIR:-}" ]; then
         echo "scripts/linux.sh: SPEEDYSPEC_CONTRACTS_DIR is not a directory: $contracts_dir" >&2
         exit 2
     fi
-else
-    contracts_dir="$repo/../speedyspec-cli-contracts"
-fi
-if [ -d "$contracts_dir" ]; then
     contracts_dir="$(cd "$contracts_dir" && pwd)"
     contracts_flags=(--volume "$contracts_dir:/contracts:ro" --env SPEEDYSPEC_CONTRACTS_DIR=/contracts)
 fi

@@ -22,7 +22,10 @@ const POLL: Duration = Duration::from_millis(500);
 
 /// Applies the resources a plugin returns to a cluster, waits for them and records the install.
 #[derive(Default)]
-pub struct KubernetesDriver;
+pub struct KubernetesDriver {
+    /// Written into each install record.
+    cli_version: &'static str,
+}
 
 /// What `plan_uninstall` found.
 struct Uninstalling {
@@ -44,7 +47,15 @@ struct Settings {
 
 impl KubernetesDriver {
     pub fn new() -> Self {
-        Self
+        Self {
+            cli_version: env!("CARGO_PKG_VERSION"),
+        }
+    }
+
+    /// The version of the program running the driver, recorded with each install.
+    pub fn cli_version(mut self, version: &'static str) -> Self {
+        self.cli_version = version;
+        self
     }
 }
 
@@ -232,7 +243,7 @@ impl Driver for KubernetesDriver {
                 parts: &settings.parts,
                 force_conflicts: settings.force_conflicts,
                 plugins,
-                cli_version: env!("CARGO_PKG_VERSION"),
+                cli_version: self.cli_version,
             },
             progress,
         )

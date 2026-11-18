@@ -1,0 +1,107 @@
+name: Build
+
+# Builds, tests and smoke-runs the release binary for every target, and keeps each
+# one as an artifact named after its release asset. Called by ci.yml on every
+# change and by release.yml for a release tag.
+on:
+  workflow_call:
+    inputs:
+      ref:
+        description: The commit, branch or tag of speedyspec-cli to build (default the triggering one)
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build (${{ matrix.asset }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - asset: speedyspec-macos-aarch64
+            os: macos-15
+            run: ""
+            platform: ""
+            php-build: .php-build
+            binary: target/release/speedyspec
+          - asset: speedyspec-macos-x86_64
+            os: macos-15-intel
+            run: ""
+            platform: ""
+            php-build: .php-build
+            binary: target/release/speedyspec
+          - asset: speedyspec-linux-x86_64
+            os: ubuntu-latest
+            run: scripts/linux.sh
+            platform: linux/amd64
+            php-build: .php-build-linux
+            binary: target-linux/x86_64-unknown-linux-musl/release/speedyspec
+          - asset: speedyspec-linux-aarch64
+            os: ubuntu-24.04-arm
+            run: scripts/linux.sh
+            platform: linux/arm64
+            php-build: .php-build-linux-arm64
+            binary: target-linux-arm64/aarch64-unknown-linux-musl/release/speedyspec
+    runs-on: ${{ matrix.os }}
+    env:
+      # Which container platform scripts/linux.sh runs (Linux rows only).
+      SPEEDYSPEC_LINUX_PLATFORM: ${{ matrix.platform }}
+    defaults:
+      run:
+        working-directory: speedyspec-cli
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: speedyspec-cli
+          ref: ${{ inputs.ref }}
+
+      # The contracts release pinned in contracts-version, checked against its SHA-256.
+      - name: Fetch the pinned contracts
+        run: scripts/fetch-contracts.sh
+
+      - name: Install Rust 1.99
+        if: matrix.run == ''
+        run: rustup toolchain install 1.99 --profile minimal && rustup default 1.99
+
+      - name: Cache static PHP
+        uses: actions/cache@v4
+        with:
+          # Paths and hashFiles are relative to the workspace, not the working directory.
+          path: |
+            speedyspec-cli/${{ matrix.php-build }}/spc
+            speedyspec-cli/${{ matrix.php-build }}/buildroot
+          key: php-${{ matrix.asset }}-${{ hashFiles('speedyspec-cli/php-version', 'speedyspec-cli/scripts/build-php.sh') }}
+
+      - name: Build static PHP
+        # Runners are throwaway, so spc may install missing build tools.
+        env:
+          SPEEDYSPEC_ALLOW_HOST_INSTALL: "1"
+          # spc looks up source releases through the GitHub API; unauthenticated calls from
+          # shared runners are rate limited (HTTP 403). The read-only workflow token is enough.
+          GITHUB_TOKEN: ${{ github.token }}
+        run: ${{ matrix.run }} scripts/build-php.sh
+
+      - name: Test
+        run: ${{ matrix.run }} cargo test --workspace
+
+      - name: Build the release binary
+        run: ${{ matrix.run }} cargo build --release --locked -p speedyspec-cli
+
+      # The Linux binaries are static, so they run on the runner itself.
+      - name: Smoke-run it
+        env:
+          SPEEDYSPEC_PHP_LIB: ${{ matrix.php-build }}/buildroot/lib/libphp.a
+        run: scripts/smoke.sh "${{ matrix.binary }}"
+
+      - name: Name it after its release asset
+        run: mkdir -p dist && cp "${{ matrix.binary }}" "dist/${{ matrix.asset }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: speedyspec-cli/dist/${{ matrix.asset }}
+          if-no-files-found: error
+          retention-days: 7

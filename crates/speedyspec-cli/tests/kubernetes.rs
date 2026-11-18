@@ -150,6 +150,18 @@ fn record_names_the_answering_plugins() {
 }
 
 #[test]
+fn record_names_the_cli_version() {
+    let cluster = FakeCluster::start();
+    let out = with_controllers(&cluster, || {
+        install(&cluster, &["k8s-app"], &["shop", "--title", "Hi"])
+    });
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let version =
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../version.txt")).unwrap();
+    assert_eq!(record(&cluster, "shop")["cliVersion"], version.trim());
+}
+
+#[test]
 fn bad_answer_refuses_the_install() {
     let cluster = FakeCluster::start();
     let out = install(

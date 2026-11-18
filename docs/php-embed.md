@@ -604,6 +604,21 @@ Measured on the development Mac (Apple Silicon, builds ran with `make -j16`) on 
 | Test binary, release | 16.0 MB (14.3 MB stripped) | 19.7 MB (17.6 MB stripped) |
 | `speedyspec` binary, release (`cargo build --release -p speedyspec-cli`) | 26.9 MB (26,948,192 bytes) | 33.5 MB (33,520,768 bytes) |
 
+Release binaries since plan 4 are stripped (`[profile.release] strip = "symbols"`) and built
+for macOS 12 or later (`MACOSX_DEPLOYMENT_TARGET`), measured on 2026-11-18:
+
+| Release asset | Size | Before stripping |
+| --- | --- | --- |
+| `speedyspec-macos-aarch64` | 22.9 MB (22,880,016 bytes) | 27.0 MB (27,011,968 bytes) |
+| `speedyspec-linux-x86_64` (static-pie, musl) | 28.6 MB (28,561,424 bytes) | 33.5 MB |
+| `speedyspec-linux-aarch64` (static, musl; native in Docker on Apple silicon) | 24.5 MB (24,542,960 bytes) | not measured |
+| `speedyspec-macos-x86_64` | built in CI only | |
+
+A first Linux aarch64 PHP build through `scripts/linux.sh` on a Mac can fail with "Too many open
+files in system" while unpacking php-src: Docker Desktop's file sharing runs out of handles on
+the ~20,000 source files. Keeping that build directory on a Docker volume instead of the shared
+checkout avoids it; CI's native ARM runner is not affected.
+
 `env -i ./target/release/speedyspec --version` (empty environment, so no PHP on `PATH`) prints the three version lines on macOS: the
 binary needs no PHP on the machine.
 

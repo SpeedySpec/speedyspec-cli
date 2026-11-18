@@ -13,6 +13,7 @@ speedyspec app uninstall <name>   # remove a Kubernetes install (see "Installing
 speedyspec plugin list            # name <TAB> version <TAB> directory
 speedyspec plugin install <src>   # install a plugin from a zip URL or a GitHub release
 speedyspec plugin remove <name>   # remove an installed plugin
+speedyspec self update [--check]  # replace this binary with the latest release (see "Updating speedyspec")
 speedyspec <plugin command> ...   # whatever loaded plugins added
 speedyspec                        # no arguments: help on stderr, exit 2
 ```
@@ -26,21 +27,70 @@ PHP's log form (`PHP Warning:  ...`, `PHP Fatal error:  ...`), and usage errors 
 the argument parser (`error: ...`, `Usage: ...`). Help asked for with `--help` goes to stdout;
 help shown because no command was given goes to stderr, with exit code 2.
 
-## Building
+## Download
 
-The PHP contracts the plugins program against are a separate package. `build.rs` embeds them
-from a sibling checkout, `../speedyspec-cli-contracts` relative to this repository (override with
-`SPEEDYSPEC_CONTRACTS_DIR`), and fails with a clear message if it is missing.
+Each release has one binary per platform, and a `SHA256SUMS` file listing their checksums. The
+latest release's files are always at these addresses:
+
+| Platform | Binary |
+| --- | --- |
+| Linux x86_64 (static) | https://github.com/SpeedySpec/speedyspec-cli/releases/latest/download/speedyspec-linux-x86_64 |
+| Linux aarch64 (static) | https://github.com/SpeedySpec/speedyspec-cli/releases/latest/download/speedyspec-linux-aarch64 |
+| macOS Apple silicon (12 or later) | https://github.com/SpeedySpec/speedyspec-cli/releases/latest/download/speedyspec-macos-aarch64 |
+| macOS Intel (12 or later) | https://github.com/SpeedySpec/speedyspec-cli/releases/latest/download/speedyspec-macos-x86_64 |
+
+Download the binary under its own name, check it, then make it executable:
 
 ```
+base=https://github.com/SpeedySpec/speedyspec-cli/releases/latest/download
+curl -fsSLO "$base/speedyspec-linux-x86_64" -O "$base/SHA256SUMS"
+grep ' speedyspec-linux-x86_64$' SHA256SUMS | sha256sum -c     # macOS: shasum -a 256 -c
+chmod +x speedyspec-linux-x86_64 && mv speedyspec-linux-x86_64 /usr/local/bin/speedyspec
+```
+
+The macOS binaries are not notarized. `curl` downloads run as they are; a file downloaded with a
+browser is quarantined by macOS, which then refuses to open it until you clear the flag
+(`xattr -d com.apple.quarantine speedyspec-macos-aarch64`). After that, `speedyspec self update`
+keeps it current (see "Updating speedyspec").
+
+## Building
+
+The PHP contracts the plugins program against are a separate package,
+[`speedyspec-cli-contracts`](https://github.com/SpeedySpec/speedyspec-cli-contracts). The binary
+embeds one release of it, pinned in `contracts-version` (its version, the archive's URL and its
+SHA-256). `scripts/fetch-contracts.sh` downloads that archive, checks it and unpacks it into
+`.contracts/<version>/`, where `build.rs` reads it; the build stops with a message saying so if
+it has not been fetched. To work on the contracts themselves, set `SPEEDYSPEC_CONTRACTS_DIR` to a
+checkout instead (the build warns when its version is not the pinned one). To move the pin,
+change all three lines of `contracts-version` (`curl -fsSL <url> | shasum -a 256` gives the
+hash) and run the script again.
+
+```
+scripts/fetch-contracts.sh          # once per pin: the contracts into .contracts/
 scripts/build-php.sh                # once: builds the static PHP into .php-build/ (slow)
 cargo build --release -p speedyspec-cli
 ./target/release/speedyspec --version
 cargo test --workspace
 scripts/linux.sh cargo test --workspace   # the same, in a Linux (musl) container
+scripts/smoke.sh target/release/speedyspec  # the checks a release binary must pass
 ```
 
 See `docs/php-embed.md` for how PHP is built, linked and embedded.
+
+### Releasing
+
+Releases are cut by release-please. It keeps a pull request titled `chore: release <version>`
+open on `main`, with the changelog and `version.txt` (the version `--version` prints) updated
+from the Conventional Commits merged since the last release. Check the title of the first one
+before merging it: it should be `chore: release 0.1.0`.
+
+Merging it leaves `version.txt` naming a version with no tag yet (`scripts/release-pending.sh`
+says so). The Release workflow then builds, tests and smoke-runs the four binaries at that
+commit first, about half an hour, and only when all four pass lets release-please tag the
+version and publish the GitHub release, uploading `SHA256SUMS` and then the binaries straight
+after. A failed build publishes nothing: fix it, and the next push to `main` tries again. To
+rebuild and re-upload the binaries of a release that already exists, run the Release workflow by
+hand (*Run workflow*) with its tag.
 
 ## Plugins
 
@@ -286,6 +336,31 @@ directory as `<vendor>.<name>`; an installed plugin of the same name is replaced
 new one has validated. Both commands work when an installed plugin is broken, and with
 `--no-plugins`. Only plugins in the user plugin directory can be removed. The name must be a plugin name
 (`vendor/package`); anything else is refused before any path is looked at.
+
+## Updating speedyspec
+
+```
+speedyspec self update --check    # say whether a newer release exists; changes nothing
+speedyspec self update            # download it, check it, and put it in place of this binary
+```
+
+`self update` asks GitHub for the latest release of `SpeedySpec/speedyspec-cli` and downloads the
+binary for this machine (`speedyspec-linux-x86_64`, `speedyspec-linux-aarch64`,
+`speedyspec-macos-x86_64` or `speedyspec-macos-aarch64`). Before anything changes it checks that
+the download is no larger than the release says, that its SHA-256 matches the release's
+`SHA256SUMS`, and that it runs and reports the release's version. Only then is it renamed over
+the running binary, in one step; when you run speedyspec through a symlink, the file the link
+points to is replaced and the link is left as it is. If any check fails, nothing is changed.
+
+The binary's directory must be writable by you. When it is not (`/usr/local/bin`, say), the
+command says so before downloading anything: run `sudo speedyspec self update`, or download the
+binary yourself from
+`https://github.com/SpeedySpec/speedyspec-cli/releases/latest/download/<binary name>`.
+
+No credentials are needed. GitHub limits anonymous API calls; if it refuses, set `GITHUB_TOKEN`
+(sent to `api.github.com` only). `self update` starts no PHP and loads no plugin, so a broken
+plugin cannot stop you from getting a fixed binary. A release whose binaries are still being
+uploaded (in the minutes after it is published) is reported as such; try again shortly.
 
 ## Hooks fired in this version
 

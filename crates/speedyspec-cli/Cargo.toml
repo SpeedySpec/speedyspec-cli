@@ -12,6 +12,8 @@ path = "src/main.rs"
 [dependencies]
 speedyspec-driver = { path = "../speedyspec-driver" }
 speedyspec-driver-zip = { path = "../speedyspec-driver-zip" }
+speedyspec-fetch = { path = "../speedyspec-fetch" }
+speedyspec-selfupdate = { path = "../speedyspec-selfupdate" }
 speedyspec-driver-kubernetes = { path = "../speedyspec-driver-kubernetes" }
 speedyspec-hooks = { path = "../speedyspec-hooks" }
 speedyspec-hooks-memory = { path = "../speedyspec-hooks-memory" }
@@ -28,9 +30,11 @@ serde_json = "1"
 tempfile = "3"
 
 [build-dependencies]
+semver = "1"
 serde_json = "1"
 
 [dev-dependencies]
 speedyspec-hooks = { path = "../speedyspec-hooks", features = ["conformance"] }
 tempfile = "3"
 speedyspec-testkit = { path = "../speedyspec-testkit" }
+sha2 = "0.11"
