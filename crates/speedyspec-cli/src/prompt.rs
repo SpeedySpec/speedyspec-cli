@@ -4,7 +4,9 @@
 //! stderr: stdout is for command output only.
 
 use std::fmt;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, IsTerminal, Write};
+
+use clap::ArgMatches;
 
 /// Why a question got no answer.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -105,6 +107,31 @@ impl Prompter for TerminalPrompter {
             return Ok(default.unwrap_or_default().to_owned());
         }
         Ok(answer)
+    }
+}
+
+/// Asks the user to confirm unless `--yes` was given. `Err` is the exit code.
+pub fn confirm(matches: &ArgMatches, question: &str) -> Result<(), i32> {
+    if matches.get_flag("yes") {
+        return Ok(());
+    }
+    if !interactive(
+        matches.get_flag("no-interaction"),
+        std::io::stdin().is_terminal(),
+    ) {
+        eprintln!("speedyspec: confirm with --yes");
+        return Err(2);
+    }
+    match TerminalPrompter.text(question, None, false) {
+        Ok(answer) if matches!(answer.to_lowercase().as_str(), "y" | "yes") => Ok(()),
+        Ok(_) => {
+            eprintln!("speedyspec: cancelled");
+            Err(1)
+        }
+        Err(error) => {
+            eprintln!("speedyspec: {error}");
+            Err(1)
+        }
     }
 }
 

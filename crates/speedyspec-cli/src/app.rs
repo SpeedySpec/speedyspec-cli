@@ -5,7 +5,10 @@ use std::io::{IsTerminal, Write};
 use std::rc::Rc;
 
 use clap::ArgMatches;
-use speedyspec_driver::{App, Driver, DriverInput, InstallOption, Progress, decode_install_option};
+use speedyspec_driver::{
+    App, Driver, DriverInput, InstallOption, PluginRef, Progress, UninstallInput,
+    decode_install_option,
+};
 use speedyspec_hooks::{Hooks, Key, Value};
 use speedyspec_php::Output;
 
@@ -13,7 +16,7 @@ use crate::attribution::{Checked, Rejection, Validator};
 use crate::boot::{PhpReader, Runtime, at_index, check_list, report_hook_error};
 use crate::drivers;
 use crate::install::{Given, ResolveError, resolve_choices, resolve_options};
-use crate::prompt::{Prompter, TerminalPrompter, interactive};
+use crate::prompt::{Prompter, TerminalPrompter, confirm, interactive};
 
 const HOOK_INSTALL_OPTIONS: &str = "speedyspec_install_options";
 const HOOK_INSTALL_BEFORE: &str = "speedyspec_install_before";
@@ -438,6 +441,21 @@ pub fn install(runtime: &Runtime, matches: &ArgMatches, prepass: Option<Prepass>
     let answer = runtime
         .hooks
         .filter(&hook, driver.seed(), std::slice::from_ref(&request));
+    // Who answered, before the validators (and this list with them) are cleared.
+    let plugins: Vec<PluginRef> = runtime
+        .hooks
+        .take_contributors()
+        .into_iter()
+        .map(|name| {
+            let version = runtime
+                .loaded
+                .iter()
+                .find(|plugin| plugin.manifest.name == name)
+                .map(|plugin| plugin.manifest.version.to_string())
+                .unwrap_or_default();
+            PluginRef { name, version }
+        })
+        .collect();
     runtime.hooks.clear_validators();
     runtime.php.redirect_output(Output::Stdout);
     let rejections = runtime.hooks.take_rejections();
@@ -454,7 +472,7 @@ pub fn install(runtime: &Runtime, matches: &ArgMatches, prepass: Option<Prepass>
     };
 
     let reader = PhpReader(&runtime.php);
-    let result = match driver.install(&prepared, &answer, &reader, &mut StderrProgress) {
+    let result = match driver.install(&prepared, &answer, &reader, &plugins, &mut StderrProgress) {
         Ok(result) => result,
         Err(error) => {
             eprintln!("speedyspec: {error}");
@@ -479,6 +497,83 @@ pub fn install(runtime: &Runtime, matches: &ArgMatches, prepass: Option<Prepass>
         let _ = writeln!(out, "{line}");
     }
     code
+}
+
+/// `app uninstall`: find the install, say what will go, confirm, remove it. Runs no plugin code.
+pub fn uninstall(matches: &ArgMatches) -> i32 {
+    let all = drivers::all();
+    let able: Vec<&Rc<dyn Driver>> = all
+        .iter()
+        .filter(|driver| !driver.uninstall_flags().is_empty())
+        .collect();
+    let driver = match matches.get_one::<String>("driver") {
+        Some(id) => match all.iter().find(|driver| driver.id() == id) {
+            Some(driver) if driver.uninstall_flags().is_empty() => {
+                eprintln!("speedyspec: the {id} driver cannot uninstall");
+                return 2;
+            }
+            Some(driver) => driver,
+            None => {
+                eprintln!("speedyspec: there is no driver \"{id}\"");
+                return 2;
+            }
+        },
+        None => match able.as_slice() {
+            [only] => *only,
+            _ => {
+                let ids: Vec<&str> = able.iter().map(|driver| driver.id()).collect();
+                eprintln!("speedyspec: give --driver: {}", ids.join(", "));
+                return 2;
+            }
+        },
+    };
+
+    let mut flags = BTreeMap::new();
+    for flag in driver.uninstall_flags() {
+        if flag.takes_value {
+            if let Some(value) = matches.get_one::<String>(flag.name) {
+                flags.insert(flag.name.to_owned(), value.clone());
+            }
+        } else if matches.get_flag(flag.name) {
+            flags.insert(flag.name.to_owned(), "1".to_owned());
+        }
+    }
+    let name = matches
+        .get_one::<String>("install-name")
+        .expect("clap requires the install name");
+    let plan = match driver.plan_uninstall(&UninstallInput {
+        name,
+        flags: &flags,
+        interactive: interactive(
+            matches.get_flag("no-interaction"),
+            std::io::stdin().is_terminal(),
+        ),
+    }) {
+        Ok(plan) => plan,
+        Err(error) => {
+            eprintln!("speedyspec: {error}");
+            return 1;
+        }
+    };
+    for line in &plan.summary {
+        eprintln!("speedyspec: {line}");
+    }
+    if let Err(code) = confirm(matches, "Remove it? [y/N]") {
+        return code;
+    }
+    match driver.uninstall(&plan, &mut StderrProgress) {
+        Ok(lines) => {
+            let mut out = std::io::stdout().lock();
+            for line in lines {
+                let _ = writeln!(out, "{line}");
+            }
+            0
+        }
+        Err(error) => {
+            eprintln!("speedyspec: {error}");
+            1
+        }
+    }
 }
 
 #[cfg(test)]

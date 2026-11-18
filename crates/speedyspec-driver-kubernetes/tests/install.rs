@@ -1,0 +1,878 @@
+//! Applying an install, against the fake cluster.
+
+mod support;
+
+use std::time::Duration;
+
+use serde_json::json;
+use speedyspec_driver::WaitFor;
+use speedyspec_driver_kubernetes::{
+    Applied, InstallIdentity, Status, apply_install, wait_and_finish,
+};
+use speedyspec_testkit::FakeCluster;
+use support::{
+    SHOP, Steps, answer, connection, options, plugins, record, recorded_names, secret, settings,
+    web,
+};
+
+const LABELS: [(&str, &str); 3] = [
+    ("app.kubernetes.io/managed-by", "speedyspec"),
+    ("speedyspec.com/app", "shop"),
+    ("speedyspec.com/install", "shop"),
+];
+
+#[test]
+fn applies_resources_in_order_with_labels_and_field_manager() {
+    let cluster = FakeCluster::start();
+    let connection = connection(&cluster);
+    let plugins = plugins();
+    let applied = apply_install(
+        &connection,
+        &answer(vec![settings(), web()]),
+        &options(SHOP, &plugins),
+        &mut Steps::default(),
+    )
+    .unwrap();
+
+    let writes = cluster.writes();
+    let config_map = writes
+        .iter()
+        .position(|w| w.ends_with("/configmaps/settings"))
+        .expect("the ConfigMap was applied");
+    let deployment = writes
+        .iter()
+        .position(|w| w.ends_with("/deployments/web"))
+        .expect("the Deployment was applied");
+    assert!(config_map < deployment, "{writes:?}");
+    for request in cluster.requests().iter().filter(|r| r.method == "PATCH") {
+        assert_eq!(
+            request.parameter("fieldManager"),
+            Some("speedyspec"),
+            "{}",
+            request.path
+        );
+    }
+    for (kind, version, name) in [
+        ("ConfigMap", "v1", "settings"),
+        ("Deployment", "apps/v1", "web"),
+    ] {
+        let stored = cluster
+            .object(version, kind, Some("shop"), name)
+            .expect("stored in shop");
+        for (label, value) in LABELS {
+            assert_eq!(stored["metadata"]["labels"][label], value, "{kind} {label}");
+        }
+    }
+    let displays: Vec<String> = applied.resources.iter().map(|id| id.display()).collect();
+    assert_eq!(
+        displays,
+        vec!["shop/ConfigMap/settings", "shop/Deployment/web"]
+    );
+    assert!(applied.retained.is_empty());
+}
+
+#[test]
+fn creates_missing_namespaces_and_records_them() {
+    let cluster = FakeCluster::start();
+    let connection = connection(&cluster);
+    let plugins = plugins();
+    let mut elsewhere = settings();
+    elsewhere["metadata"]["namespace"] = json!("data");
+    apply_install(
+        &connection,
+        &answer(vec![elsewhere, web()]),
+        &options(SHOP, &plugins),
+        &mut Steps::default(),
+    )
+    .unwrap();
+    for namespace in ["shop", "data"] {
+        let created = cluster
+            .object("v1", "Namespace", None, namespace)
+            .expect("created");
+        assert_eq!(
+            created["metadata"]["labels"]["speedyspec.com/install"],
+            "shop"
+        );
+    }
+    assert!(
+        cluster
+            .object("v1", "ConfigMap", Some("data"), "settings")
+            .is_some()
+    );
+    assert_eq!(
+        record(&cluster, "shop", "shop").created_namespaces,
+        vec!["shop", "data"]
+    );
+}
+
+#[test]
+fn existing_namespace_is_not_recorded_as_created() {
+    let cluster = FakeCluster::start();
+    cluster.put(json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "shop"}}));
+    let connection = connection(&cluster);
+    let plugins = plugins();
+    apply_install(
+        &connection,
+        &answer(vec![settings()]),
+        &options(SHOP, &plugins),
+        &mut Steps::default(),
+    )
+    .unwrap();
+    assert!(
+        record(&cluster, "shop", "shop")
+            .created_namespaces
+            .is_empty()
+    );
+    let untouched = cluster.object("v1", "Namespace", None, "shop").unwrap();
+    assert!(
+        untouched["metadata"]["labels"].is_null(),
+        "an existing namespace is not relabelled"
+    );
+}
+
+#[test]
+fn record_is_written_before_the_first_apply() {
+    let cluster = FakeCluster::start();
+    let connection = connection(&cluster);
+    let plugins = plugins();
+    apply_install(
+        &connection,
+        &answer(vec![settings(), web()]),
+        &options(SHOP, &plugins),
+        &mut Steps::default(),
+    )
+    .unwrap();
+    let writes = cluster.writes();
+    let record_at = writes
+        .iter()
+        .position(|w| w.ends_with("/secrets/speedyspec-install-shop"))
+        .expect("the record was written");
+    let first_resource = writes
+        .iter()
+        .position(|w| w.ends_with("/configmaps/settings"))
+        .unwrap();
+    assert!(record_at < first_resource, "{writes:?}");
+}
+
+#[test]
+fn record_lists_everything_about_to_be_applied() {
+    let cluster = FakeCluster::start();
+    let connection = connection(&cluster);
+    let plugins = plugins();
+    let parts = ["web".to_owned()];
+    let mut options = options(SHOP, &plugins);
+    options.parts = &parts;
+    apply_install(
+        &connection,
+        &answer(vec![settings(), web()]),
+        &options,
+        &mut Steps::default(),
+    )
+    .unwrap();
+    let record = record(&cluster, "shop", "shop");
+    assert_eq!(
+        recorded_names(&record),
+        vec!["ConfigMap/settings", "Deployment/web"]
+    );
+    assert_eq!(
+        record.status,
+        Status::Installing,
+        "marking it installed is the wait's job"
+    );
+    assert_eq!(record.app, "shop");
+    assert_eq!(record.parts, vec!["web"]);
+    assert_eq!(record.plugins, plugins);
+    assert_eq!(record.cli_version, "0.1.0-test");
+}
+
+#[test]
+fn failure_marks_the_record_failed_and_keeps_what_was_applied() {
+    let cluster = FakeCluster::start();
+    let connection = connection(&cluster);
+    let plugins = plugins();
+    cluster.fail_next("PATCH", "Deployment", 422, "spec.replicas: Invalid value");
+    let error = apply_install(
+        &connection,
+        &answer(vec![settings(), web(), secret()]),
+        &options(SHOP, &plugins),
+        &mut Steps::default(),
+    )
+    .unwrap_err();
+    assert!(error.contains("shop/Deployment/web"), "{error}");
+    assert!(error.contains("spec.replicas: Invalid value"), "{error}");
+
+    let record = record(&cluster, "shop", "shop");
+    assert_eq!(record.status, Status::Failed);
+    assert!(
+        record
+            .message
+            .as_deref()
+            .unwrap()
+            .contains("shop/Deployment/web")
+    );
+    assert_eq!(
+        recorded_names(&record),
+        vec!["ConfigMap/settings", "Deployment/web", "Secret/credentials"]
+    );
+    assert!(
+        cluster
+            .object("v1", "ConfigMap", Some("shop"), "settings")
+            .is_some(),
+        "kept"
+    );
+    assert!(
+        cluster
+            .object("v1", "Secret", Some("shop"), "credentials")
+            .is_none(),
+        "not reached"
+    );
+}
+
+#[test]
+fn error_messages_never_contain_resource_bodies() {
+    let cluster = FakeCluster::start();
+    let connection = connection(&cluster);
+    let plugins = plugins();
+    cluster.fail_next_named(
+        "PATCH",
+        "Secret",
+        "credentials",
+        422,
+        "the Secret is invalid",
+    );
+    let mut steps = Steps::default();
+    let error = apply_install(
+        &connection,
+        &answer(vec![secret()]),
+        &options(SHOP, &plugins),
+        &mut steps,
+    )
+    .unwrap_err();
+    assert!(error.contains("shop/Secret/credentials"), "{error}");
+    assert!(!error.contains("s3cr3t-value"), "{error}");
+    assert!(!steps.0.join("\n").contains("s3cr3t-value"));
+    assert!(
+        !record(&cluster, "shop", "shop")
+            .message
+            .unwrap()
+            .contains("s3cr3t-value")
+    );
+}
+
+#[test]
+fn conflict_names_field_and_manager() {
+    let cluster = FakeCluster::start();
+    let connection = connection(&cluster);
+    let plugins = plugins();
+    apply_install(
+        &connection,
+        &answer(vec![web()]),
+        &options(SHOP, &plugins),
+        &mut Steps::default(),
+    )
+    .unwrap();
+    cluster.own_field(
+        "apps/v1",
+        "Deployment",
+        Some("shop"),
+        "web",
+        "kubectl-edit",
+        ".spec.replicas",
+    );
+
+    let error = apply_install(
+        &connection,
+        &answer(vec![web()]),
+        &options(SHOP, &plugins),
+        &mut Steps::default(),
+    )
+    .unwrap_err();
+    assert_eq!(
+        error,
+        "shop/Deployment/web: field .spec.replicas is owned by kubectl-edit; use --force-conflicts \
+         to take it over"
+    );
+    assert_eq!(record(&cluster, "shop", "shop").status, Status::Failed);
+    let forced = cluster
+        .requests()
+        .iter()
+        .any(|r| r.parameter("force") == Some("true") && r.path.contains("deployments"));
+    assert!(!forced, "nothing is forced without the flag");
+}
+
+#[test]
+fn force_conflicts_takes_ownership() {
+    let cluster = FakeCluster::start();
+    let connection = connection(&cluster);
+    let plugins = plugins();
+    apply_install(
+        &connection,
+        &answer(vec![web()]),
+        &options(SHOP, &plugins),
+        &mut Steps::default(),
+    )
+    .unwrap();
+    cluster.own_field(
+        "apps/v1",
+        "Deployment",
+        Some("shop"),
+        "web",
+        "kubectl-edit",
+        ".spec.replicas",
+    );
+    let mut forced = options(SHOP, &plugins);
+    forced.force_conflicts = true;
+    apply_install(
+        &connection,
+        &answer(vec![web()]),
+        &forced,
+        &mut Steps::default(),
+    )
+    .unwrap();
+    let last = cluster
+        .requests()
+        .into_iter()
+        .rev()
+        .find(|r| r.method == "PATCH" && r.path.ends_with("/deployments/web"))
+        .unwrap();
+    assert_eq!(last.parameter("force"), Some("true"));
+}
+
+#[test]
+fn reinstall_with_fewer_resources_retains_the_dropped_ones() {
+    let cluster = FakeCluster::start();
+    let connection = connection(&cluster);
+    let plugins = plugins();
+    apply_install(
+        &connection,
+        &answer(vec![settings(), web()]),
+        &options(SHOP, &plugins),
+        &mut Steps::default(),
+    )
+    .unwrap();
+    let applied = apply_install(
+        &connection,
+        &answer(vec![web()]),
+        &options(SHOP, &plugins),
+        &mut Steps::default(),
+    )
+    .unwrap();
+    let retained: Vec<String> = applied.retained.iter().map(|id| id.display()).collect();
+    assert_eq!(retained, vec!["shop/ConfigMap/settings"]);
+    assert!(
+        cluster
+            .object("v1", "ConfigMap", Some("shop"), "settings")
+            .is_some(),
+        "left running"
+    );
+    assert_eq!(
+        recorded_names(&record(&cluster, "shop", "shop")),
+        vec!["Deployment/web", "ConfigMap/settings(retained)"]
+    );
+}
+
+#[test]
+fn reinstall_under_another_app_is_refused() {
+    let cluster = FakeCluster::start();
+    let connection = connection(&cluster);
+    let plugins = plugins();
+    apply_install(
+        &connection,
+        &answer(vec![settings()]),
+        &options(SHOP, &plugins),
+        &mut Steps::default(),
+    )
+    .unwrap();
+    let writes_before = cluster.writes().len();
+    let blog = InstallIdentity {
+        app: "blog",
+        name: "shop",
+        namespace: "shop",
+    };
+    let error = apply_install(
+        &connection,
+        &answer(vec![web()]),
+        &options(blog, &plugins),
+        &mut Steps::default(),
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("shop") && error.contains("blog") && error.contains("--name"),
+        "{error}"
+    );
+    assert_eq!(cluster.writes().len(), writes_before, "nothing was changed");
+}
+
+#[test]
+fn empty_answer_is_refused_before_touching_the_cluster() {
+    let cluster = FakeCluster::start();
+    let connection = connection(&cluster);
+    let plugins = plugins();
+    let error = apply_install(
+        &connection,
+        &answer(vec![]),
+        &options(SHOP, &plugins),
+        &mut Steps::default(),
+    )
+    .unwrap_err();
+    assert_eq!(error, "no plugin supplied anything to install");
+    assert!(cluster.requests().is_empty());
+}
+
+#[test]
+fn invalid_resource_stops_before_anything_is_applied() {
+    let cluster = FakeCluster::start();
+    let connection = connection(&cluster);
+    let plugins = plugins();
+    let bad = json!({"apiVersion": "v1", "kind": "Namespace",
+                     "metadata": {"name": "extra", "namespace": "shop"}});
+    let error = apply_install(
+        &connection,
+        &answer(vec![settings(), bad]),
+        &options(SHOP, &plugins),
+        &mut Steps::default(),
+    )
+    .unwrap_err();
+    assert!(error.contains("Namespace is cluster-wide"), "{error}");
+    assert!(cluster.writes().is_empty(), "{:?}", cluster.writes());
+}
+
+fn widget_definition() -> serde_json::Value {
+    json!({"apiVersion": "apiextensions.k8s.io/v1", "kind": "CustomResourceDefinition",
+           "metadata": {"name": "widgets.example.test"},
+           "spec": {"group": "example.test", "scope": "Namespaced",
+                    "names": {"kind": "Widget", "plural": "widgets", "singular": "widget"},
+                    "versions": [{"name": "v1", "served": true, "storage": true,
+                                  "schema": {"openAPIV3Schema": {"type": "object",
+                                             "x-kubernetes-preserve-unknown-fields": true}}}]}})
+}
+
+#[test]
+fn custom_resource_after_its_definition() {
+    // The cluster serves the kind only once its definition has been applied, as a real one does.
+    let cluster = FakeCluster::start();
+    let connection = connection(&cluster);
+    let plugins = plugins();
+    let widget = json!({"apiVersion": "example.test/v1", "kind": "Widget", "metadata": {"name": "w"},
+                        "spec": {"size": 1}});
+    apply_install(
+        &connection,
+        &answer(vec![widget_definition(), widget]),
+        &options(SHOP, &plugins),
+        &mut Steps::default(),
+    )
+    .unwrap();
+    assert!(
+        cluster
+            .object("example.test/v1", "Widget", Some("shop"), "w")
+            .is_some()
+    );
+}
+
+#[test]
+fn a_namespace_that_already_exists_is_not_taken_over() {
+    let cluster = FakeCluster::start();
+    cluster.put(json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "shop"}}));
+    let connection = connection(&cluster);
+    let plugins = plugins();
+    let namespace = json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "shop"}});
+    let error = apply_install(
+        &connection,
+        &answer(vec![namespace, settings()]),
+        &options(SHOP, &plugins),
+        &mut Steps::default(),
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("Namespace/shop already exists")
+            && error.contains("not part of this install"),
+        "{error}"
+    );
+    assert!(cluster.writes().is_empty(), "{:?}", cluster.writes());
+}
+
+#[test]
+fn a_returned_namespace_that_is_missing_is_created_and_can_be_installed_again() {
+    let cluster = FakeCluster::start();
+    let connection = connection(&cluster);
+    let plugins = plugins();
+    let resources = || {
+        vec![
+            json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "shop"}}),
+            settings(),
+        ]
+    };
+    for _ in 0..2 {
+        apply_install(
+            &connection,
+            &answer(resources()),
+            &options(SHOP, &plugins),
+            &mut Steps::default(),
+        )
+        .unwrap();
+    }
+    assert_eq!(
+        record(&cluster, "shop", "shop").created_namespaces,
+        vec!["shop"]
+    );
+}
+
+#[test]
+fn something_that_already_exists_is_not_taken_over() {
+    let cluster = FakeCluster::start();
+    cluster.put(json!({"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": "shop"}}));
+    cluster.put(json!({"apiVersion": "v1", "kind": "ConfigMap",
+                       "metadata": {"name": "settings", "namespace": "shop"},
+                       "data": {"title": "Theirs"}}));
+    let connection = connection(&cluster);
+    let plugins = plugins();
+    let error = apply_install(
+        &connection,
+        &answer(vec![web(), settings()]),
+        &options(SHOP, &plugins),
+        &mut Steps::default(),
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("shop/ConfigMap/settings already exists"),
+        "{error}"
+    );
+    assert!(cluster.writes().is_empty(), "{:?}", cluster.writes());
+    let theirs = cluster
+        .object("v1", "ConfigMap", Some("shop"), "settings")
+        .unwrap();
+    assert_eq!(theirs["data"]["title"], "Theirs");
+}
+
+#[test]
+fn a_second_install_does_not_take_over_the_first() {
+    let cluster = FakeCluster::start();
+    let connection = connection(&cluster);
+    let plugins = plugins();
+    let named = |name: &'static str| InstallIdentity {
+        app: "shop",
+        name,
+        namespace: "shop",
+    };
+    apply_install(
+        &connection,
+        &answer(vec![settings()]),
+        &options(named("one"), &plugins),
+        &mut Steps::default(),
+    )
+    .unwrap();
+    let error = apply_install(
+        &connection,
+        &answer(vec![settings()]),
+        &options(named("two"), &plugins),
+        &mut Steps::default(),
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("shop/ConfigMap/settings already exists"),
+        "{error}"
+    );
+    let mine = cluster
+        .object("v1", "ConfigMap", Some("shop"), "settings")
+        .unwrap();
+    assert_eq!(mine["metadata"]["labels"]["speedyspec.com/install"], "one");
+    assert!(
+        cluster
+            .object("v1", "Secret", Some("shop"), "speedyspec-install-two")
+            .is_none(),
+        "a refused install leaves no record"
+    );
+}
+
+#[test]
+fn a_request_the_cluster_never_answers_is_given_up() {
+    let cluster = FakeCluster::start();
+    let mut connection = connection(&cluster);
+    connection.set_request_wait(Duration::from_millis(1500));
+    cluster.stall_next("PATCH", "/configmaps/", Duration::from_secs(6));
+    let plugins = plugins();
+    let started = std::time::Instant::now();
+    let error = apply_install(
+        &connection,
+        &answer(vec![settings()]),
+        &options(SHOP, &plugins),
+        &mut Steps::default(),
+    )
+    .unwrap_err();
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(
+        error == "shop/ConfigMap/settings: no answer from the cluster within 2s",
+        "{error}"
+    );
+    assert_eq!(record(&cluster, "shop", "shop").status, Status::Failed);
+}
+
+#[test]
+fn unknown_kind_is_reported() {
+    let cluster = FakeCluster::start();
+    let connection = connection(&cluster);
+    let plugins = plugins();
+    let nope = json!({"apiVersion": "example.test/v1", "kind": "Nope", "metadata": {"name": "n"}});
+    let error = apply_install(
+        &connection,
+        &answer(vec![nope]),
+        &options(SHOP, &plugins),
+        &mut Steps::default(),
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("Nope") && error.contains("example.test/v1"),
+        "{error}"
+    );
+    assert!(cluster.writes().is_empty());
+}
+
+#[test]
+fn reports_progress_without_bodies() {
+    let cluster = FakeCluster::start();
+    let connection = connection(&cluster);
+    let plugins = plugins();
+    let mut steps = Steps::default();
+    apply_install(
+        &connection,
+        &answer(vec![settings(), web()]),
+        &options(SHOP, &plugins),
+        &mut steps,
+    )
+    .unwrap();
+    assert!(
+        steps
+            .0
+            .contains(&"applying shop/ConfigMap/settings".to_owned()),
+        "{:?}",
+        steps.0
+    );
+    assert!(
+        steps.0.contains(&"applying shop/Deployment/web".to_owned()),
+        "{:?}",
+        steps.0
+    );
+}
+
+// ---- waiting ------------------------------------------------------------------------------
+
+const QUICK: Duration = Duration::from_millis(50);
+
+fn ready_deployment() -> serde_json::Value {
+    json!({"observedGeneration": 1, "updatedReplicas": 1, "availableReplicas": 1})
+}
+
+fn install(cluster: &FakeCluster, resources: Vec<serde_json::Value>) -> Applied {
+    let connection = connection(cluster);
+    let plugins = plugins();
+    apply_install(
+        &connection,
+        &answer(resources),
+        &options(SHOP, &plugins),
+        &mut Steps::default(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn waits_until_a_deployment_is_available() {
+    let cluster = FakeCluster::start();
+    let applied = install(&cluster, vec![settings(), web()]);
+    let connection = connection(&cluster);
+    let mut steps = Steps::default();
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            std::thread::sleep(Duration::from_millis(150));
+            cluster.set_status(
+                "apps/v1",
+                "Deployment",
+                Some("shop"),
+                "web",
+                ready_deployment(),
+            );
+        });
+        wait_and_finish(
+            &connection,
+            &applied,
+            None,
+            &SHOP,
+            Duration::from_secs(5),
+            QUICK,
+            &mut steps,
+        )
+        .unwrap();
+    });
+    assert_eq!(record(&cluster, "shop", "shop").status, Status::Installed);
+    let text = steps.0.join("\n");
+    assert!(
+        text.contains("waiting for shop/Deployment/web: not yet seen by its controller"),
+        "{text}"
+    );
+    assert!(text.contains("shop/Deployment/web is ready"), "{text}");
+}
+
+#[test]
+fn timeout_marks_the_record_failed() {
+    let cluster = FakeCluster::start();
+    let applied = install(&cluster, vec![web()]);
+    let connection = connection(&cluster);
+    let error = wait_and_finish(
+        &connection,
+        &applied,
+        None,
+        &SHOP,
+        Duration::from_millis(300),
+        QUICK,
+        &mut Steps::default(),
+    )
+    .unwrap_err();
+    assert!(error.contains("shop/Deployment/web"), "{error}");
+    assert!(
+        error.contains("not yet seen by its controller") || error.contains("0 of 1"),
+        "{error}"
+    );
+    let record = record(&cluster, "shop", "shop");
+    assert_eq!(record.status, Status::Failed);
+    assert_eq!(record.message.as_deref(), Some(error.as_str()));
+    assert!(
+        cluster
+            .object("apps/v1", "Deployment", Some("shop"), "web")
+            .is_some(),
+        "nothing is rolled back"
+    );
+}
+
+#[test]
+fn failed_job_stops_the_wait_at_once() {
+    let cluster = FakeCluster::start();
+    let job = json!({"apiVersion": "batch/v1", "kind": "Job", "metadata": {"name": "migrate"},
+                     "spec": {"template": {"spec": {"containers": [], "restartPolicy": "Never"}}}});
+    let applied = install(&cluster, vec![job]);
+    cluster.set_status(
+        "batch/v1",
+        "Job",
+        Some("shop"),
+        "migrate",
+        json!({"conditions": [{"type": "Failed", "status": "True", "message": "BackoffLimitExceeded"}]}),
+    );
+    let connection = connection(&cluster);
+    let started = std::time::Instant::now();
+    let error = wait_and_finish(
+        &connection,
+        &applied,
+        None,
+        &SHOP,
+        Duration::from_secs(30),
+        QUICK,
+        &mut Steps::default(),
+    )
+    .unwrap_err();
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "must not wait out the timeout"
+    );
+    assert!(
+        error.contains("shop/Job/migrate") && error.contains("BackoffLimitExceeded"),
+        "{error}"
+    );
+    assert_eq!(record(&cluster, "shop", "shop").status, Status::Failed);
+}
+
+#[test]
+fn explicit_empty_wait_returns_immediately() {
+    let cluster = FakeCluster::start();
+    let applied = install(&cluster, vec![web()]);
+    let connection = connection(&cluster);
+    let gets_before = cluster
+        .requests()
+        .iter()
+        .filter(|r| r.path.contains("deployments") && r.method == "GET")
+        .count();
+    wait_and_finish(
+        &connection,
+        &applied,
+        Some(&[]),
+        &SHOP,
+        Duration::from_secs(5),
+        QUICK,
+        &mut Steps::default(),
+    )
+    .unwrap();
+    let gets_after = cluster
+        .requests()
+        .iter()
+        .filter(|r| r.path.contains("deployments") && r.method == "GET")
+        .count();
+    assert_eq!(gets_before, gets_after, "the workload was never looked at");
+    assert_eq!(record(&cluster, "shop", "shop").status, Status::Installed);
+}
+
+#[test]
+fn waits_on_a_custom_condition() {
+    let cluster = FakeCluster::start();
+    cluster.define("example.test", "v1", "Widget", "widgets", true);
+    let widget =
+        json!({"apiVersion": "example.test/v1", "kind": "Widget", "metadata": {"name": "w"}});
+    let applied = install(&cluster, vec![widget]);
+    let connection = connection(&cluster);
+    let wait = [WaitFor {
+        kind: "Widget".to_owned(),
+        name: "w".to_owned(),
+        namespace: None,
+        condition: Some("Available".to_owned()),
+    }];
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            std::thread::sleep(Duration::from_millis(150));
+            cluster.set_status(
+                "example.test/v1",
+                "Widget",
+                Some("shop"),
+                "w",
+                json!({"conditions": [{"type": "Available", "status": "True"}]}),
+            );
+        });
+        wait_and_finish(
+            &connection,
+            &applied,
+            Some(&wait),
+            &SHOP,
+            Duration::from_secs(5),
+            QUICK,
+            &mut Steps::default(),
+        )
+        .unwrap();
+    });
+    assert_eq!(record(&cluster, "shop", "shop").status, Status::Installed);
+}
+
+#[test]
+fn a_wait_that_names_nothing_applied_is_an_error() {
+    let cluster = FakeCluster::start();
+    let applied = install(&cluster, vec![settings()]);
+    let connection = connection(&cluster);
+    let wait = [WaitFor {
+        kind: "Deployment".to_owned(),
+        name: "ghost".to_owned(),
+        namespace: None,
+        condition: None,
+    }];
+    let error = wait_and_finish(
+        &connection,
+        &applied,
+        Some(&wait),
+        &SHOP,
+        Duration::from_secs(1),
+        QUICK,
+        &mut Steps::default(),
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("Deployment") && error.contains("ghost"),
+        "{error}"
+    );
+}

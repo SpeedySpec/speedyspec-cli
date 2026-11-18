@@ -537,6 +537,23 @@ fn driver_describes_itself() {
 }
 
 #[test]
+fn zip_driver_cannot_uninstall() {
+    let driver = ZipDriver::new();
+    assert!(driver.uninstall_flags().is_empty());
+    let given = flags(&[]);
+    let input = speedyspec_driver::UninstallInput {
+        name: "site",
+        flags: &given,
+        interactive: false,
+    };
+    let error = driver
+        .plan_uninstall(&input)
+        .err()
+        .expect("the zip driver has no uninstall");
+    assert_eq!(error.to_string(), "the zip driver cannot uninstall");
+}
+
+#[test]
 fn driver_filter_starts_from_an_empty_list() {
     assert_eq!(ZipDriver::new().seed(), Value::Array(Vec::new()));
 }
@@ -602,7 +619,7 @@ fn driver_install_returns_placements_as_arrays() {
     let prepared = prepare(&driver, &given);
     let answer = list(vec![reader.zip_source(WEB, "admin")]);
     let result = driver
-        .install(&prepared, &answer, &reader, &mut Quiet::default())
+        .install(&prepared, &answer, &reader, &[], &mut Quiet::default())
         .unwrap();
 
     let Value::Array(items) = result else {
@@ -644,6 +661,7 @@ fn driver_install_honours_force() {
         &prepare(&driver, &given),
         &answer,
         &reader,
+        &[],
         &mut Quiet::default(),
     );
     let message = refused.unwrap_err().to_string();
@@ -658,6 +676,7 @@ fn driver_install_honours_force() {
             &prepare(&driver, &given),
             &answer,
             &reader,
+            &[],
             &mut Quiet::default(),
         )
         .unwrap();
@@ -678,6 +697,7 @@ fn driver_install_with_no_sources_is_an_error() {
             &prepare(&driver, &given),
             &list(vec![]),
             &reader,
+            &[],
             &mut Quiet::default(),
         )
         .unwrap_err();

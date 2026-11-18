@@ -5,3 +5,6 @@ description = "Test support shared by the workspace: a loopback HTTP server and 
 edition.workspace = true
 rust-version.workspace = true
 publish = false
+
+[dependencies]
+serde_json = "1"

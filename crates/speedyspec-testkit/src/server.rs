@@ -1,7 +1,7 @@
 //! A tiny HTTP/1.1 server on the loopback interface, for tests that must not touch the network.
 
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -88,6 +88,46 @@ pub struct Request {
     pub headers: HashMap<String, String>,
 }
 
+/// A request as a programmable server sees it.
+#[derive(Clone, Debug)]
+pub struct Received {
+    pub method: String,
+    pub path: String,
+    /// Without the leading `?`; empty when there is none.
+    pub query: String,
+    /// Header names lower-cased.
+    pub headers: HashMap<String, String>,
+    pub body: Vec<u8>,
+}
+
+impl Received {
+    /// The value of a query parameter, if it is present.
+    pub fn parameter(&self, name: &str) -> Option<&str> {
+        self.query.split('&').find_map(|pair| {
+            let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
+            (key == name).then_some(value)
+        })
+    }
+}
+
+/// What a programmable server answers.
+#[derive(Clone, Debug)]
+pub struct Reply {
+    pub status: u16,
+    pub content_type: String,
+    pub body: Vec<u8>,
+}
+
+impl Reply {
+    pub fn json(status: u16, body: impl Into<Vec<u8>>) -> Reply {
+        Reply {
+            status,
+            content_type: "application/json".to_owned(),
+            body: body.into(),
+        }
+    }
+}
+
 /// The running server; it stops when dropped.
 pub struct Server {
     address: String,
@@ -130,6 +170,39 @@ impl Server {
             stop,
             requests,
             routes,
+            thread: Some(thread),
+        }
+    }
+
+    /// Starts a server that hands every request to `handler` and sends back what it returns.
+    pub fn handling(handler: impl Fn(&Received) -> Reply + Send + Sync + 'static) -> Server {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
+        let address = listener.local_addr().expect("local address").to_string();
+        let stop = Arc::new(AtomicBool::new(false));
+        let handler = Arc::new(handler);
+        let thread = {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                for stream in listener.incoming() {
+                    if stop.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    if let Ok(stream) = stream {
+                        // Each connection on its own thread: one slow answer does not hold up
+                        // the others.
+                        let handler = Arc::clone(&handler);
+                        std::thread::spawn(move || {
+                            let _ = handle(stream, &*handler);
+                        });
+                    }
+                }
+            })
+        };
+        Server {
+            address,
+            stop,
+            requests: Arc::default(),
+            routes: Arc::default(),
             thread: Some(thread),
         }
     }
@@ -233,4 +306,50 @@ fn serve(
         stall(&stream);
     }
     Ok(())
+}
+
+/// Reads one request, with its body, hands it to `handler` and writes the reply.
+fn handle(mut stream: TcpStream, handler: &dyn Fn(&Received) -> Reply) -> std::io::Result<()> {
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    let mut parts = line.split_whitespace();
+    let (Some(method), Some(target)) = (parts.next(), parts.next()) else {
+        return Ok(());
+    };
+    let (path, query) = target.split_once('?').unwrap_or((target, ""));
+    let mut headers = HashMap::new();
+    loop {
+        let mut header = String::new();
+        reader.read_line(&mut header)?;
+        let header = header.trim_end();
+        if header.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = header.split_once(':') {
+            headers.insert(name.trim().to_ascii_lowercase(), value.trim().to_owned());
+        }
+    }
+    let length: usize = headers
+        .get("content-length")
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(0);
+    let mut body = vec![0; length];
+    reader.read_exact(&mut body)?;
+    let reply = handler(&Received {
+        method: method.to_owned(),
+        path: path.to_owned(),
+        query: query.to_owned(),
+        headers,
+        body,
+    });
+    let head = format!(
+        "HTTP/1.1 {} X\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        reply.status,
+        reply.content_type,
+        reply.body.len()
+    );
+    stream.write_all(head.as_bytes())?;
+    stream.write_all(&reply.body)?;
+    stream.flush()
 }

@@ -67,3 +67,37 @@ jobs:
 
       - name: Test
         run: ${{ matrix.run }} cargo test --workspace
+
+  kubernetes-e2e:
+    name: kubernetes end to end (k3s)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: speedyspec-cli
+    steps:
+      # Both repositories side by side, as in local development.
+      - uses: actions/checkout@v4
+        with:
+          path: speedyspec-cli
+
+      - uses: actions/checkout@v4
+        with:
+          repository: SpeedySpec/speedyspec-cli-contracts
+          path: speedyspec-cli-contracts
+
+      - name: Install Rust 1.99
+        run: rustup toolchain install 1.99 --profile minimal && rustup default 1.99
+
+      # A throwaway single-node cluster in a container on the runner; nothing else is contacted.
+      - name: Start k3s
+        run: scripts/k3s.sh up
+
+      # The driver crate has no PHP dependency, so this job builds no static PHP.
+      - name: Test against the cluster
+        env:
+          SPEEDYSPEC_E2E_KUBECONFIG: ${{ github.workspace }}/speedyspec-cli/.k3s/kubeconfig
+        run: cargo test -p speedyspec-driver-kubernetes --test e2e -- --ignored --test-threads=1
+
+      - name: Stop k3s
+        if: always()
+        run: scripts/k3s.sh down

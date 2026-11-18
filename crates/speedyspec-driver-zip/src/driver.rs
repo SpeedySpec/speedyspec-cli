@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use speedyspec_driver::{
-    ContractError, Driver, DriverError, DriverFlag, DriverInput, ObjectReader, Prepared, Progress,
-    ZipSource, decode_zip_source,
+    ContractError, Driver, DriverError, DriverFlag, DriverInput, ObjectReader, PluginRef, Prepared,
+    Progress, ZipSource, decode_zip_source,
 };
 use speedyspec_hooks::{Key, Value};
 
@@ -91,6 +91,7 @@ impl Driver for ZipDriver {
         prepared: &Prepared,
         answer: &Value,
         reader: &dyn ObjectReader,
+        _plugins: &[PluginRef],
         progress: &mut dyn Progress,
     ) -> Result<Value, DriverError> {
         let settings = prepared.state.downcast_ref::<Settings>().ok_or_else(|| {

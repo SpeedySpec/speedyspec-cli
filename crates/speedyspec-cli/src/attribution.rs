@@ -66,6 +66,8 @@ struct State {
     firings: RefCell<HashMap<usize, Vec<bool>>>,
     validators: RefCell<HashMap<String, Rc<Validator>>>,
     rejections: RefCell<Vec<Rejection>>,
+    /// Owners whose callbacks answered a validated filter, in call order, without repeats.
+    contributors: RefCell<Vec<String>>,
 }
 
 impl State {
@@ -169,6 +171,7 @@ impl AttributedHooks {
                 firings: RefCell::default(),
                 validators: RefCell::default(),
                 rejections: RefCell::default(),
+                contributors: RefCell::default(),
             }),
         }
     }
@@ -186,6 +189,13 @@ impl AttributedHooks {
     pub fn clear_validators(&self) {
         let validators = std::mem::take(&mut *self.state.validators.borrow_mut());
         drop(validators);
+        self.state.contributors.borrow_mut().clear();
+    }
+
+    /// The plugins whose callbacks answered a validated filter since the last call, in the
+    /// order they answered. A driver records them as where an install came from.
+    pub fn take_contributors(&self) -> Vec<String> {
+        std::mem::take(&mut *self.state.contributors.borrow_mut())
     }
 
     /// The problems validators found since the last call, in the order they were found.
@@ -217,6 +227,12 @@ fn wrap(
         let (Some(validator), Some(given)) = (validator, args.first()) else {
             return Ok(returned);
         };
+        if let Some(owner) = &owner {
+            let mut contributors = state.contributors.borrow_mut();
+            if !contributors.contains(owner) {
+                contributors.push(owner.clone());
+            }
+        }
         let checked = validator(given, returned);
         if !checked.problems.is_empty() {
             let mut rejections = state.rejections.borrow_mut();
@@ -669,5 +685,57 @@ mod tests {
         backend(hooks.filter("h", Value::Null, &[]).map(drop));
         backend(hooks.ran("h").map(drop));
         assert!(hooks.state.firings.borrow().is_empty());
+    }
+
+    fn pass_through() -> Rc<Callback> {
+        Rc::new(|args: &[Value]| Ok(args[0].clone()))
+    }
+
+    #[test]
+    fn contributors_are_the_owners_that_answered_a_validated_filter() {
+        let hooks = hooks();
+        hooks.add("h", pass_through(), owned("a/a")).unwrap();
+        hooks.add("h", pass_through(), owned("b/b")).unwrap();
+        hooks.validate("h", non_negative());
+        hooks.filter("h", list(&[]), &[]).unwrap();
+        assert_eq!(hooks.take_contributors(), vec!["a/a", "b/b"]);
+        assert!(
+            hooks.take_contributors().is_empty(),
+            "taking them clears them"
+        );
+    }
+
+    #[test]
+    fn contributors_skip_unvalidated_hooks_and_unowned_callbacks() {
+        let hooks = hooks();
+        hooks.add("plain", pass_through(), owned("a/a")).unwrap();
+        hooks
+            .add("checked", pass_through(), AddOptions::default())
+            .unwrap();
+        hooks.add("checked", pass_through(), owned("b/b")).unwrap();
+        hooks.validate("checked", non_negative());
+        hooks.filter("plain", list(&[]), &[]).unwrap();
+        hooks.filter("checked", list(&[]), &[]).unwrap();
+        assert_eq!(hooks.take_contributors(), vec!["b/b"]);
+    }
+
+    #[test]
+    fn contributors_have_no_repeats() {
+        let hooks = hooks();
+        hooks.add("h", pass_through(), owned("a/a")).unwrap();
+        hooks.add("h", pass_through(), owned("a/a")).unwrap();
+        hooks.validate("h", non_negative());
+        hooks.filter("h", list(&[]), &[]).unwrap();
+        assert_eq!(hooks.take_contributors(), vec!["a/a"]);
+    }
+
+    #[test]
+    fn clearing_validators_forgets_contributors() {
+        let hooks = hooks();
+        hooks.add("h", pass_through(), owned("a/a")).unwrap();
+        hooks.validate("h", non_negative());
+        hooks.filter("h", list(&[]), &[]).unwrap();
+        hooks.clear_validators();
+        assert!(hooks.take_contributors().is_empty());
     }
 }

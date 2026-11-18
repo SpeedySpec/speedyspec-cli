@@ -9,7 +9,7 @@ use SpeedySpec\Hooks\Hook;
 
 Hook::add('speedyspec_apps', static function (array $apps): array
 {
-    $apps[] = new App('multi', 'Multi', [], ['zip', 'kubernetes']);
+    $apps[] = new App('multi', 'Multi', [], ['zip', 'sftp']);
 
     return $apps;
 });

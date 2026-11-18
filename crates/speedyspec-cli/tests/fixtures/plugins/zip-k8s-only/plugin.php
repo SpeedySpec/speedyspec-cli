@@ -7,7 +7,7 @@ use SpeedySpec\Hooks\Hook;
 
 Hook::add('speedyspec_apps', static function (array $apps): array
 {
-    $apps[] = new App('cluster', 'Cluster', [], ['kubernetes']);
+    $apps[] = new App('cluster', 'Cluster', [], ['sftp']);
 
     return $apps;
 });
