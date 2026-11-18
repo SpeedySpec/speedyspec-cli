@@ -19,6 +19,8 @@ speedyspec-plugin = { path = "../speedyspec-plugin" }
 # builder API is used; `string` lets plugin-supplied names become clap ids.
 clap = { version = "4", default-features = false, features = ["std", "help", "usage", "error-context", "suggestions", "string"] }
 semver = "1"
+# Reads a secret from the terminal without echoing it.
+rpassword = "7"
 
 [build-dependencies]
 serde_json = "1"
