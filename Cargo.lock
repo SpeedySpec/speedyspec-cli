@@ -2070,6 +2070,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "speedyspec-selfupdate"
+version = "0.1.0"
+dependencies = [
+ "semver",
+ "serde_json",
+ "sha2",
+ "speedyspec-fetch",
+ "speedyspec-testkit",
+ "tempfile",
+]
+
+[[package]]
 name = "speedyspec-testkit"
 version = "0.1.0"
 dependencies = [
