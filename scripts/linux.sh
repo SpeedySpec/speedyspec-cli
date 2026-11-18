@@ -4,10 +4,18 @@
 #   scripts/linux.sh scripts/build-php.sh
 #   scripts/linux.sh cargo test -p speedyspec-php --test php
 #
-# The container sees the repository at /work. Its PHP build and cargo target
-# live in .php-build-linux/ and target-linux/ on the host, mounted over
-# /work/.php-build and /work/target, so they never mix with the host's builds
-# and every path inside the container is the default one.
+# The container sees the repository at /work. Its PHP build lives in
+# .php-build-linux/ on the host, mounted over /work/.php-build, and its cargo
+# target is /work/target, so they never mix with the host's builds and every
+# path inside the container is the default one.
+#
+# On a Linux host (CI) the cargo target is target-linux/ on the host. On macOS
+# it is a Docker volume instead (speedyspec-cargo-target-<arch>): building
+# through Docker Desktop's file sharing intermittently fails with "crate ...
+# required to be available in rlib format", as one rustc does not yet see a
+# library another has just written. Inspect or copy results from inside the
+# container (scripts/linux.sh ls -l target/...; scripts/linux.sh cp target/...
+# dist/), or set SPEEDYSPEC_LINUX_TARGET=bind to use target-linux/ anyway.
 #
 # The PHP contracts come from .contracts/ inside the repository (see
 # scripts/fetch-contracts.sh), which the container sees at /work/.contracts.
@@ -66,7 +74,13 @@ RUN printf '%s\n' \
 ENV RUSTC_WRAPPER=/usr/local/bin/rustc-host-dynamic
 EOF
 
-mkdir -p "$php_build_dir" "$target_dir"
+mkdir -p "$php_build_dir"
+target_mount="$target_dir"
+if [ "$(uname -s)" = "Darwin" ] && [ "${SPEEDYSPEC_LINUX_TARGET:-volume}" != "bind" ]; then
+    target_mount="speedyspec-cargo-target-${platform##*/}"
+else
+    mkdir -p "$target_dir"
+fi
 
 # A host path in SPEEDYSPEC_CONTRACTS_DIR means nothing inside the container,
 # so it chooses what is mounted and the container gets /contracts instead.
@@ -97,7 +111,7 @@ exec docker run --rm ${tty_flag[@]+"${tty_flag[@]}"} \
     --platform "$platform" \
     --volume "$repo:/work" \
     --volume "$php_build_dir:/work/.php-build" \
-    --volume "$target_dir:/work/target" \
+    --volume "$target_mount:/work/target" \
     --volume "speedyspec-cargo-registry-${platform##*/}:/usr/local/cargo/registry" \
     ${contracts_flags[@]+"${contracts_flags[@]}"} \
     ${token_flags[@]+"${token_flags[@]}"} \
