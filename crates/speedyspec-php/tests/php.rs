@@ -43,7 +43,10 @@ const CASES: &[(&str, Case)] = &[
     ("priority_order", case_priority_order),
     ("accepted_args", case_accepted_args),
     ("own_hook_functions", case_own_hook_functions),
-    ("extensions_wordpress_needs", case_extensions_wordpress_needs),
+    (
+        "extensions_wordpress_needs",
+        case_extensions_wordpress_needs,
+    ),
     ("std_handles", case_std_handles),
     (
         "remove_closure_by_identity",
