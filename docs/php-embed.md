@@ -203,56 +203,64 @@ the same sequence ext-php-rs's own SAPI tests use (`src/runtime.rs`):
 
 ```rust
 let sapi = SapiBuilder::new("speedyspec", "SpeedySpec")
-    .ub_write_function(ub_write)        // PHP output -> process stdout
+    .ub_write_function(ub_write)        // PHP output -> stdout, or stderr (Php::redirect_output)
     .flush_function(flush)
     .log_message_function(log_message)  // PHP log -> stderr
     .php_ini_ignore(1)                  // never read php.ini, PHPRC or PHP_INI_SCAN_DIR
     .build()?;
 ext_php_rs_sapi_startup();
 sapi_startup(sapi);
-(*sapi).ini_entries = INI_ENTRIES.as_ptr(); // after sapi_startup, which clears it
-php_module_startup(sapi, get_module());     // <- registers our module
+(*sapi).ini_entries = INI_ENTRIES.as_ptr();          // after sapi_startup, which clears it
+php_module_startup(sapi, hook_class::module_entry()); // <- registers our module
 php_request_startup();
+CG(skip_shebang) = true;                              // as the CLI does
 ```
 
-**Native functions** are registered as a PHP module, exactly like a built-in
-extension. `#[php_function]` wraps a Rust function; `#[php_module]` generates
-`get_module() -> *mut zend_module_entry` from a `ModuleBuilder`;
-`php_module_startup(sapi, get_module())` hands that module to PHP, which
-registers its functions during startup:
+`Php::boot(BootOptions { hooks, preload })` then evaluates the PHP source of
+`SpeedySpec\Hooks\HookException` (a plain
+`class HookException extends \RuntimeException {}`; defining it in PHP was
+simpler than a native class with a parent) and the `preload` files, in
+order, before anything else runs.
+
+**Native functions and classes** are registered as one PHP module, exactly
+like a built-in extension. `#[php_module]` (in `src/hook_class.rs`)
+generates `get_module() -> *mut zend_module_entry` from a `ModuleBuilder`;
+`php_module_startup` hands that module to PHP, which registers its functions
+during startup and runs its MINIT, where the class is registered:
 
 ```rust
-#[php_function]
-pub fn speedyspec_proof_add(a: i64, b: i64) -> PhpResult<i64> { ... }
-
 #[php_module]
+#[php(startup = startup)]            // our MINIT hook, run before ext-php-rs's own
 pub fn module(module: ModuleBuilder) -> ModuleBuilder {
-    module.function(wrap_function!(speedyspec_proof_add))
+    module
+        .function(add_signature("add_action", hook_add))   // FunctionBuilder + raw handler
+        // ... add_filter, remove_*, has_*, do_action, apply_filters, did_action
+}
+
+fn startup(_ty: i32, _module_number: i32) -> i32 {
+    ClassBuilder::new("SpeedySpec\\Hooks\\Hook")
+        .flags(ClassFlags::Final)
+        .method(add_signature("add", hook_add), MethodFlags::Public | MethodFlags::Static)
+        // ... remove, has, run, filter, ran
+        .registration(|_ce, arg_info| std::mem::forget(arg_info)) // lives as long as the class
+        .register()
+    // 0 on success
 }
 ```
 
-**Native classes** go through the same module. ext-php-rs registers them from
-the module's startup (MINIT) hook, which `php_module_startup` runs:
+The handlers are hand-written `extern "C" fn(&mut ExecuteData, &mut Zval)`
+rather than `#[php_function]` / `#[php_impl]`, because every native entry
+must go through `runtime::native_entry` (see "Bailouts, exceptions and exit()"
+below). The global aliases and the methods share one handler each. Arguments
+are read from the frame directly and type errors are thrown as PHP's own
+`TypeError`, `ArgumentCountError` and `ValueError`.
 
-```rust
-#[php_class]
-#[php(name = "SpeedySpec\\Proof\\Calc")]   // namespaced PHP name
-pub struct Calc;
-
-#[php_impl]
-impl Calc {
-    pub fn add_two(a: i64, b: i64) -> i64 { a + b } // no self => static method
-}
-
-// in #[php_module]: module.function(...).class::<Calc>()
-```
-
-This was checked with a throwaway case (not committed): PHP printed `7` for
-`\SpeedySpec\Proof\Calc::addTwo(3, 4)`, and
-`ReflectionClass::getExtensionName()` reported `speedyspec-php`, the crate's
-package name. Method names are converted to camelCase by default
-(`add_two` -> `addTwo`); `#[php(name = "...")]` on a method overrides that.
-The committed proof only exercises a function; Task 3 adds the first class.
+The macro route also works, and was checked in Task 1 with a throwaway class
+(`#[php_class]` + `#[php_impl]`, `module.class::<T>()`): method names are then
+converted to camelCase by default (`add_two` -> `addTwo`) unless
+`#[php(name = "...")]` overrides them, and
+`ReflectionClass::getExtensionName()` reports `speedyspec-php`, the crate's
+package name.
 
 Constraints of this mechanism:
 
@@ -260,7 +268,7 @@ Constraints of this mechanism:
   native lives in one `#[php_module]` (in `speedyspec-php`).
 - `#[php_module]` exports an unmangled `get_module` symbol; there can be only
   one in the binary.
-- The engine starts once per process (`Php::boot` returns `AlreadyBooted` on
+- The engine starts once per process (`Php::boot` returns `PhpError::Boot` on
   a second call) and is not `Send`: the build is non-thread-safe.
 
 **INI.** `php_ini_ignore = 1` stops PHP reading any php.ini, `PHPRC` and
@@ -271,25 +279,106 @@ entries mirror PHP's CLI SAPI (`display_errors=1`, `html_errors=0`,
 `implicit_flush=1`, `output_buffering=0`, `max_execution_time=0`,
 `log_errors=0`) except `register_argc_argv=0`: under any SAPI other than
 `cli`, PHP 8.5 would derive `$_SERVER['argv']` from the query string and
-emit a deprecation, so `Php::run_file` sets `$argv` and `$argc` itself
-(`$_SERVER['argv']` is not populated yet).
+emit a deprecation, so `Php::run_file` sets `$argv`, `$argc`,
+`$_SERVER['argv']` and `$_SERVER['argc']` itself.
 
-**Running code.** `Php::eval(label, code)` calls `zend_eval_string` with a
-null result pointer, so `code` is statements (no `<?php`), and `label` stands
-in for the file name in errors. `Php::run_file(path, argv)` uses
-`Embed::run_script` (`php_execute_script`) and returns `EG(exit_status)`.
-Both run inside a zend bailout frame (ext-php-rs `try_catch_first` /
-`try_catch`), so a PHP fatal error comes back as an error instead of a
-`longjmp` through Rust frames.
+**Running code.** All of these compile and execute in the open request and
+return PHP's errors as `PhpError` values:
 
-Observed with throwaway cases (not committed), all in one booted engine:
-`eval` of a `throw`, of invalid syntax, and of a call with too few arguments
-returns `UncaughtException` with class `RuntimeException`, `ParseError` and
-`ArgumentCountError`; `run_file` of a script doing `exit(3)` returns `Ok(3)`
-and sees `$argv`/`$argc` as given; `run_file` of a script that throws lets
-PHP print `Fatal error: Uncaught RuntimeException: ...` to stdout (as the PHP
-CLI does with `display_errors=1`) and returns `Ok(255)`; and the engine still
-runs code afterwards.
+- `Php::eval(label, code)` compiles `code` as statements (no `<?php`) with
+  `zend_compile_string`, as `zend_eval_stringl` does, but keeps the op array
+  so a top-level `return` becomes the result. `label` stands in for the file
+  name in errors.
+- `Php::require(path)` evaluates `return require '<absolute path>';`, so it
+  never consults `include_path`, and returns the file's return value.
+- `Php::run_file(path, argv)` sets `$argv` (`argv[0]` is `path`), `$argc` and
+  `$_SERVER['argv'/'argc']`, then `require`s the file: `Ok(0)` when it ends,
+  `Ok(n)` for `exit(n)`, `Err` for an uncaught exception or fatal error. It
+  no longer uses `php_execute_script`, which reports an uncaught exception by
+  printing it and offers no structured error. A path that is not valid UTF-8
+  is `PhpError::NonUtf8Path`, a missing one `ScriptNotFound`.
+- `Php::call(callable, args)` calls through `_call_user_function_impl`.
+
+An uncaught exception is `PhpError::Exception { class, message, file, line }`
+(read from the Throwable's properties); `exit()`/`die()` is `Exit(status)`; a
+fatal error (a bailout) is `Fatal { message, file, line }` from PHP's last
+recorded error. PHP itself still displays fatal errors on the output, as the
+CLI does with `display_errors=1`; exceptions it does not see as uncaught, so
+it prints nothing for them. The engine keeps working after a fatal error, as
+PHP's interactive shell does after catching one (a bailout leaves the VM
+frames of the abandoned code allocated until the request ends, and PHP
+disables the cycle collector after a bailout; both are per fatal error, not
+per call).
+
+A call from Rust when no PHP code is running has no current frame, and
+`zend_call_function` then turns an uncaught exception into a fatal error, as
+it must for `{main}`. The bridge therefore calls from a zeroed dummy frame
+whose `func` is an internal function (`apply_filters`), which is what a call
+from inside a native function looks like; the exception stays in
+`EG(exception)` and is taken out by Rust.
+
+## Bailouts, exceptions and exit() across the Rust boundary
+
+A PHP fatal error is a bailout: a `longjmp` to the innermost `zend_try`. A
+`longjmp` over a Rust frame skips that frame's destructors (and is undefined
+behaviour if any of them would have run). Hook callbacks make this real:
+PHP calls `Hook::run` (Rust), which fires a PHP callback (PHP), which can hit
+a fatal error, call `exit()` or throw. The rule `src/runtime.rs` follows:
+
+1. **Every entry into PHP goes through `guard`.** It is a plain `zend_try`
+   (ext-php-rs `try_catch`, not `try_catch_first`, so it saves and restores
+   the enclosing `EG(bailout)` and nests safely) around a closure that
+   captures only references and raw pointers. Whatever the call works on
+   (argument zvals, the return zval, the op array, strings) is owned by the
+   caller, outside the closure, and released normally afterwards. A bailout
+   therefore only ever skips the closure's own frame, which owns nothing.
+   Converting a Rust value to a zval allocates PHP memory, which can bail out
+   on `memory_limit`, so it runs inside the guard too, with frames that own
+   nothing (`convert::write_value`).
+2. **Every native function PHP calls goes through `native_entry`.** When a
+   guard inside it catches a bailout, it sets a flag instead of continuing;
+   the method then returns normally through all its Rust frames, dropping
+   everything, and only then does `native_entry`, in a frame that owns
+   nothing, re-raise the bailout to the PHP code below. While the flag is set
+   no guard enters PHP. Releasing values at the end of a native call is part
+   of that call, so a destructor that bails out there is re-raised too.
+3. **A Rust panic never becomes a PHP error.** A panic inside a guarded
+   closure is resumed as soon as the closure has unwound. A panic in a native
+   function (say a Rust hook callback fired from PHP) cannot unwind through
+   PHP's C frames: `native_entry` catches it, parks the payload, and carries
+   it through PHP as a bailout; the next guard below resumes the same
+   payload in Rust (`std::panic::resume_unwind`).
+4. **Rust never releases a PHP value from `Drop`.** Releasing can run a
+   destructor or the cycle collector, that is PHP code. Dropping a handle to
+   a PHP value queues the reference; the queue is drained, each value under
+   its own guard, at the end of every native call and every `Php` method and
+   PHP callback.
+5. **Exceptions and `exit()` are values, not jumps.** An exception is left in
+   `EG(exception)` by PHP and taken out by the code that called in. A PHP
+   callback's exception becomes that callback's `CallbackError`; when the
+   firing was started from PHP the original object is kept and rethrown,
+   unchanged, to the PHP caller. `exit()` throws PHP's internal unwind-exit
+   object; below a native function it is parked and rethrown by that
+   function, so the calling script unwinds exactly as for its own `exit()`
+   (`finally` blocks do not run). Fired from Rust, it is the callback's error
+   (`PHP code called exit(n)`).
+
+**Reference counts.** A PHP object or resource reaching Rust becomes a
+`Value::Opaque` holding one counted reference (`convert::ZvalHandle`);
+passing it back to PHP copies the zval and adds a reference, so the same
+object comes out. PHP callables stored in the registry are held the same way.
+The harness checks the balance: an object passed through PHP and Rust
+filters many times is destroyed exactly when PHP drops its last reference,
+and a thousand more firings, from PHP and from Rust, do not change
+`memory_get_usage()`.
+
+**Shutdown.** Dropping `Php` drains the release queue, then ends the request,
+which destroys every PHP object, including those Rust still holds (PHP
+callbacks left in the registry, `Value::Opaque`s kept by Rust code). After
+that the bridge marks the engine dead: queued and still-held references are
+forgotten, never released (their memory belonged to the request), and a PHP
+callback left in a registry that outlives `Php` returns a `CallbackError`
+when fired instead of entering PHP.
 
 ## Build time and binary size
 
@@ -309,8 +398,8 @@ x86_64 CI runner should be faster.
 
 ## Verification
 
-`cargo test -p speedyspec-php --test php` prints three `ok` lines and exits 0
-on both targets.
+`cargo test -p speedyspec-php --test php` prints an `ok` line per case (29
+since Task 3) and exits 0 on both targets.
 
 - **macOS arm64**, native: `otool -L` on the test binary lists only
   `libSystem`, `libresolv` and the CoreFoundation, CoreServices and
@@ -341,7 +430,8 @@ Deviations from the original plan, and why:
 - Link flags come from `spc spc-config --libs`, not `php-config --libs`,
   which omits libraries.
 - `.cargo/config.toml` exists to point ext-php-rs at the static PHP.
-- `register_argc_argv=0`; `run_file` sets `$argv`/`$argc` itself.
+- `register_argc_argv=0`; `run_file` sets `$argv`/`$argc` (and, since Task 3,
+  `$_SERVER['argv']`/`['argc']`) itself.
 
 ## CI
 
