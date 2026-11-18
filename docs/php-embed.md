@@ -602,7 +602,7 @@ Measured on the development Mac (Apple Silicon, builds ran with `make -j16`) on 
 | First `cargo test -p speedyspec-php --test php` (all deps) | 40 s | about 1 min |
 | Test binary, debug | 18.5 MB | 59.4 MB |
 | Test binary, release | 16.0 MB (14.3 MB stripped) | 19.7 MB (17.6 MB stripped) |
-| `speedyspec` binary, release (`cargo build --release -p speedyspec-cli`) | 16.9 MB (16,924,112 bytes) | 22.2 MB (22,158,384 bytes) |
+| `speedyspec` binary, release (`cargo build --release -p speedyspec-cli`) | 19.9 MB (19,853,760 bytes) | 25.7 MB (25,749,784 bytes) |
 
 `env -i ./target/release/speedyspec --version` (empty environment, so no PHP on `PATH`) prints the three version lines on macOS: the
 binary needs no PHP on the machine.
