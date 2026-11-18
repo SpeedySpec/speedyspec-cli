@@ -198,6 +198,11 @@ fn no_plugins_flag_skips_loading() {
     let out = run(&["good"], &["--no-plugins", "hello", "Ada"]);
     assert_eq!(out.code, 2);
     assert_eq!(out.stdout, "");
+    assert!(
+        out.stderr.contains("unrecognized subcommand 'hello'"),
+        "{}",
+        out.stderr
+    );
 }
 
 #[test]
@@ -419,16 +424,113 @@ fn no_arguments_prints_help_and_is_usage_error() {
     assert!(out.stderr.contains("hello"), "{}", out.stderr);
 }
 
+/// Copies the `good` fixture into `dir`.
+fn plant_good(dir: &Path) {
+    std::fs::create_dir_all(dir).unwrap();
+    for file in ["speedyspec-plugin.json", "plugin.php"] {
+        std::fs::copy(fixture("good").join(file), dir.join(file)).unwrap();
+    }
+}
+
+/// Runs `plugin list` and `hello Ada` in `cwd` with `env` set, and checks that no plugin loaded.
+fn assert_nothing_loaded(cwd: &Path, env: &[(&str, &Path)], unset_home: bool) {
+    for args in [&["plugin", "list"][..], &["hello", "Ada"][..]] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_speedyspec"));
+        command.current_dir(cwd);
+        if unset_home {
+            command.env_remove("SPEEDYSPEC_HOME");
+        }
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        let output = command.args(args).output().unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if args[0] == "plugin" {
+            assert_eq!(output.status.code(), Some(0), "{stderr}");
+            assert_eq!(stdout, "", "a plugin loaded from {}", cwd.display());
+        } else {
+            assert_eq!(output.status.code(), Some(2), "{stderr}");
+            assert_eq!(stdout, "");
+            assert!(
+                stderr.contains("unrecognized subcommand 'hello'"),
+                "{stderr}"
+            );
+        }
+    }
+}
+
 #[test]
 fn working_directory_plugins_are_not_loaded() {
+    // Plugins planted wherever a careless lookup might find them: the working directory's
+    // own manifest, and the plugin directories a relative default would resolve to.
     let cwd = tempfile::tempdir().unwrap();
-    let plugin = cwd.path().join(".speedyspec/plugins/good");
-    std::fs::create_dir_all(&plugin).unwrap();
-    for file in ["speedyspec-plugin.json", "plugin.php"] {
-        std::fs::copy(fixture("good").join(file), plugin.join(file)).unwrap();
+    plant_good(cwd.path());
+    for dir in [
+        ".speedyspec/plugins/good",
+        "plugins/good",
+        "speedyspec/plugins/good",
+    ] {
+        plant_good(&cwd.path().join(dir));
     }
-    let out = run_in(cwd.path(), &[], &["hello", "Ada"]);
-    assert_eq!(out.code, 2);
+
+    // SPEEDYSPEC_HOME pointing at an empty directory.
+    let home = tempfile::tempdir().unwrap();
+    assert_nothing_loaded(cwd.path(), &[("SPEEDYSPEC_HOME", home.path())], false);
+
+    // SPEEDYSPEC_HOME unset, the platform data directory redirected to an empty one.
+    let data = tempfile::tempdir().unwrap();
+    assert_nothing_loaded(
+        cwd.path(),
+        &[
+            ("HOME", data.path()),
+            ("XDG_DATA_HOME", &data.path().join("share")),
+        ],
+        true,
+    );
+}
+
+#[test]
+fn handler_status_is_never_wrapped_to_success() {
+    for (code, status) in [
+        ("0", 0),
+        ("3", 3),
+        ("255", 255),
+        ("256", 1),
+        ("512", 1),
+        ("-1", 1),
+    ] {
+        let out = run(&["status"], &["status", "--", code]);
+        assert_eq!(out.code, status, "{code}: {}", out.stderr);
+    }
+}
+
+#[test]
+fn closed_stdout_is_not_a_crash() {
+    use std::process::Stdio;
+    let home = tempfile::tempdir().unwrap();
+    // A pipe whose reader is gone before speedyspec writes: every write fails with EPIPE.
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    for args in [
+        &["--version"][..],
+        &["plugin", "list"][..],
+        &["hello", "Ada"][..],
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_speedyspec"))
+            .env("SPEEDYSPEC_HOME", home.path())
+            .arg("--plugin-dir")
+            .arg(fixture("good"))
+            .args(args)
+            .stdout(Stdio::from(writer.try_clone().unwrap()))
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert_eq!(output.status.code(), Some(0), "{args:?}: {stderr}");
+        assert!(!stderr.contains("panicked"), "{args:?}: {stderr}");
+        assert!(!stderr.contains("Broken pipe"), "{args:?}: {stderr}");
+    }
 }
 
 /// Memory exhaustion while loading is a fatal error of that plugin. PHP unwinds it like
@@ -482,14 +584,6 @@ fn missing_plugin_dir_is_reported() {
         out.stderr,
         "speedyspec: plugin directory /no/such/speedyspec/dir not found\n"
     );
-}
-
-/// Copies the `good` fixture into `dir`.
-fn plant_good(dir: &Path) {
-    std::fs::create_dir_all(dir).unwrap();
-    for file in ["speedyspec-plugin.json", "plugin.php"] {
-        std::fs::copy(fixture("good").join(file), dir.join(file)).unwrap();
-    }
 }
 
 #[test]

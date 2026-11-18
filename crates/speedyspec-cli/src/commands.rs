@@ -44,6 +44,15 @@ pub fn run(args: &[String]) -> ExitCode {
     ExitCode::from(exit_byte(i64::from(code)))
 }
 
+/// The exit status for what a handler returned: 0 and 1 to 255 as they are; anything else
+/// (negative, or too big for an exit status) is a failure, 1, never wrapped round to 0.
+fn handler_status(status: i64) -> i32 {
+    match status {
+        0..=255 => i32::try_from(status).expect("0..=255 fits an i32"),
+        _ => 1,
+    }
+}
+
 /// An exit status as the operating system will see it.
 fn exit_byte(status: i64) -> u8 {
     u8::try_from(status.rem_euclid(256)).expect("rem_euclid(256) fits a byte")
@@ -66,9 +75,13 @@ fn dispatch(runtime: &Runtime, args: &[String]) -> i32 {
     };
 
     if matches.get_flag("version") {
-        println!("speedyspec {}", env!("CARGO_PKG_VERSION"));
-        println!("php {PHP_VERSION}");
-        println!("contracts {CONTRACTS_VERSION}");
+        // Never println!: it panics when stdout is a closed pipe (`speedyspec --version | true`).
+        // A write that fails is dropped and the command still succeeds.
+        let _ = write!(
+            std::io::stdout().lock(),
+            "speedyspec {}\nphp {PHP_VERSION}\ncontracts {CONTRACTS_VERSION}\n",
+            env!("CARGO_PKG_VERSION")
+        );
         return 0;
     }
     match matches.subcommand() {
@@ -288,7 +301,7 @@ fn run_plugin_command(runtime: &Runtime, command: &PluginCommand, matches: &ArgM
             .collect(),
     );
     match runtime.php.call(&command.handler, &[arguments, options]) {
-        Ok(Value::Int(status)) => i32::from(exit_byte(status)),
+        Ok(Value::Int(status)) => handler_status(status),
         Ok(_) => 0,
         Err(PhpError::Exit(status)) => i32::from(exit_byte(i64::from(status))),
         Err(PhpError::Exception { class, message, .. }) => {
@@ -298,6 +311,29 @@ fn run_plugin_command(runtime: &Runtime, command: &PluginCommand, matches: &ArgM
         Err(error) => {
             eprintln!("speedyspec: {}: {error}", command.name);
             1
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn handler_status_never_wraps_to_success() {
+        for (returned, status) in [
+            (0, 0),
+            (1, 1),
+            (7, 7),
+            (255, 255),
+            (256, 1),
+            (512, 1),
+            (-1, 1),
+            (-256, 1),
+            (i64::MAX, 1),
+            (i64::MIN, 1),
+        ] {
+            assert_eq!(handler_status(returned), status, "{returned}");
         }
     }
 }

@@ -10,13 +10,17 @@ speedyspec php <file> [args...]   # run a PHP file with hooks available; exit co
 speedyspec app list               # id <TAB> label <TAB> drivers ("?" marks a driver not implemented yet)
 speedyspec plugin list            # name <TAB> version <TAB> directory
 speedyspec <plugin command> ...   # whatever loaded plugins added
+speedyspec                        # no arguments: help on stderr, exit 2
 ```
 
 Global flags, accepted anywhere before a script's own arguments: `--no-plugins`,
 `--no-interaction`, and `--plugin-dir <path>` (or `--plugin-dir=<path>`, repeatable).
 
-Exit codes: 0 success, 1 failure, 2 usage error. Command output goes to stdout; every diagnostic
-goes to stderr and starts with `speedyspec: `.
+Exit codes: 0 success, 1 failure, 2 usage error. Command output goes to stdout and every
+diagnostic to stderr. speedyspec's own lines start with `speedyspec: `; PHP's diagnostics keep
+PHP's log form (`PHP Warning:  ...`, `PHP Fatal error:  ...`), and usage errors and help come from
+the argument parser (`error: ...`, `Usage: ...`). Help asked for with `--help` goes to stdout;
+help shown because no command was given goes to stderr, with exit code 2.
 
 ## Building
 
@@ -52,8 +56,9 @@ the contracts package (`SpeedySpec\Cli\Contracts`) the plugin was written for, c
 version bundled in the binary (see `speedyspec --version`); `entry` is relative to the directory.
 
 Plugins are found in the user directory (`$SPEEDYSPEC_HOME/plugins`, otherwise the platform data
-directory's `speedyspec/plugins`) and in each `--plugin-dir`. The working directory is never
-searched. Everything a plugin prints while loading goes to stderr. A plugin that throws, hits a
+directory's `speedyspec/plugins`) and in each `--plugin-dir`. `SPEEDYSPEC_HOME` must be an
+absolute path; a relative one is ignored with a warning. A `--plugin-dir` that does not exist is
+reported. The working directory is never searched. Everything a plugin prints while loading goes to stderr. A plugin that throws, hits a
 fatal error, calls `exit()` or needs another contracts version is skipped with a
 `speedyspec: plugin <name> skipped: <why>` line; the others still load.
 
@@ -66,15 +71,27 @@ use SpeedySpec\Cli\Contracts\Command;
 use SpeedySpec\Cli\Contracts\CommandArgument;
 use SpeedySpec\Hooks\Hook;
 
-Hook::add('speedyspec_commands', static fn (array $commands): array => [...$commands, new Command(
-    'hello', 'Greets someone.',
-    static function (array $arguments, array $options): int { echo "hello {$arguments['name']}\n"; return 0; },
-    [new CommandArgument('name', 'Who to greet.')],
-)]);
+Hook::add('speedyspec_commands', static function (array $commands): array
+{
+    $commands[] = new Command(
+        'hello',
+        'Greets someone.',
+        static function (array $arguments, array $options): int
+        {
+            echo "hello {$arguments['name']}\n";
+
+            return 0;
+        },
+        [new CommandArgument('name', 'Who to greet.')],
+    );
+
+    return $commands;
+});
 ```
 
 A handler receives the arguments and options keyed by name (a flag option is `true` or `false`,
-a value option its string, its default or `null`) and returns the exit code. An uncaught exception
+a value option its string, its default or `null`) and returns the exit code (0 to 255; any other
+integer is reported as 1, never wrapped round to 0). An uncaught exception
 exits 1 with `speedyspec: <command>: <class>: <message>`. A command may not reuse `app`, `plugin`,
 `self`, `php` or `help`, or the name of a command an earlier plugin added (the first one wins);
 it is dropped with a message naming the plugin.
