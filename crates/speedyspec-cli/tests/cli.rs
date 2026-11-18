@@ -375,3 +375,17 @@ fn real_fatal_error_at_load_is_survived() {
         "{stderr}"
     );
 }
+
+#[test]
+fn start_up_hook_output_goes_to_stderr() {
+    let out = run(&["noisy-hooks"], &["app", "list"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.stdout, "quiet\tQuiet\tzip?\n");
+    for noise in ["noise from init", "noise from commands", "noise from apps"] {
+        assert!(out.stderr.contains(noise), "{}", out.stderr);
+    }
+    let out = run(&["noisy-hooks"], &["--version"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.stdout.lines().count(), 3, "{:?}", out.stdout);
+    assert!(!out.stdout.contains("noise"), "{}", out.stdout);
+}

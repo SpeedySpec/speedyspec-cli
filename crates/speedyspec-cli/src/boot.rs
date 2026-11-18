@@ -164,12 +164,10 @@ struct PhpLoader<'a>(&'a Php);
 impl Loader for PhpLoader<'_> {
     fn load(&self, plugin: &Plugin) -> Result<(), String> {
         let php = self.0;
-        // Output while loading is noise, never command output, so it goes to stderr; the owner
-        // makes the plugin's hook registrations traceable.
+        // The owner makes the plugin's hook registrations traceable. Output stays on stderr
+        // because `boot` redirects it for the whole of start-up.
         php.set_owner(Some(&plugin.manifest.name));
-        php.redirect_output(Output::Stderr);
         let result = php.require(&plugin.entry_path());
-        php.redirect_output(Output::Stdout);
         php.set_owner(None);
         result.map(drop).map_err(|error| load_reason(&error))
     }
@@ -233,6 +231,10 @@ pub fn boot(args: &[String]) -> Result<Runtime, String> {
     })
     .map_err(|e| e.to_string())?;
 
+    // Everything plugin code prints from here until dispatch (while loading, and from the init
+    // hook and both filters) is noise, never command output, so it goes to stderr. Nothing
+    // below returns early, so stdout is always restored.
+    php.redirect_output(Output::Stderr);
     let mut loaded = Vec::new();
     if !options.no_plugins {
         let mut dirs: Vec<PathBuf> = user_plugin_dir().into_iter().collect();
@@ -252,6 +254,7 @@ pub fn boot(args: &[String]) -> Result<Runtime, String> {
         decode_each_command(v, &reader, &hooks)
     });
     let apps = collect(&hooks, HOOK_APPS, |v| decode_apps(v, &reader));
+    php.redirect_output(Output::Stdout);
 
     Ok(Runtime {
         loaded,
