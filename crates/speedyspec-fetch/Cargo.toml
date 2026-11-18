@@ -1,0 +1,12 @@
+[package]
+name = "speedyspec-fetch"
+version = "0.1.0"
+description = "Checked HTTPS downloads for speedyspec: every redirect hop is checked, TLS roots are compiled in."
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+speedyspec-driver = { path = "../speedyspec-driver" }
+# Blocking HTTPS with the TLS roots compiled in: a bare server may have no certificate store.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+

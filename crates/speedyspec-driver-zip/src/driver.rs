@@ -9,8 +9,8 @@ use speedyspec_driver::{
 };
 use speedyspec_hooks::{Key, Value};
 
-use crate::fetch::{Fetch, HttpFetch};
 use crate::install::install_sources;
+use speedyspec_fetch::{Fetch, HttpFetch};
 
 /// Downloads the archives a plugin names and unpacks them under a base directory.
 pub struct ZipDriver {

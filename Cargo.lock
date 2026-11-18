@@ -1981,6 +1981,7 @@ dependencies = [
  "speedyspec-driver",
  "speedyspec-driver-kubernetes",
  "speedyspec-driver-zip",
+ "speedyspec-fetch",
  "speedyspec-hooks",
  "speedyspec-hooks-memory",
  "speedyspec-php",
@@ -2018,11 +2019,19 @@ version = "0.1.0"
 dependencies = [
  "sha2",
  "speedyspec-driver",
+ "speedyspec-fetch",
  "speedyspec-hooks",
  "speedyspec-testkit",
  "tempfile",
- "ureq",
  "zip",
+]
+
+[[package]]
+name = "speedyspec-fetch"
+version = "0.1.0"
+dependencies = [
+ "speedyspec-driver",
+ "ureq",
 ]
 
 [[package]]

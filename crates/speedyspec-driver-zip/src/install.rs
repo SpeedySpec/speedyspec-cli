@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use speedyspec_driver::{Progress, ZipSource};
 
 use crate::extract::{Archive, ExtractError, fetch_and_extract};
-use crate::fetch::Fetch;
+use speedyspec_fetch::Fetch;
 
 /// What every staging directory's name starts with.
 const STAGING_PREFIX: &str = ".speedyspec-staging-";
