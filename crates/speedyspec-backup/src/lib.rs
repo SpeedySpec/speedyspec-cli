@@ -2,3 +2,4 @@
 //! without running the app.
 
 pub mod serialized;
+pub mod rewrite;

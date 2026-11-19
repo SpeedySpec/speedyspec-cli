@@ -504,3 +504,41 @@ fn a_conditional_drop_database_is_refused_before_it_runs() {
         );
     }
 }
+
+#[test]
+#[ignore = "needs scripts/mysql.sh up"]
+fn import_rewriting_runs_the_rewritten_statements() {
+    for (label, url) in servers() {
+        let mut source = Scratch::new(&url, "wp_");
+        source.exec("CREATE TABLE `wp_options` (`option_name` varchar(64) PRIMARY KEY, `option_value` longtext)");
+        source.exec("INSERT INTO `wp_options` VALUES ('siteurl', 'https://old.example')");
+        let mut dump = Vec::new();
+        Connection::open(&source.connection)
+            .unwrap()
+            .export(&mut dump, &ExportOptions::default())
+            .unwrap();
+        let mut target = Scratch::new(&url, "site_");
+        let mut rename = |statement: &[u8]| {
+            String::from_utf8_lossy(statement)
+                .replace("`wp_options`", "`site_options`")
+                .into_bytes()
+        };
+        Connection::open(&target.connection)
+            .unwrap()
+            .import_rewriting(&dump[..], &mut rename)
+            .unwrap_or_else(|e| panic!("{label}: {e}"));
+        let names: Vec<String> = target.checksums().into_iter().map(|(t, _)| t).collect();
+        assert_eq!(names, ["site_options"], "{label}");
+
+        // The database-switch refusal looks at the statement as rewritten.
+        let mut switch = |_: &[u8]| b"USE `mysql`".to_vec();
+        let error = Connection::open(&target.connection)
+            .unwrap()
+            .import_rewriting(&dump[..], &mut switch)
+            .unwrap_err();
+        assert!(
+            error.message.contains("switches to another database"),
+            "{label}: {error}"
+        );
+    }
+}

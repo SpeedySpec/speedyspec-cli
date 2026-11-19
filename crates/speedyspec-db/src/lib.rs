@@ -563,6 +563,16 @@ impl Connection {
     /// Runs every statement of a dump, in order, and says how many ran. It stops at the first
     /// that fails, or that would switch to another database.
     pub fn import(&mut self, input: impl BufRead) -> Result<u64, ImportError> {
+        self.import_rewriting(input, &mut |statement| statement.to_vec())
+    }
+
+    /// As [`Connection::import`], each statement passed through `rewrite` before it runs (a restore moving the
+    /// site to a new prefix and URL). The checks apply to the rewritten statement.
+    pub fn import_rewriting(
+        &mut self,
+        input: impl BufRead,
+        rewrite: &mut dyn FnMut(&[u8]) -> Vec<u8>,
+    ) -> Result<u64, ImportError> {
         let mut applied = 0u64;
         for item in Statements::new(input) {
             let (line, statement) = item.map_err(|e| ImportError {
@@ -571,6 +581,7 @@ impl Connection {
                 applied,
                 message: e.message,
             })?;
+            let statement = rewrite(&statement);
             let number = applied + 1;
             if switches_database(&statement) {
                 return Err(ImportError {
