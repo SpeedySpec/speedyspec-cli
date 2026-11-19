@@ -4,6 +4,7 @@
 mod cluster;
 mod connect;
 mod driver;
+mod exec;
 mod install;
 mod manifest;
 mod readiness;
