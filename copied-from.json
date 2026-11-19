@@ -1,0 +1,18 @@
+{
+  "source": "packages/speedyspec-server",
+  "commit": "c6c991bf7bb4adeec4150298c7ff25fc14fbcccd",
+  "paths": {
+    "compat/hooks": "d3a2320b3bf22ea7f477f59f1f020e857d9dd4f16debc86c2004bd00225d1b0a",
+    "crates/speedyspec-compat": "91a9243d7d6d2f080ed83230981cf09dad6dbc88eb15f0336a5ba44b52545eff",
+    "crates/speedyspec-container": "e57873bc0ea6c7fb12257905f5eaac6f22e81f928d27c3dd0931e53eff1f2f16",
+    "crates/speedyspec-container-php": "f129e7c138c656de10d8ec9051379fb602e8550fd29b5b06fb8ad936cb25200c",
+    "crates/speedyspec-cqrs": "6d53d115afd2704f0791bf4bc539bdc096a735ea2242fbd357ecac0fddc01dbf",
+    "crates/speedyspec-php": "b0149838a259a9695a83ad951513c73b6e5f4f1bca0535dcbdaffe46648cd2a6",
+    "crates/speedyspec-php-ext": "ac8e344059672209de145fa4b665512b4bcdd55e716fbd5c292fd9a12cbef29d",
+    "crates/speedyspec-php-port-macros": "f87333806d09a524708929cb4973f0574ce89a9cd9ff205409f7e06d037e849c",
+    "crates/speedyspec-wp-hooks": "d7d21fe0aca910ddb88bf6ffa024bf9598669d08188ec3afeebdf6c13e26abce",
+    "crates/speedyspec-wp-hooks-memory": "273e9f9de6999d79395b129b6763d437445e6e42034a2d946a01999453984952",
+    "crates/speedyspec-wp-hooks-php": "2af408786cdb2d3b5c650dec98c2e9cb603cb8b63b5d66bcb86316cef40014e3",
+    "tests/php": "1439979388ca40596624c09927ccf7ed1c25dd33b0126a51668a42da996aa0dc"
+  }
+}

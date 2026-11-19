@@ -12,9 +12,18 @@ ext-php-rs = { version = "=0.16.5", features = ["embed"] }
 speedyspec-hooks = { path = "../speedyspec-hooks" }
 
 [dev-dependencies]
+speedyspec-hooks = { path = "../speedyspec-hooks" }
 libc = "0.2"
 speedyspec-hooks-memory = { path = "../speedyspec-hooks-memory" }
 
 [[test]]
 name = "php"
+harness = false
+
+[[test]]
+name = "serve"
+harness = false
+
+[[test]]
+name = "extensions"
 harness = false

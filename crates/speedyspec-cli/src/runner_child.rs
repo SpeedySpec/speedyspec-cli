@@ -40,6 +40,7 @@ pub fn run(request: &Path, result: &Path) -> i32 {
     let php = match Php::boot(BootOptions {
         hooks: Rc::new(MemoryHooks::new()),
         preload: CONTRACTS,
+        areas: crate::boot::wordpress_areas(),
     }) {
         Ok(php) => php,
         Err(e) => {

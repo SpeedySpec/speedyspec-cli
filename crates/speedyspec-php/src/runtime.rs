@@ -153,6 +153,9 @@ pub struct BootOptions<'a> {
     /// any other PHP code. The source is a file's content, `<?php` tag and
     /// all; the name stands in for the file name in PHP's messages.
     pub preload: &'a [(&'a str, &'a str)],
+    /// The extension's native areas: their functions and classes are registered at module startup, and their
+    /// request hooks run on every request.
+    pub areas: Vec<std::rc::Rc<dyn crate::NativeArea>>,
 }
 
 /// A booted PHP engine with one request open.
@@ -171,6 +174,8 @@ pub struct BootOptions<'a> {
 /// a PHP callable returns a `CallbackError` without touching PHP.
 pub struct Php {
     sapi: *mut SapiModule,
+    /// The preload, kept to run again at the start of every later request.
+    preload: Vec<(String, String)>,
     _not_send: PhantomData<*mut ()>,
 }
 
@@ -192,6 +197,10 @@ impl Php {
             .ub_write_function(ub_write)
             .flush_function(flush)
             .log_message_function(log_message)
+            .send_headers_function(crate::web::send_headers)
+            .read_post_function(crate::web::read_post)
+            .read_cookies_function(crate::web::read_cookies)
+            .register_server_variables_function(crate::web::register_server_variables)
             .php_ini_ignore(1)
             .build()
             .map_err(|e| PhpError::Boot(format!("building the SAPI: {e}")))?;
@@ -208,7 +217,8 @@ impl Php {
         unsafe {
             ext_php_rs_sapi_startup();
             sapi_startup(sapi);
-            (*sapi).ini_entries = INI_ENTRIES.as_ptr();
+            (*sapi).ini_entries = EXTRA_INI.get().copied().unwrap_or(INI_ENTRIES).as_ptr();
+            crate::area::install(options.areas);
             if php_module_startup(sapi, hook_class::module_entry()) != ZEND_RESULT_CODE_SUCCESS {
                 return Err(PhpError::Boot("php_module_startup failed".to_owned()));
             }
@@ -222,6 +232,11 @@ impl Php {
         // From here on, failing drops `php`, which shuts the engine down.
         let php = Self {
             sapi,
+            preload: options
+                .preload
+                .iter()
+                .map(|(name, source)| ((*name).to_owned(), (*source).to_owned()))
+                .collect(),
             _not_send: PhantomData,
         };
 
@@ -238,32 +253,172 @@ impl Php {
             e.alive.set(true);
         });
         hook_class::install(options.hooks);
-        php.execute(
+        php.request_setup()?;
+        Ok(php)
+    }
+
+    /// What every request gets before any other PHP code: `SpeedySpec\Hooks\HookException`, the `STDIN`,
+    /// `STDOUT` and `STDERR` constants, the preload, then each area's `request_start`.
+    fn request_setup(&self) -> Result<(), PhpError> {
+        execute(
             HOOK_EXCEPTION_LABEL,
             HOOK_EXCEPTION_PHP.as_bytes(),
             _zend_compile_position_ZEND_COMPILE_POSITION_AFTER_OPEN_TAG,
         )?;
         hook_class::find_exception_class()?;
-        php.execute(
+        execute(
             STD_HANDLES_LABEL,
             STD_HANDLES_PHP.as_bytes(),
             _zend_compile_position_ZEND_COMPILE_POSITION_AFTER_OPEN_TAG,
         )?;
-        for (name, source) in options.preload {
-            php.execute(
+        for (name, source) in &self.preload {
+            execute(
                 name,
                 source.as_bytes(),
                 _zend_compile_position_ZEND_COMPILE_POSITION_AT_OPEN_TAG,
             )?;
         }
-        Ok(php)
+        crate::area::request_start();
+        Ok(())
+    }
+
+    /// Ends the current request and starts a fresh one, as a php-fpm worker does between requests: every PHP value
+    /// of the old request is freed (each area's `request_end` runs), and the new one runs the request setup again.
+    pub fn restart_request(&self) -> Result<(), PhpError> {
+        self.end_request();
+        self.start_request()?;
+        self.request_setup()
+    }
+
+    /// Ends the open request, if one is (after [`Php::serve`] none is).
+    fn end_request(&self) {
+        if !crate::boundary::alive() {
+            return;
+        }
+        settle_stray();
+        // SAFETY: ends the request on the booting thread, as `Drop` does; areas' request_end runs inside it.
+        unsafe { php_request_shutdown(ptr::null_mut()) };
+        ENGINE.with(|e| {
+            e.alive.set(false);
+            let queued = std::mem::take(&mut *e.releases.borrow_mut());
+            drop(queued); // ManuallyDrop: the request freed them.
+            let current = e.take_current();
+            let saved = std::mem::take(&mut *e.contexts.borrow_mut());
+            drop(current);
+            drop(saved);
+        });
+    }
+
+    /// Starts a request on the booting thread, after the previous one ended.
+    fn start_request(&self) -> Result<(), PhpError> {
+        // SAFETY: the next request on the same thread, after the previous one ended.
+        unsafe {
+            if php_request_startup() != ZEND_RESULT_CODE_SUCCESS {
+                return Err(PhpError::Boot("php_request_startup failed".to_owned()));
+            }
+            (*ext_php_rs_compiler_globals()).skip_shebang = true;
+        }
+        ENGINE.with(|e| e.alive.set(true));
+        Ok(())
+    }
+
+    /// Serves one web request: the open request (if any) ends, `request` becomes the request PHP sees (its
+    /// parameters as `$_SERVER`, its body as `php://input`, PHP's headers and output sent to it), the request setup
+    /// runs (each area's `request_start`), `script` runs, and the request ends (each area's `request_end`). No
+    /// request is open afterwards. An exception or fatal error before any output makes the response a 500.
+    pub fn serve(&self, request: &mut dyn crate::web::WebRequest, script: &Path) -> Served {
+        self.end_request();
+        let param = |name: &str| {
+            request
+                .params()
+                .iter()
+                .find(|(k, _)| k == name)
+                .map(|(_, v)| v.clone())
+        };
+        let c = |value: Option<String>| value.and_then(|v| CString::new(v).ok());
+        let method = c(param("REQUEST_METHOD").or(Some("GET".into())));
+        let query = c(param("QUERY_STRING"));
+        let uri = c(param("REQUEST_URI"));
+        let content_type = c(param("CONTENT_TYPE"));
+        let content_length = param("CONTENT_LENGTH")
+            .and_then(|v| v.parse::<i64>().ok())
+            .unwrap_or(-1);
+        let script_c = c(script.to_str().map(str::to_owned));
+        let ptr_of = |v: &Option<CString>| {
+            v.as_ref()
+                .map_or(ptr::null_mut(), |s| s.as_ptr().cast_mut())
+        };
+        crate::web::begin(request);
+        // SAFETY: SG() on the booting thread between requests; the strings live until the request has ended.
+        unsafe {
+            let sg = &raw mut ext_php_rs::ffi::sapi_globals;
+            (*sg).server_context = (&raw mut SERVER_CONTEXT).cast();
+            (*sg).request_info.request_method = ptr_of(&method);
+            (*sg).request_info.query_string = ptr_of(&query);
+            (*sg).request_info.request_uri = ptr_of(&uri);
+            (*sg).request_info.content_type = ptr_of(&content_type);
+            (*sg).request_info.content_length = content_length;
+            (*sg).request_info.path_translated = ptr_of(&script_c);
+            (*sg).request_info.proto_num = 1001;
+            // PHP never resets the status between requests; a SAPI does, as php-fpm does.
+            (*sg).sapi_headers.http_response_code = 200;
+        }
+        let started = self.start_request();
+        let mut served = Served {
+            result: Ok(()),
+            peak_memory: 0,
+            poisoned: false,
+            headers_sent: false,
+        };
+        match started {
+            Err(err) => served.result = Err(err),
+            Ok(()) => {
+                served.result = self
+                    .request_setup()
+                    .and_then(|()| self.require(script).map(|_| ()))
+                    .or_else(|err| match err {
+                        PhpError::Exit(_) => Ok(()),
+                        other => Err(other),
+                    });
+                if served.result.is_err() {
+                    // SAFETY: SG() during the request; PHP sends whatever code is set when the headers go out.
+                    unsafe {
+                        let sg = &raw mut ext_php_rs::ffi::sapi_globals;
+                        if (*sg).headers_sent == 0 {
+                            (*sg).sapi_headers.http_response_code = 500;
+                        }
+                    }
+                }
+                // SAFETY: the engine is running a request on this thread.
+                served.peak_memory = unsafe { zend_memory_peak_usage(true) } as u64;
+                served.poisoned = self.poisoned();
+                self.end_request();
+            }
+        }
+        served.headers_sent = crate::web::STATE.with(|s| s.borrow().headers_sent);
+        crate::web::end();
+        // SAFETY: SG() between requests: the request's strings are about to be dropped.
+        unsafe {
+            let sg = &raw mut ext_php_rs::ffi::sapi_globals;
+            (*sg).server_context = ptr::null_mut();
+            (*sg).request_info.request_method = ptr::null();
+            (*sg).request_info.query_string = ptr::null_mut();
+            (*sg).request_info.request_uri = ptr::null_mut();
+            (*sg).request_info.content_type = ptr::null();
+            (*sg).request_info.content_length = 0;
+            (*sg).request_info.path_translated = ptr::null_mut();
+            // PHP read the cookies from `read_cookies` (a string freed with the request); a later request must not.
+            (*sg).request_info.cookie_data = ptr::null_mut();
+        }
+        drop((method, query, uri, content_type, script_c));
+        served
     }
 
     /// Runs PHP statements (no `<?php` tag) and returns what a top-level
     /// `return` gives back, or null. `label` names the code in PHP's error
     /// messages, where a file name would otherwise go.
     pub fn eval(&self, label: &str, code: &str) -> Result<Value, PhpError> {
-        self.execute(
+        execute(
             label,
             code.as_bytes(),
             _zend_compile_position_ZEND_COMPILE_POSITION_AFTER_OPEN_TAG,
@@ -291,6 +446,7 @@ impl Php {
 
     /// Runs a PHP file the way `php <path> <argv...>` would and returns its
     /// exit status: 0 when it ends normally, `n` when it calls `exit(n)`.
+    /// `$_SERVER['SCRIPT_NAME']`, `SCRIPT_FILENAME` and `PHP_SELF` are the path.
     /// `$argv` (and `$_SERVER['argv']`) is `[path, ...argv]` and `$argc` its
     /// length. An uncaught exception or fatal error is an `Err`.
     pub fn run_file(&self, path: &Path, argv: &[String]) -> Result<i32, PhpError> {
@@ -310,6 +466,12 @@ impl Php {
             "]; $GLOBALS['argc'] = \\count($GLOBALS['argv']); \
              $_SERVER['argv'] = $GLOBALS['argv']; $_SERVER['argc'] = $GLOBALS['argc'];",
         );
+        // As the PHP CLI sets them: a phar's stub runs only when it finds itself here.
+        let quoted = php_quote(script);
+        code.push_str(&format!(
+            " $_SERVER['SCRIPT_NAME'] = {quoted}; $_SERVER['SCRIPT_FILENAME'] = {quoted}; \
+             $_SERVER['PHP_SELF'] = {quoted};"
+        ));
         self.eval("speedyspec://argv", &code)?;
 
         // SAFETY: plain write to the executor globals on the engine's thread.
@@ -324,6 +486,17 @@ impl Php {
     /// Calls a PHP callable (a function name, a `[class, method]` array, a
     /// closure or an invokable object) with `args` and returns its result.
     pub fn call(&self, callable: &Value, args: &[Value]) -> Result<Value, PhpError> {
+        call(callable, args)
+    }
+}
+
+/// Calls a PHP callable from anywhere on the thread that booted PHP while a request is open, as [`Php::call`] does
+/// (an adapter of a port holds no `Php` handle). Fails without touching PHP when no request is open.
+pub fn call(callable: &Value, args: &[Value]) -> Result<Value, PhpError> {
+    {
+        if !crate::boundary::alive() {
+            return Err(PhpError::Boot("no PHP request is open".to_owned()));
+        }
         settle_stray();
         let mut target = ManuallyDrop::new(Zval::new());
         let target_ptr: *mut zval = &raw mut *target;
@@ -342,7 +515,184 @@ impl Php {
         settle_stray();
         outcome.map_err(CallError::into_php_error)
     }
+}
 
+/// A PHP call that failed: the error, and the thrown object when PHP threw one (a `Value::Opaque`), so a native
+/// function can rethrow the original exception.
+#[derive(Debug)]
+pub struct CallFailure {
+    pub error: PhpError,
+    pub exception: Option<Value>,
+}
+
+/// As [`call`], keeping the exception object a failed call threw.
+pub fn call_catching(callable: &Value, args: &[Value]) -> Result<Value, CallFailure> {
+    let plain = |error: PhpError| CallFailure {
+        error,
+        exception: None,
+    };
+    if !crate::boundary::alive() {
+        return Err(plain(PhpError::Boot("no PHP request is open".to_owned())));
+    }
+    settle_stray();
+    let mut target = ManuallyDrop::new(Zval::new());
+    let target_ptr: *mut zval = &raw mut *target;
+    let written = guard(|| {
+        // SAFETY: `target` is fresh zval storage owned by this frame.
+        unsafe { convert::write_value(target_ptr, callable) }
+    });
+    let outcome = match written {
+        Ok(Ok(())) => call_php(target_ptr, args),
+        Ok(Err(why)) => Err(CallError::Convert(why.to_string())),
+        Err(interrupted) => Err(CallError::Interrupted(interrupted)),
+    };
+    release_later(target);
+    settle_stray();
+    outcome.map_err(|err| match err {
+        CallError::Thrown(crate::boundary::Thrown::Exception {
+            object,
+            class,
+            message,
+            file,
+            line,
+        }) => CallFailure {
+            error: PhpError::Exception {
+                class,
+                message,
+                file,
+                line,
+            },
+            exception: Some(Value::Opaque(std::rc::Rc::new(object))),
+        },
+        other => plain(other.into_php_error()),
+    })
+}
+
+/// The SAPI's INI entries with [`set_ini`]'s settings after them, once set.
+static EXTRA_INI: std::sync::OnceLock<&'static std::ffi::CStr> = std::sync::OnceLock::new();
+
+/// INI settings for every request of this process, as php.ini would give them (so `PHP_INI_PERDIR` and
+/// `PHP_INI_SYSTEM` settings such as `upload_max_filesize` apply, which `ini_set()` cannot change). Call before
+/// [`Php::boot`], once. A key or value with a quote, a newline or a NUL is refused.
+pub fn set_ini(settings: &[(String, String)]) -> Result<(), String> {
+    let mut entries = INI_ENTRIES.to_string_lossy().into_owned();
+    for (key, value) in settings {
+        let bad = |s: &str| s.contains(['"', '\n', '\r', '\0']) || s.is_empty();
+        if bad(key) || key.contains('=') || value.contains(['"', '\n', '\r', '\0']) {
+            return Err(format!(
+                "the INI setting {key:?} = {value:?} cannot be passed to PHP"
+            ));
+        }
+        entries.push_str(&format!("{key}=\"{value}\"\n"));
+    }
+    let entries = CString::new(entries).map_err(|err| err.to_string())?;
+    EXTRA_INI
+        .set(Box::leak(entries.into_boxed_c_str()))
+        .map_err(|_| "the INI settings are already set".to_string())
+}
+
+/// What serving one web request came to.
+#[derive(Debug)]
+pub struct Served {
+    /// The script's outcome; `exit()` is a normal end.
+    pub result: Result<(), PhpError>,
+    /// The engine's peak memory during the request, in bytes.
+    pub peak_memory: u64,
+    /// Whether a fatal error left the engine degraded (the worker should be replaced).
+    pub poisoned: bool,
+    pub headers_sent: bool,
+}
+
+/// `SG(server_context)` while a web request runs: PHP only reads the body and cookies when it is set.
+static mut SERVER_CONTEXT: [u64; 4] = [0; 4];
+
+unsafe extern "C" {
+    fn zend_memory_peak_usage(real_usage: bool) -> usize;
+}
+
+/// `$GLOBALS[$name]`, through references; `None` when it is not set or no request is open. Runs no PHP code.
+pub fn global(name: &str) -> Option<Value> {
+    if !crate::boundary::alive() {
+        return None;
+    }
+    // SAFETY: a request is open, so the symbol table is live; `to_value` neither runs PHP code nor allocates PHP
+    // memory.
+    unsafe {
+        let table = &raw mut (*ext_php_rs_executor_globals()).symbol_table;
+        let slot = ext_php_rs::ffi::zend_hash_str_find(table, name.as_ptr().cast(), name.len());
+        if slot.is_null() {
+            return None;
+        }
+        let value = convert::deref(slot);
+        if u32::from(convert::type_of(value)) == ext_php_rs::ffi::IS_UNDEF {
+            return None;
+        }
+        convert::to_value(value).ok()
+    }
+}
+
+/// `$GLOBALS[$name] = $value`: a variable referencing the global sees the new value too.
+pub fn set_global(name: &str, value: &Value) -> Result<(), PhpError> {
+    if !crate::boundary::alive() {
+        return Err(PhpError::Boot("no PHP request is open".to_owned()));
+    }
+    let mut fresh = ManuallyDrop::new(Zval::new());
+    let fresh_ptr: *mut zval = &raw mut *fresh;
+    let written = guard(|| {
+        // SAFETY: `fresh` is zval storage owned by this frame.
+        unsafe { convert::write_value(fresh_ptr, value) }
+    });
+    match written {
+        Ok(Ok(())) => {}
+        Ok(Err(why)) => {
+            release_later(fresh);
+            return Err(PhpError::Conversion(why.to_string()));
+        }
+        Err(interrupted) => return Err(fatal_error(interrupted)),
+    }
+    let name_ptr = name.as_ptr();
+    let name_len = name.len();
+    let replaced = guard(|| {
+        // SAFETY: a request is open; the slot found is live; the new value's ownership moves into the table or
+        // the slot, and the old value is handed back to be released.
+        unsafe {
+            let table = &raw mut (*ext_php_rs_executor_globals()).symbol_table;
+            let slot = ext_php_rs::ffi::zend_hash_str_find(table, name_ptr.cast(), name_len);
+            if slot.is_null() {
+                ext_php_rs::ffi::zend_hash_str_update(table, name_ptr.cast(), name_len, fresh_ptr);
+                return None;
+            }
+            let mut target = slot;
+            if u32::from(convert::type_of(target)) == ext_php_rs::ffi::IS_INDIRECT {
+                target = (*target).value.zv;
+            }
+            if u32::from(convert::type_of(target)) == ext_php_rs::ffi::IS_REFERENCE {
+                target = &raw mut (*(*target).value.ref_).val;
+            }
+            let old: Zval = ptr::read(target);
+            ptr::copy_nonoverlapping(fresh_ptr, target, 1);
+            Some(old)
+        }
+    });
+    match replaced {
+        Ok(Some(old)) => {
+            release_later(ManuallyDrop::new(old));
+            settle_stray();
+            Ok(())
+        }
+        Ok(None) => Ok(()),
+        Err(interrupted) => Err(fatal_error(interrupted)),
+    }
+}
+
+/// `spl_object_id($value)` for a PHP object held as a `Value::Opaque`.
+pub fn object_id(value: &Value) -> Option<u64> {
+    let object = convert::handle_of(value)?.object()?;
+    // SAFETY: the handle holds a reference to the object, so it is live.
+    Some(u64::from(unsafe { (*object).handle }))
+}
+
+impl Php {
     /// Creates a PHP object: `new $class(...$args)`. An unknown class or a
     /// constructor that throws is the exception PHP raised.
     pub fn construct(&self, class: &str, args: &[Value]) -> Result<Value, PhpError> {
@@ -441,8 +791,7 @@ impl Php {
     }
 
     /// Compiles `code` as `label` and runs it at the current scope.
-    fn execute(
-        &self,
+    fn execute_in(
         label: &str,
         code: &[u8],
         position: zend_compile_position,
@@ -538,10 +887,12 @@ impl Drop for Php {
         // and clear an exception a destructor left, which shutdown must not
         // find pending.
         settle_stray();
-        // SAFETY: ends the request on the booting thread. Native functions
-        // still work during it (shutdown functions and destructors may fire
-        // hooks); PHP catches bailouts in each shutdown step itself.
-        unsafe { php_request_shutdown(ptr::null_mut()) };
+        // SAFETY: ends the request on the booting thread, if one is open (after `serve` none is). Native functions
+        // still work during it (shutdown functions and destructors may fire hooks); PHP catches bailouts in each
+        // shutdown step itself.
+        if crate::boundary::alive() {
+            unsafe { php_request_shutdown(ptr::null_mut()) };
+        }
 
         // The request freed every PHP value. Any reference Rust still holds
         // or has queued points into freed memory and must never be touched.
@@ -560,6 +911,7 @@ impl Drop for Php {
             e.panic.borrow_mut().take()
         });
         hook_class::uninstall();
+        crate::area::uninstall();
 
         // SAFETY: reverse of the start sequence in `boot`, on the same thread.
         // The SAPI module is reclaimed only after PHP no longer uses it.
@@ -592,4 +944,22 @@ fn php_quote(s: &str) -> String {
     }
     out.push('\'');
     out
+}
+
+/// Compiles and runs `code` in the open request; for [`Php`]'s methods and the free [`eval`].
+fn execute(label: &str, code: &[u8], position: zend_compile_position) -> Result<Value, PhpError> {
+    Php::execute_in(label, code, position)
+}
+
+/// Runs PHP statements (no `<?php` tag) from anywhere on the thread that booted PHP while a request is open, as
+/// [`Php::eval`] does (a native area holds no `Php` handle). Fails without touching PHP when no request is open.
+pub fn eval(label: &str, code: &str) -> Result<Value, PhpError> {
+    if !crate::boundary::alive() {
+        return Err(PhpError::Boot("no PHP request is open".to_owned()));
+    }
+    execute(
+        label,
+        code.as_bytes(),
+        _zend_compile_position_ZEND_COMPILE_POSITION_AFTER_OPEN_TAG,
+    )
 }

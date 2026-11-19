@@ -5,6 +5,8 @@ members = ["crates/*"]
 [workspace.package]
 edition = "2024"
 rust-version = "1.99"
+# Inherited only by the crates copied from speedyspec-server, which declare it there.
+license = "MIT"
 
 # Release binaries are downloaded; symbols only add size (PHP's own errors do not need them).
 [profile.release]
