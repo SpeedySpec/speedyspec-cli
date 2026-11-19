@@ -105,6 +105,15 @@ pub fn decode_backup_spec(
     }
     let exclude = path_list(&d, &props, "exclude")?;
     let preserve = path_list(&d, &props, "preserve")?;
+    // Keeping or leaving out the whole install would leave a backup with no files, or a restore that removes it.
+    for (name, paths) in [("exclude", &exclude), ("preserve", &preserve)] {
+        if let Some(i) = paths.iter().position(|p| p == "." || p.is_empty()) {
+            return Err(d.err(
+                &format!("{name}[{i}]"),
+                "must name a path inside the install, not the install itself",
+            ));
+        }
+    }
     if let Some(i) = preserve
         .iter()
         .position(|p| !include.iter().any(|inc| inside(p, inc)))
@@ -287,6 +296,8 @@ mod tests {
                 "prefixedColumns[0].column",
             ),
             (vec![("prefixedColumns", s("no"))], "prefixedColumns"),
+            (vec![("preserve", strings(&["."]))], "preserve[0]"),
+            (vec![("exclude", strings(&["."]))], "exclude[0]"),
             (vec![("appVersion", s("7 1"))], "appVersion"),
             (vec![("appVersion", s(""))], "appVersion"),
         ];
