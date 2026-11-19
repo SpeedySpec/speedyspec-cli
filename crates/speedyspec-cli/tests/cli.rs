@@ -779,10 +779,10 @@ fn fatal_in_php_script_keeps_stdout_clean() {
 }
 
 #[test]
-fn cli_has_no_legacy_wordpress_functions() {
+fn wordpress_hook_functions_available() {
     let out = run(&["wp-hooks"], &["wphooks"]);
     assert_eq!(out.code, 0, "{}", out.stderr);
-    assert_eq!(out.stdout, "no no 42 yes\n");
+    assert_eq!(out.stdout, "add_filter WP_Hook 42 v-x\n");
 }
 
 /// `scripts/check-copies.sh` passes on the repository and names a copied path whose files drifted.
@@ -790,24 +790,11 @@ fn cli_has_no_legacy_wordpress_functions() {
 fn check_copies_detects_drift() {
     let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let script = repo.join("scripts/check-copies.sh");
-    let ok = Command::new("bash")
-        .arg(&script)
-        .arg(&repo)
-        .output()
-        .unwrap();
-    assert!(
-        ok.status.success(),
-        "{}{}",
-        String::from_utf8_lossy(&ok.stdout),
-        String::from_utf8_lossy(&ok.stderr)
-    );
+    let ok = Command::new("bash").arg(&script).arg(&repo).output().unwrap();
+    assert!(ok.status.success(), "{}{}", String::from_utf8_lossy(&ok.stdout), String::from_utf8_lossy(&ok.stderr));
 
     let copy = tempfile::tempdir().unwrap();
-    std::fs::copy(
-        repo.join("copied-from.json"),
-        copy.path().join("copied-from.json"),
-    )
-    .unwrap();
+    std::fs::copy(repo.join("copied-from.json"), copy.path().join("copied-from.json")).unwrap();
     let status = Command::new("cp")
         .arg("-R")
         .arg(repo.join("crates"))
@@ -818,20 +805,9 @@ fn check_copies_detects_drift() {
         .unwrap();
     assert!(status.success());
     let _ = std::fs::remove_dir_all(copy.path().join("crates/speedyspec-cli"));
-    std::fs::write(
-        copy.path().join("crates/speedyspec-wp-hooks/src/lib.rs"),
-        "// drifted\n",
-    )
-    .unwrap();
-    let drifted = Command::new("bash")
-        .arg(&script)
-        .arg(copy.path())
-        .output()
-        .unwrap();
+    std::fs::write(copy.path().join("crates/speedyspec-wp-hooks/src/lib.rs"), "// drifted\n").unwrap();
+    let drifted = Command::new("bash").arg(&script).arg(copy.path()).output().unwrap();
     assert!(!drifted.status.success());
     let report = String::from_utf8_lossy(&drifted.stderr);
-    assert!(
-        report.contains("crates/speedyspec-wp-hooks") && !report.contains("crates/speedyspec-cqrs"),
-        "{report}"
-    );
+    assert!(report.contains("crates/speedyspec-wp-hooks") && !report.contains("crates/speedyspec-cqrs"), "{report}");
 }

@@ -1,6 +1,6 @@
 {
   "source": "packages/speedyspec-server",
-  "commit": "326c72b823cc2f8e987c193e83fd9d7893f8c1f3",
+  "commit": "971b48ca27c33db8c9aeadba3e4bbc90ba5378a1",
   "paths": {
     "compat/hooks": "1215921a1d135b006d36322ccf4aead8102d714436d8ba16b11807e5ef67c9a3",
     "crates/speedyspec-compat": "91a9243d7d6d2f080ed83230981cf09dad6dbc88eb15f0336a5ba44b52545eff",
@@ -12,7 +12,7 @@
     "crates/speedyspec-php-port-macros": "f87333806d09a524708929cb4973f0574ce89a9cd9ff205409f7e06d037e849c",
     "crates/speedyspec-wp-hooks": "d7d21fe0aca910ddb88bf6ffa024bf9598669d08188ec3afeebdf6c13e26abce",
     "crates/speedyspec-wp-hooks-memory": "273e9f9de6999d79395b129b6763d437445e6e42034a2d946a01999453984952",
-    "crates/speedyspec-wp-hooks-php": "2af408786cdb2d3b5c650dec98c2e9cb603cb8b63b5d66bcb86316cef40014e3",
+    "crates/speedyspec-wp-hooks-php": "a30356527d1854a4f6ae1212002da9c8da8719c2415203499e8b9729fa986944",
     "tests/php": "1439979388ca40596624c09927ccf7ed1c25dd33b0126a51668a42da996aa0dc"
   }
 }

@@ -81,7 +81,7 @@ impl NativeArea for HttpArea {
 
 /// The CLI process's own areas: the shared ones and `http_get`.
 pub fn cli_areas() -> Vec<Rc<dyn NativeArea>> {
-    let mut areas = crate::boot::native_areas();
+    let mut areas = crate::boot::wordpress_areas();
     areas.push(Rc::new(HttpArea));
     areas
 }
