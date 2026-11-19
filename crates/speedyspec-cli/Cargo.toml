@@ -11,6 +11,7 @@ path = "src/main.rs"
 
 [dependencies]
 speedyspec-driver = { path = "../speedyspec-driver" }
+speedyspec-backup = { path = "../speedyspec-backup" }
 speedyspec-composer = { path = "../speedyspec-composer" }
 speedyspec-driver-zip = { path = "../speedyspec-driver-zip" }
 speedyspec-db = { path = "../speedyspec-db" }
@@ -49,3 +50,5 @@ speedyspec-testkit = { path = "../speedyspec-testkit" }
 sha2 = "0.11"
 # The database tests make their own databases and users.
 mysql = { version = "28", default-features = false, features = ["minimal-rust", "rustls-tls-ring"] }
+flate2 = "1"
+tar = "0.4"

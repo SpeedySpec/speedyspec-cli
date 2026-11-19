@@ -248,7 +248,7 @@ pub fn list() -> Vec<Record> {
 }
 
 /// Now, as `2026-11-18T09:15:01Z`.
-fn now_rfc3339() -> String {
+pub(crate) fn now_rfc3339() -> String {
     let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |since| since.as_secs());

@@ -3,6 +3,7 @@
 mod app;
 mod app_target;
 mod attribution;
+mod backup_cmd;
 mod boot;
 mod commands;
 mod composer_area;

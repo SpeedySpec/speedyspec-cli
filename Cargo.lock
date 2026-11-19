@@ -2379,9 +2379,14 @@ dependencies = [
 name = "speedyspec-backup"
 version = "0.1.0"
 dependencies = [
+ "flate2",
+ "serde_json",
+ "speedyspec-driver",
  "speedyspec-hooks",
  "speedyspec-hooks-memory",
  "speedyspec-php",
+ "tar",
+ "tempfile",
 ]
 
 [[package]]
@@ -2389,12 +2394,14 @@ name = "speedyspec-cli"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "flate2",
  "libc",
  "mysql",
  "rpassword",
  "semver",
  "serde_json",
  "sha2 0.11.1",
+ "speedyspec-backup",
  "speedyspec-composer",
  "speedyspec-container",
  "speedyspec-container-php",
@@ -2412,6 +2419,7 @@ dependencies = [
  "speedyspec-testkit",
  "speedyspec-wp-hooks-memory",
  "speedyspec-wp-hooks-php",
+ "tar",
  "tempfile",
 ]
 

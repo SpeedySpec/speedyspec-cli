@@ -456,6 +456,41 @@ impl Connection {
         Ok(outcome)
     }
 
+    /// One value from the install's prefixed `table`: `value_column` of the row whose `key_column` is `key`. The
+    /// names must be letters, digits and underscores; the key is passed as a parameter.
+    pub fn site_value(
+        &mut self,
+        table: &str,
+        key_column: &str,
+        key: &str,
+        value_column: &str,
+    ) -> Result<Option<String>, DbError> {
+        let plain = |name: &str| {
+            !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        };
+        for name in [table, key_column, value_column] {
+            if !plain(name) {
+                return Err(DbError(format!(
+                    "{name:?} is not a plain table or column name"
+                )));
+            }
+        }
+        let full = format!("{}{table}", self.table_prefix);
+        let sql = format!(
+            "SELECT {} FROM {} WHERE {} = ? LIMIT 1",
+            quote_identifier(value_column),
+            quote_identifier(&full),
+            quote_identifier(key_column)
+        );
+        let found: Option<Option<Vec<u8>>> = self
+            .conn
+            .exec_first(sql, (key,))
+            .map_err(|e| self.failed(&format!("could not read {full}"), e))?;
+        Ok(found
+            .flatten()
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned()))
+    }
+
     /// Writes a dump of the tables: each dropped, created and filled, rows streamed from the
     /// server so no table is held in memory.
     pub fn export(&mut self, out: &mut dyn Write, options: &ExportOptions) -> Result<(), DbError> {
