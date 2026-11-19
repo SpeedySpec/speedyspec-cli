@@ -84,7 +84,18 @@ impl Manifest {
                 })
                 .unwrap_or_default(),
             engine: text(&json["database"]["engine"], "database engine")?,
-            table_prefix: text(&json["database"]["table_prefix"], "table prefix")?,
+            table_prefix: {
+                let prefix = text(&json["database"]["table_prefix"], "table prefix")?;
+                if !prefix
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                {
+                    return Err(format!(
+                        "the manifest's table prefix {prefix:?} is not letters, digits and underscores"
+                    ));
+                }
+                prefix
+            },
             site_url: optional(&json["site_url"]),
             source_install: text(&json["source"]["install"], "source install")?,
             source_driver: text(&json["source"]["driver"], "source driver")?,
@@ -117,6 +128,19 @@ mod tests {
     fn round_trips() {
         let m = sample();
         assert_eq!(Manifest::from_json(&m.to_json()).unwrap(), m);
+    }
+
+    #[test]
+    fn a_prefix_that_is_not_a_table_name_part_is_refused() {
+        let mut json = sample().to_json();
+        json["database"]["table_prefix"] = json!("wp`; drop");
+        assert!(
+            Manifest::from_json(&json)
+                .unwrap_err()
+                .contains("table prefix")
+        );
+        json["database"]["table_prefix"] = json!("");
+        assert_eq!(Manifest::from_json(&json).unwrap().table_prefix, "");
     }
 
     #[test]

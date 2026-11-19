@@ -55,6 +55,7 @@ fn walk(
     spec: &BackupSpec,
     skip: &[PathBuf],
     out: &mut Vec<PathBuf>,
+    warnings: &mut Vec<String>,
 ) -> Result<(), String> {
     let full = if relative == Path::new(".") {
         root.to_path_buf()
@@ -69,6 +70,15 @@ fn walk(
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(io_error("read", &full, e)),
     };
+    let kind = meta.file_type();
+    if !(kind.is_dir() || kind.is_file() || kind.is_symlink()) {
+        // A pipe, socket or device: nothing a restore could put back, so it is left out.
+        warnings.push(format!(
+            "{} is not a file, directory or link; it is left out of the backup",
+            relative.display()
+        ));
+        return Ok(());
+    }
     if relative != Path::new(".") {
         out.push(relative.to_path_buf());
     }
@@ -88,7 +98,7 @@ fn walk(
             } else {
                 relative.join(&name)
             };
-            walk(root, &child, spec, skip, out)?;
+            walk(root, &child, spec, skip, out, warnings)?;
         }
     }
     Ok(())
@@ -102,7 +112,7 @@ pub fn backup(
     db: &mut dyn SiteDatabase,
     mut manifest: Manifest,
     to: &Path,
-) -> Result<(), String> {
+) -> Result<Vec<String>, String> {
     let dir = to
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -137,9 +147,19 @@ pub fn backup(
         to.to_path_buf(),
     ];
     let mut entries = Vec::new();
+    let mut warnings = Vec::new();
     for include in &spec.include {
-        walk(root, Path::new(include), spec, &skip, &mut entries)?;
+        walk(
+            root,
+            Path::new(include),
+            spec,
+            &skip,
+            &mut entries,
+            &mut warnings,
+        )?;
     }
+    // Overlapping includes (`.` and `content`) would list an entry twice.
+    entries.sort();
     entries.dedup();
 
     let gz = GzEncoder::new(archive.as_file(), Compression::default());
@@ -169,7 +189,7 @@ pub fn backup(
     archive
         .persist(to)
         .map_err(|e| io_error("create", to, e.error))?;
-    Ok(())
+    Ok(warnings)
 }
 
 /// Reads a backup's manifest, which must be its first entry. Refuses what is not a backup speedyspec can read.
@@ -221,6 +241,12 @@ pub fn plan_move(
             Some((old.trim_end_matches('/').to_owned(), new.to_owned()))
         }
     };
+    if manifest.table_prefix.is_empty() && !to_prefix.is_empty() {
+        return Err(format!(
+            "the backup's tables have no table prefix, so they cannot be restored under {to_prefix}: every table \
+             and key would be renamed"
+        ));
+    }
     Ok(Move {
         from_prefix: manifest.table_prefix.clone(),
         to_prefix: to_prefix.to_owned(),
@@ -309,7 +335,16 @@ pub fn has_files(root: &Path, spec: &BackupSpec) -> bool {
     let keep: Vec<&String> = spec.preserve.iter().chain(spec.exclude.iter()).collect();
     let mut entries = Vec::new();
     for include in &spec.include {
-        if walk(root, Path::new(include), spec, &[], &mut entries).is_err() {
+        if walk(
+            root,
+            Path::new(include),
+            spec,
+            &[],
+            &mut entries,
+            &mut Vec::new(),
+        )
+        .is_err()
+        {
             return true;
         }
     }
@@ -673,7 +708,7 @@ pub(crate) mod tests {
             app_version: Some("1.0".into()),
             extensions: vec![],
             engine: "mysql".into(),
-            table_prefix: String::new(),
+            table_prefix: "wp_".into(),
             site_url: None,
             source_install: "blog".into(),
             source_driver: "zip".into(),
@@ -944,6 +979,75 @@ pub(crate) mod tests {
             let error = plan_move(&m, "wp_", Some(bad), &spec()).unwrap_err();
             assert!(error.contains("--url"), "{bad:?}: {error}");
         }
+    }
+
+    #[test]
+    fn a_backup_without_a_prefix_is_not_moved_to_one() {
+        let mut m = manifest();
+        m.table_prefix = String::new();
+        let error = plan_move(&m, "site_", None, &spec()).unwrap_err();
+        assert!(error.contains("no table prefix"), "{error}");
+        assert!(plan_move(&m, "", None, &spec()).is_ok());
+    }
+
+    #[test]
+    fn overlapping_includes_archive_each_entry_once() {
+        let root = site();
+        let out = tempfile::tempdir().unwrap();
+        let to = out.path().join("b.tar.gz");
+        let mut spec = spec();
+        spec.include = vec![".".into(), "content".into()];
+        backup(
+            root.path(),
+            &spec,
+            &mut FakeDatabase::new(),
+            manifest(),
+            &to,
+        )
+        .unwrap();
+        let names: Vec<String> = entries(&to).into_iter().map(|(n, _)| n).collect();
+        let uploads = names
+            .iter()
+            .filter(|n| *n == "files/content/uploads/a.txt")
+            .count();
+        assert_eq!(uploads, 1, "{names:?}");
+    }
+
+    #[test]
+    fn special_files_are_left_out_with_a_warning() {
+        let root = site();
+        let fifo = root.path().join("content/pipe");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let out = tempfile::tempdir().unwrap();
+        let to = out.path().join("b.tar.gz");
+        let warnings = backup(
+            root.path(),
+            &spec(),
+            &mut FakeDatabase::new(),
+            manifest(),
+            &to,
+        )
+        .unwrap();
+        assert!(
+            warnings.iter().any(|w| w.contains("content/pipe")),
+            "{warnings:?}"
+        );
+        let names: Vec<String> = entries(&to).into_iter().map(|(n, _)| n).collect();
+        assert!(!names.iter().any(|n| n.contains("pipe")), "{names:?}");
+        let m = read_manifest(&to).unwrap();
+        restore(
+            &to,
+            root.path(),
+            &spec(),
+            &mut FakeDatabase::new(),
+            &same_site(&m),
+            &mut Vec::new(),
+        )
+        .unwrap();
     }
 
     #[test]

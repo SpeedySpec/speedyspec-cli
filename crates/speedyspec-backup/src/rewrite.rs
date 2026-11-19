@@ -35,7 +35,24 @@ pub fn rewrite<'a>(statement: &'a [u8], plan: &Move, warnings: &mut Vec<String>)
     }
     match Rewriter::new(statement, plan, warnings).run() {
         Some(out) if out != statement => Cow::Owned(out),
-        _ => Cow::Borrowed(statement),
+        Some(_) => Cow::Borrowed(statement),
+        None => {
+            // A statement of a kind the move rewrites, in a form it cannot read, runs unmoved: say so.
+            let text = String::from_utf8_lossy(statement);
+            let start = text.trim_start();
+            let kind = start
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .to_ascii_uppercase();
+            if matches!(kind.as_str(), "INSERT" | "CREATE" | "DROP") {
+                let shown: String = start.chars().take(60).collect();
+                warnings.push(format!(
+                    "the statement {shown:?}… could not be read for the move; it runs as it is"
+                ));
+            }
+            Cow::Borrowed(statement)
+        }
     }
 }
 
@@ -606,6 +623,18 @@ mod tests {
             Cow::Borrowed(_)
         ));
         assert!(none.changes_nothing());
+    }
+
+    #[test]
+    fn a_statement_the_move_cannot_read_is_warned_about() {
+        let (out, warnings) = run("INSERT INTO `wp_t` VALUES (1, 'https://old.example')");
+        assert_eq!(out, "INSERT INTO `wp_t` VALUES (1, 'https://old.example')");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("could not be read for the move")),
+            "{warnings:?}"
+        );
     }
 
     #[test]
