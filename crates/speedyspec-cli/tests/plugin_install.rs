@@ -191,7 +191,7 @@ fn incompatible_contracts_are_refused() {
     let out = speedyspec(home.path(), &["self", "plugin", "install", &url, "--yes"]);
     assert_eq!(out.code, 1);
     assert!(
-        out.stderr.contains("^2.0") && out.stderr.contains("bundles 1.3.0"),
+        out.stderr.contains("^2.0") && out.stderr.contains("bundles 1.4.0"),
         "{}",
         out.stderr
     );
