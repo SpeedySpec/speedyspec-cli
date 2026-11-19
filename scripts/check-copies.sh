@@ -8,13 +8,22 @@
 # depends only on the files' contents and names. A drifted path is named, and the script fails.
 set -euo pipefail
 
+# SHA-256 of stdin: sha256sum (Linux) or shasum (macOS).
+sha256() {
+    if command -v sha256sum >/dev/null 2>&1; then
+        sha256sum | cut -d' ' -f1
+    else
+        shasum -a 256 | cut -d' ' -f1
+    fi
+}
+
 hash_dir() {
     (
         cd "$1"
         find . -type f ! -path './target/*' | LC_ALL=C sort | while IFS= read -r file; do
-            printf '%s %s\n' "$(shasum -a 256 < "$file" | cut -d' ' -f1)" "$file"
+            printf '%s %s\n' "$(sha256 < "$file")" "$file"
         done
-    ) | shasum -a 256 | cut -d' ' -f1
+    ) | sha256
 }
 
 if [ "${1:-}" = "--hash" ]; then
