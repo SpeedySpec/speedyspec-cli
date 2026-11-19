@@ -125,7 +125,7 @@ impl Maps {
             })?;
         }
         let text = serde_json::to_string_pretty(&self.to_json()).expect("maps are JSON");
-        fs::write(&path, text + "\n")
+        fs::write(path, text + "\n")
             .map_err(|e| ComposerError::new(format!("cannot write {}: {e}", path.display())))
     }
 
