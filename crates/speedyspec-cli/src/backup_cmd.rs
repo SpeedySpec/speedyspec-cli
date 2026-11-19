@@ -2,6 +2,7 @@
 //! backup holds comes from the app's plugin (`speedyspec_app_backup`, a `BackupSpec`); the archive, the dump and the
 //! move to a new URL and prefix are done in Rust (`speedyspec-backup`). Zip installs only, for now.
 
+use std::collections::BTreeMap;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
@@ -20,18 +21,10 @@ use crate::boot::{PhpReader, Runtime};
 
 const HOOK_BACKUP: &str = "speedyspec_app_backup";
 
-fn install_arg() -> Arg {
-    Arg::new("install")
-        .long("install")
-        .required(true)
-        .value_name("NAME")
-        .help("The install, as app installs lists it")
-}
-
 pub fn backup_clap() -> Clap {
     Clap::new("backup")
         .about("Write the install's files and database to one archive")
-        .arg(install_arg())
+        .args(crate::app_target::install_args())
         .arg(Arg::new("to").long("to").value_name("FILE").help(
             "The archive to write (default: <speedyspec home>/backups/<install>-<time>.tar.gz)",
         ))
@@ -120,10 +113,14 @@ pub fn open(settings: &DatabaseConnection) -> Result<LiveDatabase, String> {
 }
 
 /// The install's plugins and themes, as far as its app's plugin can tell; nothing when it cannot.
-fn extensions(runtime: &Runtime, name: &str) -> Vec<(String, String, Option<String>)> {
+fn extensions(
+    runtime: &Runtime,
+    name: &str,
+    cluster: Option<&BTreeMap<String, String>>,
+) -> Vec<(String, String, Option<String>)> {
     let mut found = Vec::new();
     for kind in [Kind::Plugin, Kind::Theme] {
-        if let Ok(shelf) = crate::extensions::Shelf::open(runtime, name, kind)
+        if let Ok(shelf) = crate::extensions::Shelf::open(runtime, name, cluster, kind)
             && let Ok(all) = shelf.list()
         {
             found.extend(
@@ -163,10 +160,17 @@ pub fn backup_dir(path: &Path) -> Result<(), String> {
 pub fn backup_to(
     runtime: &Runtime,
     name: &str,
+    cluster: Option<&BTreeMap<String, String>>,
     to: &Path,
     prefix: Option<&str>,
 ) -> Result<(), String> {
-    let target = Target::find(name)?;
+    let target = Target::find(name, cluster)?;
+    if target.cluster.is_some() {
+        app_target::workload(runtime, &target)?;
+        return Err(format!(
+            "backing up install {name} on Kubernetes is not done yet"
+        ));
+    }
     let root = target.install.root.clone().ok_or_else(|| {
         format!("install {name} is not on this machine; backups are for zip installs for now")
     })?;
@@ -182,7 +186,7 @@ pub fn backup_to(
         parts: record.parts.clone(),
         cli_version: crate::self_cmd::VERSION.to_owned(),
         app_version: spec.app_version.clone(),
-        extensions: extensions(runtime, name),
+        extensions: extensions(runtime, name, cluster),
         engine: settings.engine.clone(),
         table_prefix: String::new(),
         site_url: None,
@@ -219,7 +223,13 @@ pub fn run_backup(runtime: &Runtime, matches: &ArgMatches) -> i32 {
         );
         return 1;
     }
-    match backup_to(runtime, name, &to, None) {
+    match backup_to(
+        runtime,
+        name,
+        app_target::given_cluster_flags(matches).as_ref(),
+        &to,
+        None,
+    ) {
         Ok(()) => {
             eprintln!(
                 "speedyspec: the backup holds the site's database and secrets (such as its configuration); keep it private"
@@ -243,7 +253,7 @@ pub fn restore_clap() -> Clap {
                 .value_name("FILE")
                 .help("The backup, as app backup wrote it"),
         )
-        .arg(install_arg())
+        .args(crate::app_target::install_args())
         .arg(
             Arg::new("url")
                 .long("url")
@@ -279,10 +289,17 @@ pub fn run_restore(runtime: &Runtime, matches: &ArgMatches) -> i32 {
         Err(message) => return fail(&message),
     };
     // 2. The target.
-    let target = match Target::find(name) {
+    let cluster = app_target::given_cluster_flags(matches);
+    let target = match Target::find(name, cluster.as_ref()) {
         Ok(target) => target,
         Err(message) => return fail(&message),
     };
+    if target.cluster.is_some() {
+        return fail(&match app_target::workload(runtime, &target) {
+            Ok(_) => format!("restoring install {name} on Kubernetes is not done yet"),
+            Err(message) => message,
+        });
+    }
     let Some(root) = target.install.root.clone() else {
         return fail(&format!(
             "install {name} is not on this machine; restores are for zip installs for now"
@@ -372,7 +389,7 @@ pub fn run_restore(runtime: &Runtime, matches: &ArgMatches) -> i32 {
                 "there is no speedyspec home to keep the backup of what is there in; set SPEEDYSPEC_HOME",
             );
         };
-        if let Err(message) = backup_to(runtime, name, &path, Some(&to_prefix)) {
+        if let Err(message) = backup_to(runtime, name, cluster.as_ref(), &path, Some(&to_prefix)) {
             return fail(&format!(
                 "could not back up what is there first, so nothing was restored: {message}"
             ));

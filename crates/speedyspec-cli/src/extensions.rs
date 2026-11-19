@@ -4,6 +4,7 @@
 //! `ExtensionArchive`). The CLI does the file work: it downloads with the zip driver's checked extraction into a
 //! temporary directory beside the others and renames directories into place, so a failure leaves what was there.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -83,8 +84,20 @@ fn call(runtime: &Runtime, closure: &Value, args: &[Value]) -> Result<Value, Str
 
 impl<'a> Shelf<'a> {
     /// The `kind` shelf of install `name`.
-    pub fn open(runtime: &'a Runtime, name: &str, kind: Kind) -> Result<Shelf<'a>, String> {
-        let target = Target::find(name)?;
+    pub fn open(
+        runtime: &'a Runtime,
+        name: &str,
+        cluster: Option<&BTreeMap<String, String>>,
+        kind: Kind,
+    ) -> Result<Shelf<'a>, String> {
+        let target = Target::find(name, cluster)?;
+        if target.cluster.is_some() {
+            crate::app_target::workload(runtime, &target)?;
+            return Err(format!(
+                "{} commands on Kubernetes installs are not done yet",
+                kind.as_str()
+            ));
+        }
         let install = target.install;
         let root = install.root.clone().ok_or_else(|| {
             format!(

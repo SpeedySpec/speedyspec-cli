@@ -128,10 +128,7 @@ fn dispatch(runtime: &Runtime, args: &[String]) -> i32 {
         }
         Some(("php", sub)) => run_php(runtime, sub),
         Some(("self", sub)) => match sub.subcommand() {
-            Some(("database", database)) => crate::app_target::print_database(
-                runtime,
-                database.get_one::<String>("install").expect("required"),
-            ),
+            Some(("database", database)) => crate::app_target::print_database(runtime, database),
             Some(("plugin", plugin)) => match plugin.subcommand() {
                 Some(("list", _)) => list_plugins(runtime),
                 Some(("install", install)) => crate::plugin_cmd::install(install),

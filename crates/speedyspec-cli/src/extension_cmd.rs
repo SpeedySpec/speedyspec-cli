@@ -10,14 +10,6 @@ use crate::boot::Runtime;
 use crate::extensions::{Shelf, Updated};
 use crate::prompt::confirm;
 
-fn install_arg() -> Arg {
-    Arg::new("install")
-        .long("install")
-        .required(true)
-        .value_name("NAME")
-        .help("The install, as app installs lists it")
-}
-
 fn slug_arg(help: &'static str) -> Arg {
     Arg::new("slug").value_name("SLUG").help(help)
 }
@@ -34,7 +26,7 @@ pub fn clap(kind: Kind) -> Clap {
         .subcommand(
             Clap::new("list")
                 .about(format!("List the installed {things}s: slug, name, version"))
-                .arg(install_arg()),
+                .args(crate::app_target::install_args()),
         )
         .subcommand(
             Clap::new("install")
@@ -43,7 +35,7 @@ pub fn clap(kind: Kind) -> Clap {
                     slug_arg("The slug, optionally with @VERSION (the latest by default)")
                         .required(true),
                 )
-                .arg(install_arg()),
+                .args(crate::app_target::install_args()),
         )
         .subcommand(
             Clap::new("update")
@@ -56,7 +48,7 @@ pub fn clap(kind: Kind) -> Clap {
                         .conflicts_with("slug")
                         .help(format!("Update every installed {things} a source has")),
                 )
-                .arg(install_arg()),
+                .args(crate::app_target::install_args()),
         )
         .subcommand(
             Clap::new("delete")
@@ -68,7 +60,7 @@ pub fn clap(kind: Kind) -> Clap {
                         .action(ArgAction::SetTrue)
                         .help("Do not ask for confirmation"),
                 )
-                .arg(install_arg()),
+                .args(crate::app_target::install_args()),
         )
 }
 
@@ -119,7 +111,12 @@ pub fn run(runtime: &Runtime, kind: Kind, matches: &ArgMatches) -> i32 {
     if sub != "install" && spec.as_ref().is_some_and(|(_, v)| v.is_some()) {
         return usage("a version can be given only to install");
     }
-    let shelf = match Shelf::open(runtime, name, kind) {
+    let shelf = match Shelf::open(
+        runtime,
+        name,
+        crate::app_target::given_cluster_flags(args).as_ref(),
+        kind,
+    ) {
         Ok(shelf) => shelf,
         Err(message) => return failure(&message),
     };

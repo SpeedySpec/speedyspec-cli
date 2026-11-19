@@ -65,6 +65,7 @@ pub fn run(
     })?;
     let target = Target {
         install: install.clone(),
+        cluster: None,
     };
     for (index, task) in plan.tasks.iter().enumerate().skip(from) {
         let name = file_name(&task.file);

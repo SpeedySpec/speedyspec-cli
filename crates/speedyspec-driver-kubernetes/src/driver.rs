@@ -121,6 +121,24 @@ pub(crate) fn open(flags: &BTreeMap<String, String>) -> Result<Connection, Drive
     })
 }
 
+/// The flags that find an install in its cluster: which cluster, as whom, and the namespace its record is in. The
+/// maintenance commands take these.
+pub fn cluster_flags() -> Vec<DriverFlag> {
+    let mut flags = connection_flags();
+    flags.push(value_flag(
+        "namespace",
+        "Namespace the install's record is in [kubernetes]",
+    ));
+    flags
+}
+
+/// The connection and the namespace `cluster_flags` give.
+pub fn open_cluster(flags: &BTreeMap<String, String>) -> Result<(Connection, String), String> {
+    let namespace = namespace_of(flags).map_err(|e| e.0)?;
+    let connection = open(flags).map_err(|e| e.0)?;
+    Ok((connection, namespace))
+}
+
 /// The `--namespace` value, checked.
 pub(crate) fn namespace_of(flags: &BTreeMap<String, String>) -> Result<String, DriverError> {
     let namespace = flags.get("namespace").ok_or_else(|| {

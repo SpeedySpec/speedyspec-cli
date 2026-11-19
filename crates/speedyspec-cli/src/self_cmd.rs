@@ -47,7 +47,7 @@ pub fn clap() -> Clap {
         .subcommand(
             Clap::new("database")
                 .hide(true)
-                .arg(Arg::new("install").long("install").required(true)),
+                .args(crate::app_target::install_args()),
         )
         // Runs one task through the runner and prints what came back: for the tests.
         .subcommand(

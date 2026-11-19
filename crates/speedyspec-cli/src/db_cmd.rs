@@ -13,14 +13,6 @@ use crate::app_target::{self, Target};
 use crate::boot::Runtime;
 use crate::prompt::confirm;
 
-fn install_arg() -> Arg {
-    Arg::new("install")
-        .long("install")
-        .required(true)
-        .value_name("NAME")
-        .help("The install, as app installs lists it")
-}
-
 pub fn clap() -> Clap {
     let yes = Arg::new("yes")
         .long("yes")
@@ -33,7 +25,7 @@ pub fn clap() -> Clap {
         .subcommand(
             Clap::new("export")
                 .about("Write a dump of the install's tables")
-                .arg(install_arg())
+                .args(crate::app_target::install_args())
                 .arg(
                     Arg::new("to")
                         .long("to")
@@ -50,7 +42,7 @@ pub fn clap() -> Clap {
         .subcommand(
             Clap::new("import")
                 .about("Run a dump's statements against the install's database")
-                .arg(install_arg())
+                .args(crate::app_target::install_args())
                 .arg(
                     Arg::new("file")
                         .required(true)
@@ -62,23 +54,23 @@ pub fn clap() -> Clap {
         .subcommand(
             Clap::new("query")
                 .about("Run one SQL statement and print what it returns")
-                .arg(install_arg())
+                .args(crate::app_target::install_args())
                 .arg(Arg::new("sql").required(true).value_name("SQL")),
         )
         .subcommand(
             Clap::new("tables")
                 .about("List the tables: name, rows, data bytes, index bytes")
-                .arg(install_arg()),
+                .args(crate::app_target::install_args()),
         )
         .subcommand(
             Clap::new("size")
                 .about("Print the data and index bytes")
-                .arg(install_arg()),
+                .args(crate::app_target::install_args()),
         )
         .subcommand(
             Clap::new("check")
                 .about("Check each table: name, status, message")
-                .arg(install_arg()),
+                .args(crate::app_target::install_args()),
         )
 }
 
@@ -90,11 +82,18 @@ fn fail(message: impl std::fmt::Display) -> i32 {
 pub fn run(runtime: &Runtime, matches: &ArgMatches) -> i32 {
     let (command, sub) = matches.subcommand().expect("clap requires a db subcommand");
     let name = sub.get_one::<String>("install").expect("required");
-    let settings =
-        match Target::find(name).and_then(|target| app_target::database(runtime, &target)) {
-            Ok(settings) => settings,
-            Err(message) => return fail(message),
-        };
+    let settings = match Target::from_matches(name, sub).and_then(|target| {
+        if target.cluster.is_some() {
+            app_target::workload(runtime, &target)?;
+            return Err(format!(
+                "app db on Kubernetes install {name} is not done yet"
+            ));
+        }
+        app_target::database(runtime, &target)
+    }) {
+        Ok(settings) => settings,
+        Err(message) => return fail(message),
+    };
     if command == "import" {
         let question = format!(
             "This replaces tables in database {} on {}. Continue? [y/N]",
