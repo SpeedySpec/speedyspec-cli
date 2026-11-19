@@ -172,6 +172,304 @@ pub fn backup(
     Ok(())
 }
 
+/// Reads a backup's manifest, which must be its first entry. Refuses what is not a backup speedyspec can read.
+pub fn read_manifest(archive: &Path) -> Result<Manifest, String> {
+    let file = File::open(archive).map_err(|e| io_error("open", archive, e))?;
+    let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(file));
+    let not_backup = || format!("{} is not a speedyspec backup", archive.display());
+    let mut entries = tar.entries().map_err(|_| not_backup())?;
+    let mut first = entries
+        .next()
+        .ok_or_else(not_backup)?
+        .map_err(|_| not_backup())?;
+    if first.path().map_err(|_| not_backup())?.as_ref() != Path::new("manifest.json") {
+        return Err(format!(
+            "{}: the first entry is not manifest.json",
+            not_backup()
+        ));
+    }
+    let mut text = String::new();
+    io::Read::read_to_string(&mut first, &mut text).map_err(|_| not_backup())?;
+    let json: serde_json::Value = serde_json::from_str(&text).map_err(|_| not_backup())?;
+    Manifest::from_json(&json).map_err(|e| format!("{}: {e}", archive.display()))
+}
+
+/// The move a restore makes: from the backup's prefix to `to_prefix`, and from its site URL to `url` when given.
+pub fn plan_move(
+    manifest: &Manifest,
+    to_prefix: &str,
+    url: Option<&str>,
+    spec: &BackupSpec,
+) -> Result<Move, String> {
+    let urls = match url {
+        None => None,
+        Some(new) => {
+            let old = manifest.site_url.clone().ok_or(
+                "the backup does not say what its site URL was, so --url cannot be used; restore without it",
+            )?;
+            Some((old, new.trim_end_matches('/').to_owned()))
+        }
+    };
+    Ok(Move {
+        from_prefix: manifest.table_prefix.clone(),
+        to_prefix: to_prefix.to_owned(),
+        urls,
+        prefixed_columns: spec
+            .prefixed_columns
+            .iter()
+            .map(|c| (c.table.clone(), c.column.clone()))
+            .collect(),
+    })
+}
+
+/// Where a restore stopped, and what it had changed by then.
+#[derive(Debug)]
+pub struct RestoreError {
+    pub message: String,
+    /// Whether the database had been changed (some statements ran).
+    pub database_changed: bool,
+}
+
+/// A path under `files/`, checked: relative, only plain components.
+fn entry_path(path: &Path) -> Result<PathBuf, String> {
+    let rest = path
+        .strip_prefix("files")
+        .map_err(|_| format!("archive entry {} is not under files/", path.display()))?;
+    let mut clean = PathBuf::new();
+    for component in rest.components() {
+        match component {
+            std::path::Component::Normal(part) => clean.push(part),
+            std::path::Component::CurDir => {}
+            _ => {
+                return Err(format!(
+                    "archive entry {} was refused: it leaves the install",
+                    path.display()
+                ));
+            }
+        }
+    }
+    Ok(clean)
+}
+
+/// Whether a link at `relative` pointing to `target` stays inside the install.
+fn link_stays_inside(relative: &Path, target: &Path) -> bool {
+    if target.is_absolute() {
+        return false;
+    }
+    let mut depth: i64 = relative.components().count() as i64 - 1;
+    for component in target.components() {
+        match component {
+            std::path::Component::ParentDir => depth -= 1,
+            std::path::Component::Normal(_) => depth += 1,
+            std::path::Component::CurDir => {}
+            _ => return false,
+        }
+        if depth < 0 {
+            return false;
+        }
+    }
+    true
+}
+
+fn random_name(prefix: &str) -> String {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    format!("{WORK_PREFIX}{prefix}-{}-{nanos}", std::process::id())
+}
+
+/// The top-level entries a restore replaces: everything under the included paths (for `.`, every entry of the root
+/// and of the unpacked backup, except speedyspec's own work entries).
+fn scope(root: &Path, staged: &Path, spec: &BackupSpec) -> Result<Vec<PathBuf>, String> {
+    let mut found = Vec::new();
+    for include in &spec.include {
+        if include == "." {
+            for dir in [root, staged] {
+                for entry in fs::read_dir(dir)
+                    .map_err(|e| io_error("read", dir, e))?
+                    .filter_map(Result::ok)
+                {
+                    let name = entry.file_name();
+                    if !name.to_string_lossy().starts_with(WORK_PREFIX) {
+                        found.push(PathBuf::from(name));
+                    }
+                }
+            }
+        } else {
+            found.push(PathBuf::from(include));
+        }
+    }
+    found.sort();
+    found.dedup();
+    Ok(found)
+}
+
+/// Moves `from` to `to`, making `to`'s parents.
+fn move_to(from: &Path, to: &Path) -> io::Result<()> {
+    if let Some(parent) = to.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::rename(from, to)
+}
+
+/// Puts the unpacked files in place of the install's: each entry in scope is moved aside and its new copy moved in,
+/// then the target's own preserved and excluded paths are moved back into the new tree. On failure, what was moved
+/// is put back.
+fn swap(root: &Path, staged: &Path, spec: &BackupSpec) -> Result<(), String> {
+    let aside = root.join(random_name("restore-old"));
+    fs::create_dir(&aside).map_err(|e| io_error("create", &aside, e))?;
+    let mut moved_aside: Vec<PathBuf> = Vec::new();
+    let mut moved_in: Vec<PathBuf> = Vec::new();
+    let result = (|| -> Result<(), String> {
+        let keep: Vec<&String> = spec.preserve.iter().chain(spec.exclude.iter()).collect();
+        for entry in scope(root, staged, spec)? {
+            // A kept path at the top level stays where it is.
+            if keep.iter().any(|k| Path::new(k.as_str()) == entry) {
+                continue;
+            }
+            if fs::symlink_metadata(root.join(&entry)).is_ok() {
+                move_to(&root.join(&entry), &aside.join(&entry))
+                    .map_err(|e| io_error("move aside", &root.join(&entry), e))?;
+                moved_aside.push(entry.clone());
+            }
+            if fs::symlink_metadata(staged.join(&entry)).is_ok() {
+                move_to(&staged.join(&entry), &root.join(&entry))
+                    .map_err(|e| io_error("restore", &root.join(&entry), e))?;
+                moved_in.push(entry);
+            }
+        }
+        for kept in keep {
+            let old = aside.join(kept);
+            if fs::symlink_metadata(&old).is_err() {
+                continue;
+            }
+            let live = root.join(kept);
+            if let Ok(meta) = fs::symlink_metadata(&live) {
+                let removed = if meta.is_dir() {
+                    fs::remove_dir_all(&live)
+                } else {
+                    fs::remove_file(&live)
+                };
+                removed.map_err(|e| io_error("replace", &live, e))?;
+            }
+            move_to(&old, &live).map_err(|e| io_error("keep", &live, e))?;
+        }
+        Ok(())
+    })();
+    if result.is_err() {
+        for entry in &moved_in {
+            let _ = move_to(&root.join(entry), &staged.join(entry));
+        }
+        for entry in &moved_aside {
+            let _ = move_to(&aside.join(entry), &root.join(entry));
+        }
+    }
+    let _ = fs::remove_dir_all(&aside);
+    result
+}
+
+/// Restores `archive` into the install at `root` and its database: the files are unpacked beside the install, the
+/// dump is imported straight from the archive with `plan`, and only then are the files swapped in. The import's
+/// warnings are appended to `warnings`.
+pub fn restore(
+    archive: &Path,
+    root: &Path,
+    spec: &BackupSpec,
+    db: &mut dyn SiteDatabase,
+    plan: &Move,
+    warnings: &mut Vec<String>,
+) -> Result<(), RestoreError> {
+    let plain = |message: String| RestoreError {
+        message,
+        database_changed: false,
+    };
+    let staged = tempfile::Builder::new()
+        .prefix(&format!("{WORK_PREFIX}restore-"))
+        .tempdir_in(root)
+        .map_err(|e| plain(io_error("write in", root, e)))?;
+    let file = File::open(archive).map_err(|e| plain(io_error("open", archive, e)))?;
+    let mut tar = tar::Archive::new(flate2::read::GzDecoder::new(file));
+    let not_backup = || plain(format!("{} is not a speedyspec backup", archive.display()));
+    let mut imported = false;
+    for entry in tar.entries().map_err(|_| not_backup())? {
+        let mut entry = entry.map_err(|_| not_backup())?;
+        let path = entry.path().map_err(|_| not_backup())?.into_owned();
+        if path == Path::new("manifest.json") {
+            continue;
+        }
+        if path == Path::new("database.sql") {
+            let mut reader = io::BufReader::new(&mut entry);
+            db.import(&mut reader, plan, warnings)
+                .map_err(|message| RestoreError {
+                    message: format!(
+                        "the database import stopped: {message}; the files were not replaced"
+                    ),
+                    database_changed: true,
+                })?;
+            imported = true;
+            continue;
+        }
+        if imported {
+            return Err(RestoreError {
+                message: format!("{}: files after database.sql", archive.display()),
+                database_changed: true,
+            });
+        }
+        let relative = entry_path(&path).map_err(plain)?;
+        if relative.as_os_str().is_empty() {
+            continue;
+        }
+        let dest = staged.path().join(&relative);
+        match entry.header().entry_type() {
+            tar::EntryType::Directory => {
+                fs::create_dir_all(&dest).map_err(|e| plain(io_error("create", &dest, e)))?;
+            }
+            tar::EntryType::Regular | tar::EntryType::Continuous => {
+                if let Some(parent) = dest.parent() {
+                    fs::create_dir_all(parent).map_err(|e| plain(io_error("create", parent, e)))?;
+                }
+                entry
+                    .unpack(&dest)
+                    .map_err(|e| plain(io_error("unpack", &dest, e)))?;
+            }
+            tar::EntryType::Symlink => {
+                let target = entry
+                    .link_name()
+                    .map_err(|_| not_backup())?
+                    .ok_or_else(not_backup)?
+                    .into_owned();
+                if !link_stays_inside(&relative, &target) {
+                    return Err(plain(format!(
+                        "archive entry {} was refused: its link points outside the install",
+                        path.display()
+                    )));
+                }
+                if let Some(parent) = dest.parent() {
+                    fs::create_dir_all(parent).map_err(|e| plain(io_error("create", parent, e)))?;
+                }
+                std::os::unix::fs::symlink(&target, &dest)
+                    .map_err(|e| plain(io_error("create", &dest, e)))?;
+            }
+            other => {
+                return Err(plain(format!(
+                    "archive entry {} was refused: entries of type {other:?} are not restored",
+                    path.display()
+                )));
+            }
+        }
+    }
+    if !imported {
+        return Err(plain(format!("{} has no database.sql", archive.display())));
+    }
+    swap(root, staged.path(), spec).map_err(|message| RestoreError {
+        message: format!(
+            "the database was restored, but the files could not be swapped in: {message}"
+        ),
+        database_changed: true,
+    })
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
@@ -420,5 +718,243 @@ pub(crate) mod tests {
                 .any(|n| n.contains("b.tar.gz") || n.contains(".speedyspec-")),
             "{names:?}"
         );
+    }
+
+    // ----- restore
+
+    fn backed_up(root: &Path) -> (tempfile::TempDir, PathBuf) {
+        let out = tempfile::tempdir().unwrap();
+        let to = out.path().join("b.tar.gz");
+        backup(root, &spec(), &mut FakeDatabase::new(), manifest(), &to).unwrap();
+        (out, to)
+    }
+
+    fn same_site(m: &Manifest) -> Move {
+        plan_move(m, "wp_", None, &spec()).unwrap()
+    }
+
+    #[test]
+    fn restores_files_and_database_and_keeps_the_targets_own() {
+        let root = site();
+        let (_out, archive) = backed_up(root.path());
+        // Changes after the backup: a file deleted, one added, the config and the cache rewritten.
+        fs::remove_file(root.path().join("content/uploads/a.txt")).unwrap();
+        fs::write(root.path().join("new.php"), "added later").unwrap();
+        fs::write(
+            root.path().join("config.php"),
+            "<?php // the target's own config",
+        )
+        .unwrap();
+        fs::write(root.path().join("cache/page.html"), "fresh cache").unwrap();
+        let m = read_manifest(&archive).unwrap();
+        let mut db = FakeDatabase::new();
+        let mut warnings = Vec::new();
+        restore(
+            &archive,
+            root.path(),
+            &spec(),
+            &mut db,
+            &same_site(&m),
+            &mut warnings,
+        )
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(root.path().join("content/uploads/a.txt")).unwrap(),
+            "upload"
+        );
+        assert!(
+            !root.path().join("new.php").exists(),
+            "a file the backup did not have is gone"
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("config.php")).unwrap(),
+            "<?php // the target's own config"
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("cache/page.html")).unwrap(),
+            "fresh cache"
+        );
+        assert!(
+            fs::symlink_metadata(root.path().join("link.php"))
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(String::from_utf8_lossy(&db.imported).contains("CREATE TABLE `wp_options`"));
+        let leftovers: Vec<_> = fs::read_dir(root.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().starts_with(WORK_PREFIX))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+    }
+
+    #[test]
+    fn a_move_renames_the_prefix_in_the_import() {
+        let root = site();
+        let (_out, archive) = backed_up(root.path());
+        let m = read_manifest(&archive).unwrap();
+        let plan = plan_move(&m, "site_", Some("https://new.example.org/"), &spec()).unwrap();
+        assert_eq!(
+            plan.urls,
+            Some((
+                "https://old.example".into(),
+                "https://new.example.org".into()
+            ))
+        );
+        let mut db = FakeDatabase::new();
+        restore(
+            &archive,
+            root.path(),
+            &spec(),
+            &mut db,
+            &plan,
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert!(String::from_utf8_lossy(&db.imported).contains("CREATE TABLE `site_options`"));
+    }
+
+    #[test]
+    fn url_without_a_site_url_in_the_backup_is_refused() {
+        let mut m = manifest();
+        m.site_url = None;
+        let error = plan_move(&m, "wp_", Some("https://new.example.org"), &spec()).unwrap_err();
+        assert!(error.contains("--url cannot be used"), "{error}");
+    }
+
+    #[test]
+    fn a_failed_import_leaves_the_files_alone() {
+        let root = site();
+        let (_out, archive) = backed_up(root.path());
+        fs::write(root.path().join("index.php"), "<?php // changed").unwrap();
+        let m = read_manifest(&archive).unwrap();
+        let mut db = FakeDatabase::new();
+        db.fail_import = true;
+        let error = restore(
+            &archive,
+            root.path(),
+            &spec(),
+            &mut db,
+            &same_site(&m),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(error.database_changed);
+        assert!(
+            error.message.contains("statement 2")
+                && error.message.contains("files were not replaced"),
+            "{}",
+            error.message
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("index.php")).unwrap(),
+            "<?php // changed"
+        );
+    }
+
+    /// A gzipped tar with a manifest and one raw entry whose name and type are written by hand (the tar crate refuses
+    /// to build unsafe ones).
+    fn crafted(
+        name: &str,
+        kind: tar::EntryType,
+        link: Option<&str>,
+    ) -> (tempfile::TempDir, PathBuf) {
+        let out = tempfile::tempdir().unwrap();
+        let path = out.path().join("bad.tar.gz");
+        let gz = GzEncoder::new(File::create(&path).unwrap(), Compression::default());
+        let mut tar = tar::Builder::new(gz);
+        let manifest_bytes = serde_json::to_vec(&manifest().to_json()).unwrap();
+        let mut header = tar::Header::new_gnu();
+        header.set_size(manifest_bytes.len() as u64);
+        header.set_cksum();
+        tar.append_data(&mut header, "manifest.json", &manifest_bytes[..])
+            .unwrap();
+        let mut header = tar::Header::new_old();
+        header.as_old_mut().name[..name.len()].copy_from_slice(name.as_bytes());
+        header.set_entry_type(kind);
+        header.set_size(0);
+        header.set_mode(0o644);
+        if let Some(link) = link {
+            header.as_old_mut().linkname[..link.len()].copy_from_slice(link.as_bytes());
+        }
+        header.set_cksum();
+        tar.append(&header, &[][..]).unwrap();
+        tar.into_inner().unwrap().finish().unwrap();
+        (out, path)
+    }
+
+    #[test]
+    fn bad_archives_are_refused_before_anything_changes() {
+        let root = site();
+        let before = fs::read_to_string(root.path().join("index.php")).unwrap();
+        let junk = tempfile::NamedTempFile::new().unwrap();
+        fs::write(junk.path(), "not a gzip file").unwrap();
+        assert!(
+            read_manifest(junk.path())
+                .unwrap_err()
+                .contains("is not a speedyspec backup")
+        );
+        let (_d, escape) = crafted("files/../../evil.php", tar::EntryType::Regular, None);
+        let (_e, link) = crafted(
+            "files/link",
+            tar::EntryType::Symlink,
+            Some("../../etc/passwd"),
+        );
+        let (_f, device) = crafted("files/dev", tar::EntryType::Char, None);
+        for (archive, expected) in [
+            (&escape, "leaves the install"),
+            (&link, "points outside"),
+            (&device, "are not restored"),
+        ] {
+            let m = read_manifest(archive).unwrap();
+            let error = restore(
+                archive,
+                root.path(),
+                &spec(),
+                &mut FakeDatabase::new(),
+                &same_site(&m),
+                &mut Vec::new(),
+            )
+            .unwrap_err();
+            assert!(error.message.contains(expected), "{}", error.message);
+            assert!(!error.database_changed);
+        }
+        assert_eq!(
+            fs::read_to_string(root.path().join("index.php")).unwrap(),
+            before
+        );
+        assert!(!root.path().parent().unwrap().join("evil.php").exists());
+        // Only a manifest: no database.
+        let (_g, empty) = crafted("files/ok.txt", tar::EntryType::Regular, None);
+        let m = read_manifest(&empty).unwrap();
+        let error = restore(
+            &empty,
+            root.path(),
+            &spec(),
+            &mut FakeDatabase::new(),
+            &same_site(&m),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(
+            error.message.contains("has no database.sql"),
+            "{}",
+            error.message
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("index.php")).unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn links_inside_the_install_are_fine() {
+        assert!(link_stays_inside(Path::new("a/b/link"), Path::new("../c")));
+        assert!(!link_stays_inside(Path::new("link"), Path::new("../x")));
+        assert!(!link_stays_inside(
+            Path::new("a/link"),
+            Path::new("/etc/passwd")
+        ));
     }
 }

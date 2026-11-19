@@ -83,6 +83,20 @@ impl Database {
         self.admin.query_drop(sql).unwrap();
     }
 
+    fn value(&mut self, sql: &str) -> Option<String> {
+        self.admin
+            .query_drop(format!("USE `{}`", self.name))
+            .unwrap();
+        self.admin.query_first(sql).unwrap()
+    }
+
+    fn tables(&mut self) -> Vec<String> {
+        self.admin
+            .query_drop(format!("USE `{}`", self.name))
+            .unwrap();
+        self.admin.query("SHOW TABLES").unwrap()
+    }
+
     fn json(&self, prefix: &str) -> String {
         serde_json::json!({
             "host": self.host, "port": self.port, "database": self.name,
@@ -116,7 +130,7 @@ fn app_zip() -> Vec<u8> {
 /// A `backup-app` install named `name` whose db.json is `db_json`.
 struct Site {
     home: PathBuf,
-    _base: TempDir,
+    base: TempDir,
     name: String,
 }
 
@@ -141,7 +155,7 @@ fn install(home: &Path, server: &Server, name: &str, db_json: &str) -> Site {
     fs::write(base.path().join("db.json"), db_json).unwrap();
     Site {
         home: home.to_path_buf(),
-        _base: base,
+        base,
         name: name.to_owned(),
     }
 }
@@ -322,4 +336,235 @@ fn the_password_is_nowhere_in_the_manifest_or_output() {
             "{label}"
         );
     }
+}
+
+// ----- app restore
+
+/// A source database with the options a WordPress-like app has: the site URL, a serialized value holding it, and a
+/// key that carries the prefix.
+fn fill_source(db: &mut Database, prefix: &str) {
+    db.exec(&format!(
+        "CREATE TABLE `{prefix}options` (`option_name` varchar(191) PRIMARY KEY, `option_value` longtext)"
+    ));
+    db.exec(&format!(
+        "INSERT INTO `{prefix}options` VALUES ('siteurl','https://old.example'), \
+         ('widget','a:1:{{s:3:\"url\";s:21:\"https://old.example/x\";}}'), \
+         ('{prefix}user_roles','a:0:{{}}')"
+    ));
+}
+
+#[test]
+#[ignore = "needs scripts/mysql.sh up"]
+fn restore_over_content_needs_yes_when_not_interactive() {
+    for (label, url) in servers() {
+        let mut db = Database::new(&url, "yes");
+        fill_source(&mut db, "wp_");
+        let (home, server) = (
+            TempDir::new().unwrap(),
+            Server::start(vec![("/app.zip", Route::ok(app_zip()))]),
+        );
+        let site = install(home.path(), &server, "blog", &db.json("wp_"));
+        let archive = home.path().join("b.tar.gz");
+        assert_eq!(site.backup(&archive).code, 0, "{label}");
+        fs::write(site.base.path().join("index.php"), "changed").unwrap();
+        let out = site.run(&[
+            "app",
+            "restore",
+            archive.to_str().unwrap(),
+            "--install",
+            "blog",
+        ]);
+        assert_eq!(out.code, 2, "{label}: {}", out.stderr);
+        assert_eq!(
+            fs::read_to_string(site.base.path().join("index.php")).unwrap(),
+            "changed",
+            "{label}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "needs scripts/mysql.sh up"]
+fn same_site_restore_undoes_a_change() {
+    for (label, url) in servers() {
+        let mut db = Database::new(&url, "same");
+        fill_source(&mut db, "wp_");
+        let (home, server) = (
+            TempDir::new().unwrap(),
+            Server::start(vec![("/app.zip", Route::ok(app_zip()))]),
+        );
+        let site = install(home.path(), &server, "blog", &db.json("wp_"));
+        let archive = home.path().join("b.tar.gz");
+        assert_eq!(site.backup(&archive).code, 0, "{label}");
+        db.exec("DELETE FROM `wp_options` WHERE option_name = 'widget'");
+        fs::write(site.base.path().join("index.php"), "changed").unwrap();
+        let out = site.run(&[
+            "app",
+            "restore",
+            archive.to_str().unwrap(),
+            "--install",
+            "blog",
+            "--yes",
+        ]);
+        assert_eq!(out.code, 0, "{label}: {}", out.stderr);
+        assert!(
+            db.value("SELECT option_value FROM wp_options WHERE option_name = 'widget'")
+                .is_some(),
+            "{label}"
+        );
+        assert_eq!(
+            fs::read_to_string(site.base.path().join("index.php")).unwrap(),
+            "<?php // the site",
+            "{label}"
+        );
+        assert!(
+            !out.stderr.contains(SECRET_MARK) && !out.stdout.contains(SECRET_MARK),
+            "{label}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "needs scripts/mysql.sh up"]
+fn restore_to_another_url_and_prefix() {
+    for (label, url) in servers() {
+        let mut source_db = Database::new(&url, "src");
+        fill_source(&mut source_db, "wp_");
+        let mut target_db = Database::new(&url, "dst");
+        let (home, server) = (
+            TempDir::new().unwrap(),
+            Server::start(vec![("/app.zip", Route::ok(app_zip()))]),
+        );
+        let source = install(home.path(), &server, "source", &source_db.json("wp_"));
+        let target = install(home.path(), &server, "target", &target_db.json("site_"));
+        let target_config = fs::read_to_string(target.base.path().join("db.json")).unwrap();
+        let archive = home.path().join("b.tar.gz");
+        assert_eq!(source.backup(&archive).code, 0, "{label}");
+        let out = target.run(&[
+            "app",
+            "restore",
+            archive.to_str().unwrap(),
+            "--install",
+            "target",
+            "--url",
+            "https://new.example.org",
+        ]);
+        assert_eq!(out.code, 0, "{label}: {}", out.stderr);
+        assert_eq!(target_db.tables(), ["site_options"], "{label}");
+        assert_eq!(
+            target_db
+                .value("SELECT option_value FROM site_options WHERE option_name = 'siteurl'")
+                .as_deref(),
+            Some("https://new.example.org"),
+            "{label}"
+        );
+        assert_eq!(
+            target_db
+                .value("SELECT option_value FROM site_options WHERE option_name = 'widget'")
+                .as_deref(),
+            Some("a:1:{s:3:\"url\";s:25:\"https://new.example.org/x\";}"),
+            "{label}"
+        );
+        assert!(
+            target_db
+                .value(
+                    "SELECT option_value FROM site_options WHERE option_name = 'site_user_roles'"
+                )
+                .is_some(),
+            "{label}"
+        );
+        assert_eq!(
+            fs::read_to_string(target.base.path().join("db.json")).unwrap(),
+            target_config,
+            "{label}"
+        );
+        // The empty target had nothing to back up first.
+        assert!(
+            !out.stderr.contains("backed up to"),
+            "{label}: {}",
+            out.stderr
+        );
+    }
+}
+
+#[test]
+#[ignore = "needs scripts/mysql.sh up"]
+fn a_restore_takes_a_backup_first() {
+    for (label, url) in servers() {
+        let mut db = Database::new(&url, "first");
+        fill_source(&mut db, "wp_");
+        let (home, server) = (
+            TempDir::new().unwrap(),
+            Server::start(vec![("/app.zip", Route::ok(app_zip()))]),
+        );
+        let site = install(home.path(), &server, "blog", &db.json("wp_"));
+        let archive = home.path().join("b.tar.gz");
+        assert_eq!(site.backup(&archive).code, 0, "{label}");
+        let out = site.run(&[
+            "app",
+            "restore",
+            archive.to_str().unwrap(),
+            "--install",
+            "blog",
+            "--yes",
+        ]);
+        assert_eq!(out.code, 0, "{label}: {}", out.stderr);
+        assert!(
+            out.stderr.contains("what was there is backed up to"),
+            "{label}: {}",
+            out.stderr
+        );
+        let backups: Vec<_> = fs::read_dir(home.path().join("backups"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            backups
+                .iter()
+                .any(|n| n.starts_with("blog-before-restore-")),
+            "{label}: {backups:?}"
+        );
+    }
+}
+
+#[test]
+fn a_backup_of_another_app_is_refused() {
+    let (home, server) = (
+        TempDir::new().unwrap(),
+        Server::start(vec![("/app.zip", Route::ok(app_zip()))]),
+    );
+    let site = install(home.path(), &server, "blog", &unreachable_db());
+    let archive = home.path().join("other.tar.gz");
+    let manifest = serde_json::json!({
+        "format": 1, "app": "something-else", "parts": [], "cli_version": "1", "app_version": null,
+        "extensions": [], "database": {"engine": "mysql", "table_prefix": "wp_"}, "site_url": null,
+        "source": {"install": "x", "driver": "zip"}, "created_at": "2026-11-19T10:00:00Z",
+    });
+    let bytes = serde_json::to_vec(&manifest).unwrap();
+    let gz = flate2::write::GzEncoder::new(
+        File::create(&archive).unwrap(),
+        flate2::Compression::default(),
+    );
+    let mut tar = tar::Builder::new(gz);
+    let mut header = tar::Header::new_gnu();
+    header.set_size(bytes.len() as u64);
+    header.set_cksum();
+    tar.append_data(&mut header, "manifest.json", &bytes[..])
+        .unwrap();
+    tar.into_inner().unwrap().finish().unwrap();
+    let out = site.run(&[
+        "app",
+        "restore",
+        archive.to_str().unwrap(),
+        "--install",
+        "blog",
+        "--yes",
+    ]);
+    assert_eq!(out.code, 1, "{}", out.stderr);
+    assert!(
+        out.stderr.contains("is of a something-else install"),
+        "{}",
+        out.stderr
+    );
 }

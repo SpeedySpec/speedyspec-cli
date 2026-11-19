@@ -6,7 +6,7 @@ use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
 use clap::{Arg, ArgAction, ArgMatches, Command as Clap};
-use speedyspec_backup::flow::{SiteDatabase, backup};
+use speedyspec_backup::flow::{SiteDatabase, backup, plan_move, read_manifest, restore};
 use speedyspec_backup::manifest::Manifest;
 use speedyspec_backup::rewrite::{Move, rewrite};
 use speedyspec_db::{Connection, ExportOptions};
@@ -217,6 +217,171 @@ pub fn run_backup(runtime: &Runtime, matches: &ArgMatches) -> i32 {
         Err(message) => {
             eprintln!("speedyspec: {message}");
             1
+        }
+    }
+}
+
+pub fn restore_clap() -> Clap {
+    Clap::new("restore")
+        .about("Put a backup back, onto the same site or onto another URL and table prefix")
+        .arg(
+            Arg::new("file")
+                .required(true)
+                .value_name("FILE")
+                .help("The backup, as app backup wrote it"),
+        )
+        .arg(install_arg())
+        .arg(
+            Arg::new("url")
+                .long("url")
+                .value_name("URL")
+                .help("The target site's URL, when it differs from the backup's"),
+        )
+        .arg(
+            Arg::new("table-prefix")
+                .long("table-prefix")
+                .value_name("PREFIX")
+                .help("The table prefix to restore under (default: the target's own)"),
+        )
+        .arg(
+            Arg::new("yes")
+                .long("yes")
+                .action(ArgAction::SetTrue)
+                .help("Do not ask before restoring over a site that has content"),
+        )
+}
+
+fn fail(message: &str) -> i32 {
+    eprintln!("speedyspec: {message}");
+    1
+}
+
+/// `app restore <file> --install <name> [--url <new>] [--table-prefix <prefix>] [--yes]`.
+pub fn run_restore(runtime: &Runtime, matches: &ArgMatches) -> i32 {
+    let name = matches.get_one::<String>("install").expect("required");
+    let archive = PathBuf::from(matches.get_one::<String>("file").expect("required"));
+    // 1. The archive.
+    let manifest = match read_manifest(&archive) {
+        Ok(manifest) => manifest,
+        Err(message) => return fail(&message),
+    };
+    // 2. The target.
+    let target = match Target::find(name) {
+        Ok(target) => target,
+        Err(message) => return fail(&message),
+    };
+    let Some(root) = target.install.root.clone() else {
+        return fail(&format!(
+            "install {name} is not on this machine; restores are for zip installs for now"
+        ));
+    };
+    if manifest.app != target.install.app {
+        return fail(&format!(
+            "the backup is of a {} install, and {name} is {}",
+            manifest.app, target.install.app
+        ));
+    }
+    if manifest.parts != target.install.parts {
+        eprintln!(
+            "speedyspec: warning: the backup has parts [{}] and {name} has [{}]",
+            manifest.parts.join(", "),
+            target.install.parts.join(", ")
+        );
+    }
+    let spec = match spec(runtime, &target.install) {
+        Ok(spec) => spec,
+        Err(message) => return fail(&message),
+    };
+    let settings = match app_target::database(runtime, &target) {
+        Ok(settings) => settings,
+        Err(message) => return fail(&message),
+    };
+    // 3. The move.
+    let to_prefix = match matches.get_one::<String>("table-prefix") {
+        Some(prefix) if !speedyspec_driver::is_sql_name(prefix) => {
+            eprintln!("speedyspec: --table-prefix must be letters, digits and underscores");
+            return 2;
+        }
+        Some(prefix) => {
+            if *prefix != settings.table_prefix {
+                eprintln!(
+                    "speedyspec: warning: {name}'s configuration names the prefix {}; it is kept as it is, so update it to {prefix}",
+                    settings.table_prefix
+                );
+            }
+            prefix.clone()
+        }
+        None => settings.table_prefix.clone(),
+    };
+    let plan = match plan_move(
+        &manifest,
+        &to_prefix,
+        matches.get_one::<String>("url").map(String::as_str),
+        &spec,
+    ) {
+        Ok(plan) => plan,
+        Err(message) => return fail(&message),
+    };
+    let mut db = match open(&settings) {
+        Ok(db) => db,
+        Err(message) => return fail(&message),
+    };
+    // 4. Ask.
+    let has_content = match db.has_prefixed_tables() {
+        Ok(found) => found,
+        Err(message) => return fail(&message),
+    };
+    if has_content {
+        let question =
+            format!("Restore over the site in {name}? Its files and database are replaced. [y/N]");
+        if let Err(code) = crate::prompt::confirm(matches, &question) {
+            return code;
+        }
+    }
+    // 5. What is there now, so the restore can be undone.
+    let undo = if has_content {
+        let Some(path) = default_path(name, "-before-restore") else {
+            return fail(
+                "there is no speedyspec home to keep the backup of what is there in; set SPEEDYSPEC_HOME",
+            );
+        };
+        if let Err(message) = backup_to(runtime, name, &path) {
+            return fail(&format!(
+                "could not back up what is there first, so nothing was restored: {message}"
+            ));
+        }
+        eprintln!(
+            "speedyspec: what was there is backed up to {}",
+            path.display()
+        );
+        Some(path)
+    } else {
+        None
+    };
+    // 6 to 8. Unpack, import, swap.
+    let mut warnings = Vec::new();
+    let result = restore(&archive, &root, &spec, &mut db, &plan, &mut warnings);
+    for warning in &warnings {
+        eprintln!("speedyspec: warning: {warning}");
+    }
+    match result {
+        Ok(()) => {
+            let _ = writeln!(
+                std::io::stdout().lock(),
+                "restored {} into {name}",
+                archive.display()
+            );
+            0
+        }
+        Err(error) => {
+            let undo = match (&undo, error.database_changed) {
+                (Some(path), true) => format!(
+                    "; to undo it, run speedyspec app restore {} --install {name} --yes",
+                    path.display()
+                ),
+                _ => String::new(),
+            };
+            fail(&format!("{}{undo}", error.message))
         }
     }
 }
