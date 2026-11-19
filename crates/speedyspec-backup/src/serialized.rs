@@ -40,6 +40,26 @@ fn plain(value: &[u8], from: &[u8], to: &[u8]) -> Vec<u8> {
 }
 
 fn rewrite(value: &[u8], from: &[u8], to: &[u8], depth: usize) -> Vec<u8> {
+    // Whitespace around a serialized value (which PHP's unserialize does not accept, but apps trim) is kept.
+    let start = value
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .unwrap_or(value.len());
+    let end = value
+        .iter()
+        .rposition(|b| !b.is_ascii_whitespace())
+        .map_or(start, |p| p + 1);
+    if (start > 0 || end < value.len()) && start < end {
+        let core = rewrite_exact(&value[start..end], from, to, depth);
+        let mut out = value[..start].to_vec();
+        out.extend_from_slice(&core);
+        out.extend_from_slice(&value[end..]);
+        return out;
+    }
+    rewrite_exact(value, from, to, depth)
+}
+
+fn rewrite_exact(value: &[u8], from: &[u8], to: &[u8], depth: usize) -> Vec<u8> {
     if depth < MAX_DEPTH {
         let mut parser = Parser {
             input: value,
@@ -350,6 +370,14 @@ mod tests {
         assert_eq!(
             r(r#"s:19:"https://old.example";extra"#),
             r#"s:19:"https://new.example.org";extra"#
+        );
+    }
+
+    #[test]
+    fn whitespace_around_a_serialized_value_is_kept() {
+        assert_eq!(
+            r("  s:19:\"https://old.example\";\n"),
+            "  s:23:\"https://new.example.org\";\n"
         );
     }
 

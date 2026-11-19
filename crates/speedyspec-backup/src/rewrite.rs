@@ -20,11 +20,28 @@ pub struct Move {
     /// `(table without prefix, column, keys)` whose values carry the prefix: with `keys`, only the prefix followed by
     /// exactly one of them; without, every value that starts with the prefix.
     pub prefixed_columns: Vec<(String, String, Option<Vec<String>>)>,
+    /// `(table without prefix, column)` whose values keep the old URL (identifiers that only look like links).
+    pub keep_urls: Vec<(String, String)>,
 }
 
 impl Move {
     pub fn changes_nothing(&self) -> bool {
         self.from_prefix == self.to_prefix && self.urls.as_ref().is_none_or(|(old, new)| old == new)
+    }
+}
+
+/// `text` from its first token, past leading whitespace and `--`, `#` and `/* */` comments.
+fn past_comments(text: &str) -> &str {
+    let mut rest = text.trim_start();
+    loop {
+        rest = if rest.starts_with("--") || rest.starts_with('#') {
+            rest.split_once('\n').map_or("", |(_, after)| after)
+        } else if let Some(body) = rest.strip_prefix("/*") {
+            body.split_once("*/").map_or("", |(_, after)| after)
+        } else {
+            return rest;
+        }
+        .trim_start();
     }
 }
 
@@ -35,7 +52,24 @@ pub fn rewrite<'a>(statement: &'a [u8], plan: &Move, warnings: &mut Vec<String>)
     }
     match Rewriter::new(statement, plan, warnings).run() {
         Some(out) if out != statement => Cow::Owned(out),
-        _ => Cow::Borrowed(statement),
+        Some(_) => Cow::Borrowed(statement),
+        None => {
+            // A statement of a kind the move rewrites, in a form it cannot read, runs unmoved: say so.
+            let text = String::from_utf8_lossy(statement);
+            let start = past_comments(&text);
+            let kind = start
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .to_ascii_uppercase();
+            if matches!(kind.as_str(), "INSERT" | "CREATE" | "DROP") {
+                let shown: String = start.chars().take(60).collect();
+                warnings.push(format!(
+                    "the statement {shown:?}… could not be read for the move; it runs as it is"
+                ));
+            }
+            Cow::Borrowed(statement)
+        }
     }
 }
 
@@ -254,6 +288,17 @@ impl<'a, 'w> Rewriter<'a, 'w> {
                 })
             })
             .collect();
+        let keeps: Vec<bool> = columns
+            .iter()
+            .map(|column| {
+                base.as_ref().is_some_and(|base| {
+                    self.plan
+                        .keep_urls
+                        .iter()
+                        .any(|(table, c)| table == base && c == column)
+                })
+            })
+            .collect();
         self.copy_space();
         if !self.copy_words(&["VALUES"]) {
             return None;
@@ -269,7 +314,10 @@ impl<'a, 'w> Rewriter<'a, 'w> {
             let mut index = 0;
             loop {
                 self.copy_space();
-                self.value(prefixed.get(index).and_then(Option::as_ref))?;
+                self.value(
+                    prefixed.get(index).and_then(Option::as_ref),
+                    keeps.get(index).copied().unwrap_or(false),
+                )?;
                 index += 1;
                 self.copy_space();
                 match self.peek()? {
@@ -363,7 +411,7 @@ impl<'a, 'w> Rewriter<'a, 'w> {
 
     /// One value of a row.
     /// `prefixed` is `None` for a plain column, or the column's keys (`Some(&None)` for every prefixed value).
-    fn value(&mut self, prefixed: Option<&Option<Vec<String>>>) -> Option<()> {
+    fn value(&mut self, prefixed: Option<&Option<Vec<String>>>, keep_url: bool) -> Option<()> {
         match self.peek()? {
             b'\'' => {
                 let text = self.string()?;
@@ -378,7 +426,9 @@ impl<'a, 'w> Rewriter<'a, 'w> {
                     renamed.extend_from_slice(rest);
                     text = Cow::Owned(renamed);
                 }
-                if let Some((old, new)) = &self.plan.urls {
+                if let Some((old, new)) = &self.plan.urls
+                    && !keep_url
+                {
                     let replaced =
                         serialized::replace(&text, old.as_bytes(), new.as_bytes()).into_owned();
                     text = Cow::Owned(replaced);
@@ -472,6 +522,7 @@ mod tests {
                 ),
                 ("usermeta".into(), "meta_key".into(), None),
             ],
+            keep_urls: vec![("posts".into(), "guid".into())],
         }
     }
 
@@ -599,6 +650,7 @@ mod tests {
             to_prefix: "wp_".into(),
             urls: None,
             prefixed_columns: Vec::new(),
+            keep_urls: Vec::new(),
         };
         let insert = b"INSERT INTO `wp_t` (`a`) VALUES\n('x')";
         assert!(matches!(
@@ -606,6 +658,40 @@ mod tests {
             Cow::Borrowed(_)
         ));
         assert!(none.changes_nothing());
+    }
+
+    #[test]
+    fn a_statement_the_move_cannot_read_is_warned_about() {
+        let (out, warnings) = run("INSERT INTO `wp_t` VALUES (1, 'https://old.example')");
+        assert_eq!(out, "INSERT INTO `wp_t` VALUES (1, 'https://old.example')");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("could not be read for the move")),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn columns_that_keep_their_urls_are_not_moved() {
+        let (out, _) = run(
+            "INSERT INTO `wp_posts` (`ID`,`guid`,`post_content`) VALUES\n(1,'https://old.example/?p=1','see https://old.example')",
+        );
+        assert_eq!(
+            out,
+            "INSERT INTO `site_posts` (`ID`,`guid`,`post_content`) VALUES\n(1,'https://old.example/?p=1','see https://new.example.org')"
+        );
+    }
+
+    #[test]
+    fn the_warning_looks_past_leading_comments() {
+        let (_, warnings) = run("-- a comment\n/* another */ INSERT INTO `wp_t` VALUES (1)");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("could not be read for the move")),
+            "{warnings:?}"
+        );
     }
 
     #[test]

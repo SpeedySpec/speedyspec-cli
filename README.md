@@ -331,6 +331,11 @@ The move's limits:
 - A constraint name that does not start with the prefix (`fk_wp_…`) keeps its name.
 - Binary columns are copied as they are, without a URL replace.
 
+Pipes, sockets and devices are left out of a backup, with a warning. A backup or restore that is
+killed part way can leave its work behind: a `.speedyspec-dump-…` temporary dump (readable only by
+you) beside the archive, or a `.speedyspec-restore-…` directory inside the install. Remove them
+once nothing is running.
+
 Backups and restores are for zip installs for now.
 
 ## Installing into Kubernetes

@@ -23,6 +23,25 @@ const HOOK_SOURCES: &str = "speedyspec_extension_sources";
 /// Entries the CLI makes while it works; never plugins or themes.
 const WORK_PREFIX: &str = ".speedyspec-";
 
+/// How version `a` compares to `b` by their numeric parts (`5.3.10` after `5.3.9`, `2.0` the same as `2.0.0`); `None`
+/// when either is not plain numbers, so an unusual version never blocks an update.
+fn compare(a: &str, b: &str) -> Option<std::cmp::Ordering> {
+    let parts = |v: &str| -> Option<Vec<u64>> { v.split('.').map(|p| p.parse().ok()).collect() };
+    let (mut a, mut b) = (parts(a)?, parts(b)?);
+    let len = a.len().max(b.len());
+    a.resize(len, 0);
+    b.resize(len, 0);
+    Some(a.cmp(&b))
+}
+
+fn older(a: &str, b: &str) -> bool {
+    compare(a, b) == Some(std::cmp::Ordering::Less)
+}
+
+fn same(a: &str, b: &str) -> bool {
+    a == b || compare(a, b) == Some(std::cmp::Ordering::Equal)
+}
+
 /// One kind of extension in one install.
 pub struct Shelf<'a> {
     runtime: &'a Runtime,
@@ -36,7 +55,15 @@ pub struct Shelf<'a> {
 /// What `update` did.
 pub enum Updated {
     AlreadyAt(String),
-    From { old: Option<String>, new: String },
+    /// The installed version is newer than the source's latest, so nothing was changed.
+    Newer {
+        installed: String,
+        latest: String,
+    },
+    From {
+        old: Option<String>,
+        new: String,
+    },
 }
 
 fn plural(kind: Kind) -> &'static str {
@@ -301,11 +328,31 @@ impl<'a> Shelf<'a> {
 
     /// Updates `slug` to the latest version, leaving the old one in place if anything fails.
     pub fn update(&self, slug: &str) -> Result<Updated, String> {
+        self.recognized(slug)?;
+        let archive = self.resolve_or_say(slug, None)?;
+        match self.update_to(slug, archive)? {
+            Updated::Newer { installed, latest } => Err(format!(
+                "the source's latest {slug} is {latest}, older than the {installed} installed; it is left as it is \
+                 (install a version with {slug}@<version> after deleting it, to go back)"
+            )),
+            updated => Ok(updated),
+        }
+    }
+
+    /// Updates `slug` to `archive`, which a source already gave. Never goes back to an older version.
+    pub fn update_to(&self, slug: &str, archive: ExtensionArchive) -> Result<Updated, String> {
         let (old_path, found) = self.recognized(slug)?;
         let current = found.version;
-        let archive = self.resolve_or_say(slug, None)?;
-        if current.as_deref() == Some(archive.version.as_str()) {
-            return Ok(Updated::AlreadyAt(archive.version));
+        if let Some(current) = &current {
+            if same(current, &archive.version) {
+                return Ok(Updated::AlreadyAt(current.clone()));
+            }
+            if older(&archive.version, current) {
+                return Ok(Updated::Newer {
+                    installed: current.clone(),
+                    latest: archive.version,
+                });
+            }
         }
         let (work, top) = self.unpack(&archive)?;
         let aside = work.path().join("old");
@@ -337,5 +384,20 @@ impl<'a> Shelf<'a> {
 
     pub fn install_name(&self) -> &str {
         &self.install.name
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{older, same};
+
+    #[test]
+    fn versions() {
+        assert!(older("1.5", "2.0"));
+        assert!(older("5.3.9", "5.3.10"));
+        assert!(!older("5.3.10", "5.3.9"));
+        assert!(!older("2.0", "2.0.0"));
+        assert!(!older("trunk", "2.0"));
+        assert!(same("2.0", "2.0.0") && same("trunk", "trunk") && !same("trunk", "2.0"));
     }
 }

@@ -5,7 +5,7 @@ use std::alloc::{GlobalAlloc, Layout, System};
 use std::io::{BufRead, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use speedyspec_backup::flow::{SiteDatabase, backup};
+use speedyspec_backup::flow::{SiteDatabase, backup, plan_move, read_manifest, restore};
 use speedyspec_backup::manifest::Manifest;
 use speedyspec_backup::rewrite::Move;
 use speedyspec_driver::{BackupSpec, SiteUrl};
@@ -39,24 +39,42 @@ struct Big;
 impl SiteDatabase for Big {
     fn export(&mut self, out: &mut dyn Write) -> Result<(), String> {
         for i in 0..50_000 {
-            writeln!(out, "INSERT INTO `wp_rows` (`id`,`text`) VALUES\n({i},'row {i} with some text to make it longer');")
+            writeln!(out, "INSERT INTO `wp_rows` (`id`,`text`) VALUES ({i},'row {i} links to http://old.example/{i}');")
                 .map_err(|e| e.to_string())?;
         }
         Ok(())
     }
     fn import(
         &mut self,
-        _: &mut dyn BufRead,
-        _: &Move,
-        _: &mut Vec<String>,
+        input: &mut dyn BufRead,
+        plan: &Move,
+        warnings: &mut Vec<String>,
     ) -> Result<u64, String> {
-        unreachable!()
+        // Statement by statement, as the real import reads them, each one rewritten and dropped.
+        let mut count = 0;
+        let mut line = Vec::new();
+        loop {
+            line.clear();
+            if input
+                .read_until(b'\n', &mut line)
+                .map_err(|e| e.to_string())?
+                == 0
+            {
+                return Ok(count);
+            }
+            let moved = speedyspec_backup::rewrite::rewrite(&line, plan, warnings);
+            let moved = String::from_utf8_lossy(&moved);
+            if !moved.contains("`site_rows`") || !moved.contains("http://new.example/") {
+                return Err(format!("the row was not moved: {moved}"));
+            }
+            count += 1;
+        }
     }
     fn has_prefixed_tables(&mut self) -> Result<bool, String> {
         Ok(true)
     }
     fn site_url(&mut self, _: &SiteUrl) -> Result<Option<String>, String> {
-        Ok(None)
+        Ok(Some("http://old.example".into()))
     }
     fn prefix(&self) -> String {
         "wp_".into()
@@ -76,9 +94,15 @@ fn main() {
         include: vec![".".into()],
         exclude: vec![],
         preserve: vec![],
-        site_url: None,
+        site_url: Some(SiteUrl {
+            table: "options".into(),
+            key_column: "option_name".into(),
+            key: "siteurl".into(),
+            value_column: "option_value".into(),
+        }),
         prefixed_columns: vec![],
         app_version: None,
+        keep_urls: vec![],
     };
     let manifest = Manifest {
         app: "site".into(),
@@ -87,8 +111,8 @@ fn main() {
         app_version: None,
         extensions: vec![],
         engine: "mysql".into(),
-        table_prefix: String::new(),
-        site_url: None,
+        table_prefix: "wp_".into(),
+        site_url: Some("http://old.example".into()),
         source_install: "big".into(),
         source_driver: "zip".into(),
         created_at: "2026-11-19T10:00:00Z".into(),
@@ -103,16 +127,42 @@ fn main() {
         &out.path().join("big.tar.gz"),
     )
     .unwrap();
-    let peak = PEAK.load(Ordering::SeqCst) - before;
     let limit = 64 * 1024 * 1024;
-    if peak < limit {
-        println!("ok: a_backup_streams (peak {} KiB)", peak / 1024);
-    } else {
-        eprintln!(
-            "FAIL: a_backup_streams: peak {} KiB, limit {} KiB",
-            peak / 1024,
-            limit / 1024
-        );
-        std::process::exit(1);
-    }
+    let check = |name: &str, peak: usize| {
+        if peak < limit {
+            println!("ok: {name} (peak {} KiB)", peak / 1024);
+        } else {
+            eprintln!(
+                "FAIL: {name}: peak {} KiB, limit {} KiB",
+                peak / 1024,
+                limit / 1024
+            );
+            std::process::exit(1);
+        }
+    };
+    check("a_backup_streams", PEAK.load(Ordering::SeqCst) - before);
+
+    // The restore, moved to another prefix and URL, so the rewrite runs over every row.
+    let archive = out.path().join("big.tar.gz");
+    let target = tempfile::tempdir().unwrap();
+    let m = read_manifest(&archive).unwrap();
+    let plan = plan_move(&m, "site_", Some("http://new.example"), &spec).unwrap();
+    let before = NOW.load(Ordering::SeqCst);
+    PEAK.store(before, Ordering::SeqCst);
+    restore(
+        &archive,
+        target.path(),
+        &spec,
+        &mut Big,
+        &plan,
+        &mut Vec::new(),
+    )
+    .unwrap();
+    check("a_restore_streams", PEAK.load(Ordering::SeqCst) - before);
+    assert_eq!(
+        std::fs::metadata(target.path().join("big.bin"))
+            .unwrap()
+            .len(),
+        20 * 1024 * 1024
+    );
 }

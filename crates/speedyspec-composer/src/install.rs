@@ -8,7 +8,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use sha1::{Digest, Sha1};
-use speedyspec_driver_zip::{Archive, Fetch, FetchError, fetch_and_extract};
+use speedyspec_driver_zip::{Archive, Fetch, FetchError, Limits, fetch_and_extract};
 
 use crate::ComposerError;
 use crate::autoload::Maps;
@@ -26,19 +26,46 @@ pub struct Installed {
     pub maps: Maps,
 }
 
+/// A `Fetch` that gives a file already downloaded, whatever the URL.
+struct FileFetch(PathBuf);
+
+impl Fetch for FileFetch {
+    fn fetch(&self, url: &str, to: &mut dyn Write) -> Result<u64, FetchError> {
+        let mut file = fs::File::open(&self.0).map_err(|e| FetchError::Io {
+            url: url.to_owned(),
+            message: e.to_string(),
+        })?;
+        io::copy(&mut file, to).map_err(|e| FetchError::Io {
+            url: url.to_owned(),
+            message: e.to_string(),
+        })
+    }
+}
+
 /// A `Fetch` that also hashes what passes through it.
 struct Sha1Fetch<'a> {
     inner: &'a dyn Fetch,
     digest: RefCell<Sha1>,
+    remaining: RefCell<u64>,
 }
 
 struct Tee<'w, 'd> {
     to: &'w mut dyn Write,
     digest: &'d RefCell<Sha1>,
+    /// Bytes still allowed; past them the write fails and `over` is set.
+    remaining: &'d RefCell<u64>,
 }
 
 impl Write for Tee<'_, '_> {
     fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        {
+            let mut remaining = self.remaining.borrow_mut();
+            if data.len() as u64 > *remaining {
+                *remaining = u64::MAX;
+                return Err(io::Error::other("the download is over the limit"));
+            }
+            *remaining -= data.len() as u64;
+        }
         let written = self.to.write(data)?;
         self.digest.borrow_mut().update(&data[..written]);
         Ok(written)
@@ -54,6 +81,7 @@ impl Fetch for Sha1Fetch<'_> {
         let mut tee = Tee {
             to,
             digest: &self.digest,
+            remaining: &self.remaining,
         };
         self.inner.fetch(url, &mut tee)
     }
@@ -64,7 +92,12 @@ fn io(path: &Path, what: &str, e: io::Error) -> ComposerError {
 }
 
 /// Downloads and unpacks one package into `staging/<name>`.
-fn place(package: &Package, staging: &Path, fetch: &dyn Fetch) -> Result<(), ComposerError> {
+fn place(
+    package: &Package,
+    staging: &Path,
+    fetch: &dyn Fetch,
+    limit: u64,
+) -> Result<(), ComposerError> {
     let named = |message: String| {
         ComposerError::new(format!("{} {}: {message}", package.name, package.version))
     };
@@ -72,20 +105,24 @@ fn place(package: &Package, staging: &Path, fetch: &dyn Fetch) -> Result<(), Com
         .prefix(".dist-")
         .tempdir_in(staging)
         .map_err(|e| io(staging, "write in", e))?;
+    // Downloaded first and its checksum checked, so nothing from an archive that does not match is ever unpacked.
+    let download = work.path().join(".download");
     let hashing = Sha1Fetch {
         inner: fetch,
         digest: RefCell::new(Sha1::new()),
+        remaining: RefCell::new(limit),
     };
-    fetch_and_extract(
-        &Archive {
-            url: &package.dist.url,
-            sha256: None,
-            strip_components: 0,
-        },
-        work.path(),
-        &hashing,
-    )
-    .map_err(|e| named(e.to_string()))?;
+    {
+        let mut file = fs::File::create(&download).map_err(|e| io(&download, "create", e))?;
+        let fetched = hashing.fetch(&package.dist.url, &mut file);
+        if *hashing.remaining.borrow() == u64::MAX {
+            return Err(named(format!(
+                "{}: the download is more than the limit of {limit} bytes",
+                package.dist.url
+            )));
+        }
+        fetched.map_err(|e| named(e.to_string()))?;
+    }
     if let Some(expected) = &package.dist.shasum {
         let actual: String = hashing
             .digest
@@ -101,9 +138,22 @@ fn place(package: &Package, staging: &Path, fetch: &dyn Fetch) -> Result<(), Com
             )));
         }
     }
+    let unpacked = work.path().join("unpacked");
+    fs::create_dir(&unpacked).map_err(|e| io(&unpacked, "create", e))?;
+    fetch_and_extract(
+        &Archive {
+            url: &package.dist.url,
+            sha256: None,
+            strip_components: 0,
+        },
+        &unpacked,
+        &FileFetch(download.clone()),
+    )
+    .map_err(|e| named(e.to_string()))?;
+    let _ = fs::remove_file(&download);
     // A single top-level directory is the package itself, as composer strips it.
-    let entries: Vec<PathBuf> = fs::read_dir(work.path())
-        .map_err(|e| io(work.path(), "read", e))?
+    let entries: Vec<PathBuf> = fs::read_dir(&unpacked)
+        .map_err(|e| io(&unpacked, "read", e))?
         .filter_map(Result::ok)
         .map(|e| e.path())
         .collect();
@@ -115,18 +165,13 @@ fn place(package: &Package, staging: &Path, fetch: &dyn Fetch) -> Result<(), Com
         {
             only.clone()
         }
-        _ => work.path().to_path_buf(),
+        _ => unpacked.clone(),
     };
     let target = staging.join(&package.name);
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent).map_err(|e| io(parent, "create", e))?;
     }
-    if root == work.path() {
-        let kept = work.keep();
-        fs::rename(&kept, &target).map_err(|e| io(&target, "create", e))?;
-    } else {
-        fs::rename(&root, &target).map_err(|e| io(&target, "create", e))?;
-    }
+    fs::rename(&root, &target).map_err(|e| io(&target, "create", e))?;
     Ok(())
 }
 
@@ -137,27 +182,54 @@ pub fn install(
     fetch: &dyn Fetch,
     platform: &Platform,
 ) -> Result<Installed, ComposerError> {
+    install_with_limit(dir, lock, fetch, platform, Limits::default().download_bytes)
+}
+
+/// As [`install`], with each dist's download stopped at `limit` bytes.
+pub fn install_with_limit(
+    dir: &Path,
+    lock: &Lock,
+    fetch: &dyn Fetch,
+    platform: &Platform,
+    limit: u64,
+) -> Result<Installed, ComposerError> {
     let warnings = check(&lock.packages, platform)?;
     let staging = dir.join(STAGING);
     let old = dir.join(OLD);
-    for leftover in [&staging, &old] {
-        if leftover.exists() {
-            fs::remove_dir_all(leftover).map_err(|e| io(leftover, "remove", e))?;
+    let vendor = dir.join("vendor");
+    // A crash between moving vendor/ aside and moving the new one in leaves the old one only here.
+    if old.exists() {
+        if vendor.exists() {
+            fs::remove_dir_all(&old).map_err(|e| io(&old, "remove", e))?;
+        } else {
+            fs::rename(&old, &vendor).map_err(|e| io(&old, "put back", e))?;
         }
+    }
+    if staging.exists() {
+        fs::remove_dir_all(&staging).map_err(|e| io(&staging, "remove", e))?;
     }
     fs::create_dir_all(&staging).map_err(|e| io(&staging, "create", e))?;
     let built = lock
         .packages
         .iter()
-        .try_for_each(|package| place(package, &staging, fetch));
-    if let Err(error) = built {
-        let _ = fs::remove_dir_all(&staging);
-        return Err(error);
-    }
-    let vendor = dir.join("vendor");
+        .try_for_each(|package| place(package, &staging, fetch, limit))
+        .and_then(|()| {
+            // The maps go in with the packages, so vendor/ is never without them.
+            let maps = Maps::build_in(dir, STAGING, lock);
+            maps.write_to(&staging.join("speedyspec-autoload.json"))?;
+            Ok(maps)
+        });
+    let maps = match built {
+        Ok(maps) => maps,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&staging);
+            return Err(error);
+        }
+    };
     let had_vendor = vendor.exists();
-    if had_vendor {
-        fs::rename(&vendor, &old).map_err(|e| io(&vendor, "move aside", e))?;
+    if had_vendor && let Err(e) = fs::rename(&vendor, &old) {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(io(&vendor, "move aside", e));
     }
     if let Err(e) = fs::rename(&staging, &vendor) {
         if had_vendor {
@@ -169,7 +241,5 @@ pub fn install(
     if had_vendor {
         let _ = fs::remove_dir_all(&old);
     }
-    let maps = Maps::build(dir, lock);
-    maps.write(dir)?;
     Ok(Installed { warnings, maps })
 }

@@ -705,3 +705,38 @@ fn another_prefix_is_asked_about_and_backed_up() {
         );
     }
 }
+
+#[test]
+#[ignore = "needs scripts/mysql.sh up"]
+fn restoring_onto_another_url_without_url_is_warned_about() {
+    for (label, url) in servers() {
+        let mut source_db = Database::new(&url, "nu_src");
+        fill_source(&mut source_db, "wp_");
+        let mut target_db = Database::new(&url, "nu_dst");
+        target_db.exec("CREATE TABLE `wp_options` (`option_name` varchar(191) PRIMARY KEY, `option_value` longtext)");
+        target_db.exec("INSERT INTO `wp_options` VALUES ('siteurl','https://target.example')");
+        let (home, server) = (
+            TempDir::new().unwrap(),
+            Server::start(vec![("/app.zip", Route::ok(app_zip()))]),
+        );
+        let source = install(home.path(), &server, "source", &source_db.json("wp_"));
+        let target = install(home.path(), &server, "target", &target_db.json("wp_"));
+        let archive = home.path().join("b.tar.gz");
+        assert_eq!(source.backup(&archive).code, 0, "{label}");
+        let out = target.run(&[
+            "app",
+            "restore",
+            archive.to_str().unwrap(),
+            "--install",
+            "target",
+            "--yes",
+        ]);
+        assert_eq!(out.code, 0, "{label}: {}", out.stderr);
+        assert!(
+            out.stderr.contains("https://old.example")
+                && out.stderr.contains("--url https://target.example"),
+            "{label}: {}",
+            out.stderr
+        );
+    }
+}

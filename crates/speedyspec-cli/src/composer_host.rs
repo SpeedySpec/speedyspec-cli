@@ -445,6 +445,9 @@ impl NativeArea for ComposerHostArea {
             let mut builder = ClassBuilder::new(spec.name).registration(remember);
             if spec.interface {
                 builder = builder.flags(ClassFlags::Interface);
+            } else if !SPECS.iter().any(|other| other.parent == Some(spec.name)) {
+                // Nothing extends it, so no plugin may either.
+                builder = builder.flags(ClassFlags::Final);
             }
             if let Some(parent) = spec.parent {
                 builder = builder.extends((entry_fn(parent), parent));
@@ -560,6 +563,7 @@ fn handle(ex: &mut ExecuteData, retval: &mut Zval) -> Result<(), String> {
             let slot = g
                 .objects
                 .get_mut(id)
+                .filter(|slot| slot.is_none())
                 .ok_or("speedyspec's composer objects are made by speedyspec")?;
             let mut held = Zval::new();
             held.set_object(this);

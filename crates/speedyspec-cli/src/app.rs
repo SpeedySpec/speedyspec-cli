@@ -512,6 +512,21 @@ pub fn install(runtime: &Runtime, matches: &ArgMatches, prepass: Option<Prepass>
         let mut record =
             crate::installs::Record::new(local, &choices.app, &choices.parts, &choices.driver);
         record.setup_done = resume.unwrap_or(0);
+        // Finishing a setup is the same install: it keeps when, by what and with which parts it was made.
+        if resume.is_some()
+            && let Ok(Some(earlier)) = crate::installs::find(&local.name)
+        {
+            record.installed_at = earlier.installed_at;
+            record.cli_version = earlier.cli_version;
+            if earlier.parts != choices.parts {
+                eprintln!(
+                    "speedyspec: warning: the setup is finished with the parts it was started with ({}), not {}",
+                    earlier.parts.join(", "),
+                    choices.parts.join(", ")
+                );
+            }
+            record.parts = earlier.parts;
+        }
         record
     });
     if let Some(record) = &record

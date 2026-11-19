@@ -61,11 +61,56 @@ impl Maps {
 
     /// The maps for `lock`'s packages (installed under `vendor/<name>`) and the root, in `base`.
     pub fn build(base: &Path, lock: &Lock) -> Maps {
+        Maps::build_in(base, "vendor", lock)
+    }
+
+    /// As [`Maps::build`], with the packages read from `vendor_dir` (a staging directory, say) while the maps still
+    /// point into `vendor/`, where they will be.
+    pub fn build_in(base: &Path, vendor_dir: &str, lock: &Lock) -> Maps {
+        let mut maps = Maps::build_from(base, vendor_dir, lock);
+        if vendor_dir != "vendor" {
+            let from = format!("{vendor_dir}/");
+            let fix = |path: &mut String| {
+                if let Some(rest) = path.strip_prefix(&from) {
+                    *path = format!("vendor/{rest}");
+                }
+            };
+            for (_, dirs) in maps.psr4.iter_mut().chain(maps.psr0.iter_mut()) {
+                dirs.iter_mut().for_each(fix);
+            }
+            maps.files.iter_mut().for_each(fix);
+            for file in maps.classmap.values_mut() {
+                fix(file);
+            }
+        }
+        maps
+    }
+
+    fn build_from(base: &Path, vendor_dir: &str, lock: &Lock) -> Maps {
         let mut maps = Maps::default();
         for package in &lock.packages {
-            maps.add(base, &format!("vendor/{}", package.name), &package.autoload);
+            maps.add(
+                base,
+                &format!("{vendor_dir}/{}", package.name),
+                &package.autoload,
+            );
         }
-        maps.add(base, "", &lock.root);
+        // The root's own paths into vendor/ (a classmap of a package without autoload) are read where the packages
+        // are now; `build_in` maps them back.
+        let mut root = lock.root.clone();
+        if vendor_dir != "vendor" {
+            let into = |path: &mut String| {
+                if let Some(rest) = path.strip_prefix("vendor/") {
+                    *path = format!("{vendor_dir}/{rest}");
+                }
+            };
+            for (_, dirs) in root.psr4.iter_mut().chain(root.psr0.iter_mut()) {
+                dirs.iter_mut().for_each(into);
+            }
+            root.classmap.iter_mut().for_each(into);
+            root.files.iter_mut().for_each(into);
+        }
+        maps.add(base, "", &root);
         // composer tries longer prefixes first; the sort is stable, so lock order breaks ties.
         maps.psr4.sort_by_key(|p| std::cmp::Reverse(p.0.len()));
         maps.psr0.sort_by_key(|p| std::cmp::Reverse(p.0.len()));
@@ -84,14 +129,18 @@ impl Maps {
 
     /// Writes the maps under `base`.
     pub fn write(&self, base: &Path) -> Result<(), ComposerError> {
-        let path = base.join(MAPS_FILE);
+        self.write_to(&base.join(MAPS_FILE))
+    }
+
+    /// Writes the maps to `path`.
+    pub fn write_to(&self, path: &Path) -> Result<(), ComposerError> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).map_err(|e| {
                 ComposerError::new(format!("cannot create {}: {e}", parent.display()))
             })?;
         }
         let text = serde_json::to_string_pretty(&self.to_json()).expect("maps are JSON");
-        fs::write(&path, text + "\n")
+        fs::write(path, text + "\n")
             .map_err(|e| ComposerError::new(format!("cannot write {}: {e}", path.display())))
     }
 

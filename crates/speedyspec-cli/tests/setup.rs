@@ -195,3 +195,40 @@ fn a_deleted_directory_is_installed_again_rather_than_resumed() {
     assert_eq!(order(base.path()), "1 2 3");
     assert_eq!(record(home.path())["status"], "installed");
 }
+
+#[test]
+fn finishing_a_setup_keeps_the_install_s_history() {
+    let (home, base, server) = (TempDir::new().unwrap(), TempDir::new().unwrap(), server());
+    assert_eq!(install(home.path(), &server, base.path(), true).code, 1);
+    let path = home.path().join("installs/blog.json");
+    let mut first = record(home.path());
+    first["installed_at"] = serde_json::json!("2026-01-01T00:00:00Z");
+    first["cli_version"] = serde_json::json!("0.9.0");
+    fs::write(&path, first.to_string()).unwrap();
+    assert_eq!(install(home.path(), &server, base.path(), false).code, 0);
+    let r = record(home.path());
+    assert_eq!(r["installed_at"], "2026-01-01T00:00:00Z");
+    assert_eq!(r["cli_version"], "0.9.0");
+    assert_eq!(r["status"], "installed");
+}
+
+#[test]
+fn finishing_a_setup_with_other_parts_says_which_are_kept() {
+    let (home, base, server) = (TempDir::new().unwrap(), TempDir::new().unwrap(), server());
+    assert_eq!(install(home.path(), &server, base.path(), true).code, 1);
+    let path = home.path().join("installs/blog.json");
+    let mut first = record(home.path());
+    first["parts"] = serde_json::json!(["earlier-part"]);
+    fs::write(&path, first.to_string()).unwrap();
+    let out = install(home.path(), &server, base.path(), false);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(
+        out.stderr.contains("started with (earlier-part)"),
+        "{}",
+        out.stderr
+    );
+    assert_eq!(
+        record(home.path())["parts"],
+        serde_json::json!(["earlier-part"])
+    );
+}

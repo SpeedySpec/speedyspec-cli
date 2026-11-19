@@ -195,7 +195,10 @@ pub fn backup_to(
         created_at: crate::installs::now_rfc3339(),
     };
     backup_dir(to)?;
-    backup(&root, &spec, &mut db, manifest, to)
+    for warning in backup(&root, &spec, &mut db, manifest, to)? {
+        eprintln!("speedyspec: warning: {warning}");
+    }
+    Ok(())
 }
 
 /// `app backup --install <name> [--to <file>] [--force]`.
@@ -343,6 +346,17 @@ pub fn run_restore(runtime: &Runtime, matches: &ArgMatches) -> i32 {
         Ok(db) => db,
         Err(message) => return fail(&message),
     };
+    // Restored onto a site with another URL and no --url, the backup's URL would come back with it.
+    if matches.get_one::<String>("url").is_none()
+        && let (Some(at), Some(theirs)) = (&spec.site_url, &manifest.site_url)
+        && let Ok(Some(ours)) = db.site_url(at)
+        && ours.trim_end_matches('/') != theirs.trim_end_matches('/')
+    {
+        eprintln!(
+            "speedyspec: warning: the backup's site URL is {theirs} and {name}'s is {ours}; it is restored as {theirs} \
+             unless you pass --url {ours}"
+        );
+    }
     // 4. Ask, when anything the restore replaces is there: the tables under that prefix, or the install's files.
     let has_content = match db.has_prefixed_tables() {
         Ok(found) => found || has_files(&root, &spec),

@@ -1,6 +1,6 @@
 {
     "name": "speedyspec-fixture/backup-app",
     "version": "1.0.0",
-    "contracts": "^1.2",
+    "contracts": "^1.3",
     "entry": "plugin.php"
 }

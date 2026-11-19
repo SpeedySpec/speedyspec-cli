@@ -15,6 +15,8 @@ pub struct BackupSpec {
     pub site_url: Option<SiteUrl>,
     pub prefixed_columns: Vec<PrefixedColumn>,
     pub app_version: Option<String>,
+    /// `(table without prefix, column)` whose values keep the old URL on a move.
+    pub keep_urls: Vec<(String, String)>,
 }
 
 /// The row that holds the site URL; the table without its prefix.
@@ -182,6 +184,23 @@ pub fn decode_backup_spec(
             "must be 1 to 64 characters with no whitespace",
         ));
     }
+    // Since contracts 1.4; a BackupSpec from 1.3 has no such property and keeps none.
+    let keep_urls = match props.iter().find(|(k, _)| k == "keepUrls").map(|(_, v)| v) {
+        None | Some(Value::Null) => Vec::new(),
+        Some(Value::Array(items)) => items
+            .iter()
+            .enumerate()
+            .map(|(i, (_, item))| {
+                let path = format!("keepUrls[{i}]");
+                let at = d.object(item, "TableColumn", &path)?;
+                Ok((
+                    name_at(&d, &at, "table", &path)?,
+                    name_at(&d, &at, "column", &path)?,
+                ))
+            })
+            .collect::<Result<Vec<_>, ContractError>>()?,
+        Some(_) => return Err(d.err("keepUrls", "expected a list of TableColumn objects")),
+    };
     Ok(BackupSpec {
         include,
         exclude,
@@ -189,6 +208,7 @@ pub fn decode_backup_spec(
         site_url,
         prefixed_columns,
         app_version,
+        keep_urls,
     })
 }
 
@@ -373,6 +393,37 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(bad.field, "prefixedColumns[0].keys[0]", "{bad}");
+    }
+
+    #[test]
+    fn columns_that_keep_their_urls() {
+        let r = FakeReader::default();
+        // A 1.3 BackupSpec has no keepUrls: none are kept.
+        assert!(
+            decode_backup_spec(&spec(&r, vec![]), &r)
+                .unwrap()
+                .keep_urls
+                .is_empty()
+        );
+        let guid = r.object(
+            &format!("{NS}TableColumn"),
+            vec![("table", s("posts")), ("column", s("guid"))],
+        );
+        let mut with = spec(&r, vec![]);
+        if let Value::Opaque(_) = &with {
+            let props: Vec<(&str, Value)> = vec![
+                ("include", strings(&["."])),
+                ("exclude", strings(&[])),
+                ("preserve", strings(&[])),
+                ("siteUrl", Value::Null),
+                ("prefixedColumns", list(vec![])),
+                ("appVersion", Value::Null),
+                ("keepUrls", list(vec![guid])),
+            ];
+            with = r.object(&format!("{NS}BackupSpec"), props);
+        }
+        let decoded = decode_backup_spec(&with, &r).unwrap();
+        assert_eq!(decoded.keep_urls, [("posts".to_owned(), "guid".to_owned())]);
     }
 
     #[test]

@@ -33,6 +33,8 @@ pub fn run_plugins(dir: &Path) -> Result<(), String> {
         .args(["self", "composer-plugins", "--dir"])
         .arg(dir)
         .stdin(Stdio::null())
+        // What a plugin prints is not this command's output.
+        .stdout(std::io::stderr())
         .process_group(0)
         .spawn()
         .map_err(|e| format!("could not start the composer plugins: {e}"))?;

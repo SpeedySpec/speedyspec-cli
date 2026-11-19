@@ -185,6 +185,12 @@ pub fn run(runtime: &Runtime, kind: Kind, matches: &ArgMatches) -> i32 {
 fn report(out: &mut impl Write, kind: &str, slug: &str, updated: &Updated) {
     let _ = match updated {
         Updated::AlreadyAt(version) => writeln!(out, "{slug} is already at {version}"),
+        Updated::Newer { installed, latest } => {
+            eprintln!(
+                "speedyspec: skipped {slug}: the {installed} installed is newer than the source's latest {latest}"
+            );
+            Ok(())
+        }
         Updated::From { old, new } => writeln!(
             out,
             "updated {kind} {slug} {} -> {new}",
@@ -202,7 +208,7 @@ fn update_all(shelf: &Shelf<'_>, out: &mut impl Write) -> i32 {
     let mut code = 0;
     for extension in installed {
         let slug = &extension.slug;
-        match shelf.resolve(slug, None) {
+        let archive = match shelf.resolve(slug, None) {
             Ok(None) => {
                 eprintln!("speedyspec: skipped {slug}: no source has it");
                 continue;
@@ -212,9 +218,9 @@ fn update_all(shelf: &Shelf<'_>, out: &mut impl Write) -> i32 {
                 code = 1;
                 continue;
             }
-            Ok(Some(_)) => {}
-        }
-        match shelf.update(slug) {
+            Ok(Some(archive)) => archive,
+        };
+        match shelf.update_to(slug, archive) {
             Ok(updated) => report(out, shelf.kind.as_str(), slug, &updated),
             Err(message) => {
                 eprintln!("speedyspec: {slug}: {message}");

@@ -101,7 +101,12 @@ fn a_flat_dist_is_the_package_itself() {
     let dir = tempfile::tempdir().unwrap();
     let lock = plugin(
         dir.path(),
-        vec![package("acme/http", &url(&server, "/flat.zip"), "", json!({}))],
+        vec![package(
+            "acme/http",
+            &url(&server, "/flat.zip"),
+            "",
+            json!({}),
+        )],
     );
     install(dir.path(), &lock, &HttpFetch::new(), &platform()).unwrap();
     assert!(dir.path().join("vendor/acme/http/src/Client.php").is_file());
@@ -149,7 +154,12 @@ fn an_unsafe_dist_is_refused() {
     old_vendor(dir.path());
     let lock = plugin(
         dir.path(),
-        vec![package("acme/http", &url(&server, "/evil.zip"), "", json!({}))],
+        vec![package(
+            "acme/http",
+            &url(&server, "/evil.zip"),
+            "",
+            json!({}),
+        )],
     );
     let error = install(dir.path(), &lock, &HttpFetch::new(), &platform())
         .unwrap_err()
@@ -178,7 +188,10 @@ fn a_missing_extension_names_the_package_before_downloading() {
     let error = install(dir.path(), &lock, &HttpFetch::new(), &platform())
         .unwrap_err()
         .to_string();
-    assert!(error.contains("acme/http") && error.contains("gmp"), "{error}");
+    assert!(
+        error.contains("acme/http") && error.contains("gmp"),
+        "{error}"
+    );
     assert!(server.requests().is_empty());
 }
 
@@ -198,6 +211,143 @@ fn a_failed_download_names_the_package() {
     let error = install(dir.path(), &lock, &HttpFetch::new(), &platform())
         .unwrap_err()
         .to_string();
-    assert!(error.contains("acme/http") && error.contains("404"), "{error}");
+    assert!(
+        error.contains("acme/http") && error.contains("404"),
+        "{error}"
+    );
     assert!(!dir.path().join("vendor").exists());
+}
+
+#[test]
+fn a_leftover_old_vendor_is_put_back_rather_than_deleted() {
+    // A crash between moving vendor/ aside and moving the new one in leaves only vendor.speedyspec-old.
+    let server = Server::start(vec![("/missing.zip", Route::status(404))]);
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("vendor.speedyspec-old/old/kept")).unwrap();
+    fs::write(
+        dir.path().join("vendor.speedyspec-old/old/kept/file.php"),
+        "<?php",
+    )
+    .unwrap();
+    let lock = plugin(
+        dir.path(),
+        vec![package(
+            "acme/http",
+            &url(&server, "/missing.zip"),
+            "",
+            json!({}),
+        )],
+    );
+    assert!(install(dir.path(), &lock, &HttpFetch::new(), &platform()).is_err());
+    assert!(
+        dir.path().join("vendor/old/kept/file.php").is_file(),
+        "the only copy was deleted"
+    );
+}
+
+#[test]
+fn the_checksum_is_checked_before_anything_is_unpacked() {
+    let zip = build_zip(&[
+        ("x/", Entry::Dir),
+        ("x/../../evil.php", Entry::file("<?php")),
+    ]);
+    let server = Server::start(vec![("/evil.zip", Route::ok(zip))]);
+    let dir = tempfile::tempdir().unwrap();
+    let lock = plugin(
+        dir.path(),
+        vec![package(
+            "acme/http",
+            &url(&server, "/evil.zip"),
+            &"0".repeat(40),
+            json!({}),
+        )],
+    );
+    let error = install(dir.path(), &lock, &HttpFetch::new(), &platform())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("checksum mismatch"), "{error}");
+}
+
+/// A server that never stops sending: the download must stop at the limit.
+struct Endless;
+
+impl speedyspec_driver_zip::Fetch for Endless {
+    fn fetch(
+        &self,
+        _: &str,
+        to: &mut dyn std::io::Write,
+    ) -> Result<u64, speedyspec_driver_zip::FetchError> {
+        let chunk = [0u8; 1024];
+        let mut sent = 0u64;
+        loop {
+            if to.write_all(&chunk).is_err() {
+                return Err(speedyspec_driver_zip::FetchError::Io {
+                    url: "endless".into(),
+                    message: "the body is over the limit".into(),
+                });
+            }
+            sent += 1024;
+            if sent > 64 * 1024 * 1024 {
+                return Ok(sent);
+            }
+        }
+    }
+}
+
+#[test]
+fn a_dist_that_never_ends_stops_at_the_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let lock = plugin(
+        dir.path(),
+        vec![package(
+            "acme/http",
+            "https://example.com/a.zip",
+            "",
+            json!({}),
+        )],
+    );
+    let error = speedyspec_composer::install_with_limit(
+        dir.path(),
+        &lock,
+        &Endless,
+        &platform(),
+        1024 * 1024,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("more than"), "{error}");
+    assert!(!dir.path().join("vendor.speedyspec-new").exists());
+}
+
+#[test]
+fn a_root_classmap_into_vendor_is_read_from_the_new_packages() {
+    let zip = build_zip(&[
+        ("legacy/", Entry::Dir),
+        (
+            "legacy/old.php",
+            Entry::file("<?php class Acme_Old_Thing {}"),
+        ),
+        ("composer.json", Entry::file("{}")),
+    ]);
+    let server = Server::start(vec![("/old.zip", Route::ok(zip))]);
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("composer.json"),
+        json!({"require": {"acme/old": "^1"}, "autoload": {"classmap": ["vendor/acme/old/legacy"]}}).to_string(),
+    )
+    .unwrap();
+    let mut old = package("acme/old", &url(&server, "/old.zip"), "", json!({}));
+    old["autoload"] = json!({});
+    fs::write(
+        dir.path().join("composer.lock"),
+        json!({"packages": [old]}).to_string(),
+    )
+    .unwrap();
+    let lock = Lock::read(dir.path()).unwrap().unwrap();
+    install(dir.path(), &lock, &HttpFetch::new(), &platform()).unwrap();
+    let maps = Maps::read(dir.path()).unwrap().unwrap();
+    assert_eq!(
+        maps.find(dir.path(), "Acme_Old_Thing"),
+        Some(dir.path().join("vendor/acme/old/legacy/old.php"))
+    );
 }
