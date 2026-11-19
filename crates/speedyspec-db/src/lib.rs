@@ -456,6 +456,41 @@ impl Connection {
         Ok(outcome)
     }
 
+    /// One value from the install's prefixed `table`: `value_column` of the row whose `key_column` is `key`. The
+    /// names must be letters, digits and underscores; the key is passed as a parameter.
+    pub fn site_value(
+        &mut self,
+        table: &str,
+        key_column: &str,
+        key: &str,
+        value_column: &str,
+    ) -> Result<Option<String>, DbError> {
+        let plain = |name: &str| {
+            !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+        };
+        for name in [table, key_column, value_column] {
+            if !plain(name) {
+                return Err(DbError(format!(
+                    "{name:?} is not a plain table or column name"
+                )));
+            }
+        }
+        let full = format!("{}{table}", self.table_prefix);
+        let sql = format!(
+            "SELECT {} FROM {} WHERE {} = ? LIMIT 1",
+            quote_identifier(value_column),
+            quote_identifier(&full),
+            quote_identifier(key_column)
+        );
+        let found: Option<Option<Vec<u8>>> = self
+            .conn
+            .exec_first(sql, (key,))
+            .map_err(|e| self.failed(&format!("could not read {full}"), e))?;
+        Ok(found
+            .flatten()
+            .map(|bytes| String::from_utf8_lossy(&bytes).into_owned()))
+    }
+
     /// Writes a dump of the tables: each dropped, created and filled, rows streamed from the
     /// server so no table is held in memory.
     pub fn export(&mut self, out: &mut dyn Write, options: &ExportOptions) -> Result<(), DbError> {
@@ -563,6 +598,16 @@ impl Connection {
     /// Runs every statement of a dump, in order, and says how many ran. It stops at the first
     /// that fails, or that would switch to another database.
     pub fn import(&mut self, input: impl BufRead) -> Result<u64, ImportError> {
+        self.import_rewriting(input, &mut |statement| statement.to_vec())
+    }
+
+    /// As [`Connection::import`], each statement passed through `rewrite` before it runs (a restore moving the
+    /// site to a new prefix and URL). The checks apply to the rewritten statement.
+    pub fn import_rewriting(
+        &mut self,
+        input: impl BufRead,
+        rewrite: &mut dyn FnMut(&[u8]) -> Vec<u8>,
+    ) -> Result<u64, ImportError> {
         let mut applied = 0u64;
         for item in Statements::new(input) {
             let (line, statement) = item.map_err(|e| ImportError {
@@ -571,6 +616,7 @@ impl Connection {
                 applied,
                 message: e.message,
             })?;
+            let statement = rewrite(&statement);
             let number = applied + 1;
             if switches_database(&statement) {
                 return Err(ImportError {

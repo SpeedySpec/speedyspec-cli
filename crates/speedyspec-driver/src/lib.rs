@@ -2,6 +2,7 @@
 //! install driver implements.
 
 mod app;
+mod backup;
 mod contracts;
 mod driver;
 mod extensions;
@@ -15,6 +16,7 @@ pub use app::{
     database_connection_from_json, decode_app_runtime, decode_app_task, decode_database_connection,
     decode_database_or_task,
 };
+pub use backup::{BackupSpec, PrefixedColumn, SiteUrl, decode_backup_spec, is_sql_name};
 pub use contracts::{
     App, AppPart, Command, CommandArgument, CommandOption, ContractError, InstallOption,
     ObjectReader, ZipSource, decode_app, decode_apps, decode_command, decode_commands,

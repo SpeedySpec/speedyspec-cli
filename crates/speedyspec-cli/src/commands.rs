@@ -151,6 +151,8 @@ fn dispatch(runtime: &Runtime, args: &[String]) -> i32 {
             Some(("list", _)) => crate::app::list(&runtime.apps),
             Some(("installs", _)) => crate::installs::print_list(),
             Some(("db", db)) => crate::db_cmd::run(runtime, db),
+            Some(("backup", backup)) => crate::backup_cmd::run_backup(runtime, backup),
+            Some(("restore", restore)) => crate::backup_cmd::run_restore(runtime, restore),
             Some(("install", install)) => crate::app::install(runtime, install, prepass),
             Some(("uninstall", uninstall)) => crate::app::uninstall(uninstall),
             _ => unreachable!("clap requires an app subcommand"),
@@ -291,7 +293,9 @@ fn build_tree(plugin_commands: &[PluginCommand], install_options: &[InstallOptio
                 )
                 .subcommand(install_clap(install_options))
                 .subcommand(uninstall_clap())
-                .subcommand(crate::db_cmd::clap()),
+                .subcommand(crate::db_cmd::clap())
+                .subcommand(crate::backup_cmd::backup_clap())
+                .subcommand(crate::backup_cmd::restore_clap()),
         )
         .subcommand(crate::composer_cmd::clap())
         .subcommand(crate::extension_cmd::clap(speedyspec_driver::Kind::Plugin))
