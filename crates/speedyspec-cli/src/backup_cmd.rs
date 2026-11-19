@@ -109,12 +109,8 @@ pub fn spec(runtime: &Runtime, install: &Install) -> Result<BackupSpec, String> 
 
 /// Opens the install's database, with the same warning as `app db` for a connection that leaves this machine.
 pub fn open(settings: &DatabaseConnection) -> Result<LiveDatabase, String> {
-    if !speedyspec_db::stays_on_this_machine(settings) {
-        eprintln!(
-            "speedyspec: warning: the connection to {}:{} is not encrypted (speedyspec does not use TLS yet); \
-             the login and the data cross the network as they are",
-            settings.host, settings.port
-        );
+    if let Some(warning) = speedyspec_db::unencrypted_warning(settings) {
+        eprintln!("speedyspec: warning: {warning}");
     }
     let connection = Connection::open(settings).map_err(|e| e.to_string())?;
     Ok(LiveDatabase {

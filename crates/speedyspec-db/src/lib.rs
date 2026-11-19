@@ -296,8 +296,20 @@ pub fn statement_text(statement: &[u8]) -> String {
     String::from_utf8_lossy(&out).into_owned()
 }
 
+/// The warning for a connection whose login and data would cross a network unencrypted: one that leaves this machine
+/// with `tls` off. Never names the password.
+pub fn unencrypted_warning(settings: &DatabaseConnection) -> Option<String> {
+    (settings.tls == speedyspec_driver::Tls::Off && !stays_on_this_machine(settings)).then(|| {
+        format!(
+            "the connection to {}:{} is not encrypted; the login and the data cross the network as they are \
+             (the app's plugin can ask for TLS)",
+            settings.host, settings.port
+        )
+    })
+}
+
 /// Whether a connection stays on this machine (a socket or a loopback address), where it being
-/// unencrypted does not matter. The client does not use TLS yet.
+/// unencrypted does not matter.
 pub fn stays_on_this_machine(settings: &DatabaseConnection) -> bool {
     if settings.socket.is_some() {
         return true;
@@ -327,6 +339,26 @@ impl Connection {
                     .ip_or_hostname(Some(settings.host.clone()))
                     .tcp_port(settings.port);
                 format!("{}:{}", settings.host, settings.port)
+            }
+        };
+        opts = match &settings.tls {
+            speedyspec_driver::Tls::Off => opts,
+            // Encrypted, but any certificate and host name are accepted.
+            speedyspec_driver::Tls::Required => opts.ssl_opts(Some(
+                mysql::SslOpts::default()
+                    .with_danger_accept_invalid_certs(true)
+                    .with_danger_skip_domain_validation(true),
+            )),
+            speedyspec_driver::Tls::Verify(ca) => {
+                if !ca.is_file() {
+                    return Err(DbError(format!(
+                        "{place}: the CA certificate {} is not a file",
+                        ca.display()
+                    )));
+                }
+                opts.ssl_opts(Some(
+                    mysql::SslOpts::default().with_root_cert_path(Some(ca.clone())),
+                ))
             }
         };
         let mut conn = Conn::new(opts).map_err(|error| match &error {
@@ -678,6 +710,39 @@ mod tests {
         ));
         assert!(switches_database(b"/*!32312 USE `shop`*/"));
         assert!(!switches_database(b"/*!40101 SET NAMES utf8mb4 */"));
+    }
+
+    #[test]
+    fn the_warning_shows_only_without_tls() {
+        let at = |host: &str, tls: speedyspec_driver::Tls| DatabaseConnection {
+            host: host.to_owned(),
+            database: "d".to_owned(),
+            user: "u".to_owned(),
+            password: "hunter2".to_owned(),
+            port: 3306,
+            socket: None,
+            table_prefix: String::new(),
+            charset: "utf8mb4".to_owned(),
+            engine: "mysql".to_owned(),
+            tls,
+        };
+        let off = unencrypted_warning(&at("db.example.com", speedyspec_driver::Tls::Off)).unwrap();
+        assert!(
+            off.contains("db.example.com:3306") && off.contains("not encrypted"),
+            "{off}"
+        );
+        assert!(!off.contains("hunter2"));
+        assert!(
+            unencrypted_warning(&at("db.example.com", speedyspec_driver::Tls::Required)).is_none()
+        );
+        assert!(
+            unencrypted_warning(&at(
+                "db.example.com",
+                speedyspec_driver::Tls::Verify("/etc/ca.pem".into())
+            ))
+            .is_none()
+        );
+        assert!(unencrypted_warning(&at("127.0.0.1", speedyspec_driver::Tls::Off)).is_none());
     }
 
     #[test]

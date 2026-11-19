@@ -256,9 +256,10 @@ speedyspec app db tables | size | check             --install <name>
 These find the install by name (`app installs`) and ask its app's plugin where the database is
 (`speedyspec_app_database`); speedyspec then does the work itself, so no `mysql` or `mysqldump`
 is needed on the machine. MySQL and MariaDB are supported. The password is never printed.
-The connection is not encrypted yet (no TLS): over a socket or a loopback address that does
-not matter, and for any other host speedyspec warns before connecting. A server that requires
-secure transport refuses it.
+The connection is encrypted when the app's plugin asks for it (`DatabaseConnection`'s `tls`):
+`required` encrypts without checking the server's certificate, and `verify` checks it against the
+plugin's `caFile` and the host name. With `tls` off, speedyspec warns before connecting to any host
+but a socket or a loopback address.
 
 - `export` writes a dump: each of the app's tables (those starting with its table prefix) is
   dropped, created and filled, binary columns as hex. It goes to stdout, or to `--to <file>`,
