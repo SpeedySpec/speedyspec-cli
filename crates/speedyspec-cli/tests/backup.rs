@@ -349,7 +349,7 @@ fn fill_source(db: &mut Database, prefix: &str) {
     db.exec(&format!(
         "INSERT INTO `{prefix}options` VALUES ('siteurl','https://old.example'), \
          ('widget','a:1:{{s:3:\"url\";s:21:\"https://old.example/x\";}}'), \
-         ('{prefix}user_roles','a:0:{{}}')"
+         ('{prefix}user_roles','a:0:{{}}'), ('{prefix}page_for_privacy_policy','3')"
     ));
 }
 
@@ -472,6 +472,12 @@ fn restore_to_another_url_and_prefix() {
                 )
                 .is_some(),
             "{label}"
+        );
+        assert!(
+            target_db
+                .value("SELECT option_value FROM site_options WHERE option_name = 'wp_page_for_privacy_policy'")
+                .is_some(),
+            "{label}: an option that only starts with the prefix was renamed"
         );
         assert_eq!(
             fs::read_to_string(target.base.path().join("db.json")).unwrap(),

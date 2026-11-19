@@ -61,7 +61,7 @@ Hook::add('speedyspec_app_backup', static function (?object $answer, Install $in
         ['cache'],
         ['db.json'],
         new SiteUrl('options', 'option_name', 'siteurl', 'option_value'),
-        [new PrefixedColumn('options', 'option_name')],
+        [new PrefixedColumn('options', 'option_name', ['user_roles'])],
         '1.0.0',
     );
 }, 10, 2);

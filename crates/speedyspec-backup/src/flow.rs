@@ -228,7 +228,7 @@ pub fn plan_move(
         prefixed_columns: spec
             .prefixed_columns
             .iter()
-            .map(|c| (c.table.clone(), c.column.clone()))
+            .map(|c| (c.table.clone(), c.column.clone(), c.keys.clone()))
             .collect(),
     })
 }

@@ -17,8 +17,9 @@ pub struct Move {
     pub to_prefix: String,
     /// The old and the new site URL.
     pub urls: Option<(String, String)>,
-    /// `(table without prefix, column)` whose values carry the prefix.
-    pub prefixed_columns: Vec<(String, String)>,
+    /// `(table without prefix, column, keys)` whose values carry the prefix: with `keys`, only the prefix followed by
+    /// exactly one of them; without, every value that starts with the prefix.
+    pub prefixed_columns: Vec<(String, String, Option<Vec<String>>)>,
 }
 
 impl Move {
@@ -240,14 +241,16 @@ impl<'a, 'w> Rewriter<'a, 'w> {
                 _ => return None,
             }
         }
-        let prefixed: Vec<bool> = columns
+        // For each column: `None` when it is plain, or its keys (`Some(None)` for every prefixed value).
+        let prefixed: Vec<Option<Option<Vec<String>>>> = columns
             .iter()
             .map(|column| {
-                base.as_ref().is_some_and(|base| {
+                base.as_ref().and_then(|base| {
                     self.plan
                         .prefixed_columns
                         .iter()
-                        .any(|(table, c)| table == base && c == column)
+                        .find(|(table, c, _)| table == base && c == column)
+                        .map(|(_, _, keys)| keys.clone())
                 })
             })
             .collect();
@@ -266,7 +269,7 @@ impl<'a, 'w> Rewriter<'a, 'w> {
             let mut index = 0;
             loop {
                 self.copy_space();
-                self.value(prefixed.get(index).copied().unwrap_or(false))?;
+                self.value(prefixed.get(index).and_then(Option::as_ref))?;
                 index += 1;
                 self.copy_space();
                 match self.peek()? {
@@ -359,12 +362,17 @@ impl<'a, 'w> Rewriter<'a, 'w> {
     }
 
     /// One value of a row.
-    fn value(&mut self, prefixed: bool) -> Option<()> {
+    /// `prefixed` is `None` for a plain column, or the column's keys (`Some(&None)` for every prefixed value).
+    fn value(&mut self, prefixed: Option<&Option<Vec<String>>>) -> Option<()> {
         match self.peek()? {
             b'\'' => {
                 let text = self.string()?;
                 let mut text: Cow<'_, [u8]> = Cow::Owned(text);
-                if prefixed && let Some(rest) = text.strip_prefix(self.plan.from_prefix.as_bytes())
+                if let Some(keys) = prefixed
+                    && let Some(rest) = text.strip_prefix(self.plan.from_prefix.as_bytes())
+                    && keys
+                        .as_ref()
+                        .is_none_or(|keys| keys.iter().any(|k| k.as_bytes() == rest))
                 {
                     let mut renamed = self.plan.to_prefix.as_bytes().to_vec();
                     renamed.extend_from_slice(rest);
@@ -457,8 +465,12 @@ mod tests {
                 "https://new.example.org".into(),
             )),
             prefixed_columns: vec![
-                ("options".into(), "option_name".into()),
-                ("usermeta".into(), "meta_key".into()),
+                (
+                    "options".into(),
+                    "option_name".into(),
+                    Some(vec!["user_roles".into()]),
+                ),
+                ("usermeta".into(), "meta_key".into(), None),
             ],
         }
     }
@@ -518,6 +530,26 @@ mod tests {
              (2,'wpx_thing','x'),\n\
              (3,'siteurl','https://new.example.org'),\n\
              (4,'widget','a:1:{s:3:\\\"url\\\";s:23:\\\"https://new.example.org\\\";}')"
+        );
+    }
+
+    #[test]
+    fn named_keys_are_the_only_ones_renamed() {
+        let (out, _) = run(
+            "INSERT INTO `wp_options` (`option_name`,`option_value`) VALUES\n\
+             ('wp_user_roles','a:0:{}'),('wp_page_for_privacy_policy','3'),('wp_user_roles_extra','x')",
+        );
+        assert_eq!(
+            out,
+            "INSERT INTO `site_options` (`option_name`,`option_value`) VALUES\n\
+             ('site_user_roles','a:0:{}'),('wp_page_for_privacy_policy','3'),('wp_user_roles_extra','x')"
+        );
+        let (out, _) = run(
+            "INSERT INTO `wp_usermeta` (`meta_key`) VALUES\n('wp_capabilities'),('wp_anything')",
+        );
+        assert_eq!(
+            out,
+            "INSERT INTO `site_usermeta` (`meta_key`) VALUES\n('site_capabilities'),('site_anything')"
         );
     }
 

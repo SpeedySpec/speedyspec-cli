@@ -31,6 +31,8 @@ pub struct SiteUrl {
 pub struct PrefixedColumn {
     pub table: String,
     pub column: String,
+    /// The keys, without the prefix, that are built from it; `None` for every value that starts with the prefix.
+    pub keys: Option<Vec<String>>,
 }
 
 /// `[A-Za-z0-9_]+`: a table or column name that never needs more than backquotes.
@@ -147,9 +149,27 @@ pub fn decode_backup_spec(
         .map(|(i, (_, item))| {
             let path = format!("prefixedColumns[{i}]");
             let at = d.object(item, "PrefixedColumn", &path)?;
+            let keys = match d.get(&at, "keys", &path)? {
+                Value::Null => None,
+                Value::Array(items) => Some(
+                    items
+                        .iter()
+                        .enumerate()
+                        .map(|(k, (_, key))| match key {
+                            Value::Str(key) if is_sql_name(key) => Ok(key.clone()),
+                            _ => Err(d.err(
+                                &format!("{path}.keys[{k}]"),
+                                "must be letters, digits and underscores (a key without the prefix)",
+                            )),
+                        })
+                        .collect::<Result<Vec<_>, ContractError>>()?,
+                ),
+                _ => return Err(d.err(&format!("{path}.keys"), "expected a list of keys or null")),
+            };
             Ok(PrefixedColumn {
                 table: name_at(&d, &at, "table", &path)?,
                 column: name_at(&d, &at, "column", &path)?,
+                keys,
             })
         })
         .collect::<Result<Vec<_>, ContractError>>()?;
@@ -213,7 +233,22 @@ mod tests {
     fn column(r: &FakeReader, table: &str, column: &str) -> Value {
         r.object(
             &format!("{NS}PrefixedColumn"),
-            vec![("table", s(table)), ("column", s(column))],
+            vec![
+                ("table", s(table)),
+                ("column", s(column)),
+                ("keys", Value::Null),
+            ],
+        )
+    }
+
+    fn keyed(r: &FakeReader, keys: Value) -> Value {
+        r.object(
+            &format!("{NS}PrefixedColumn"),
+            vec![
+                ("table", s("options")),
+                ("column", s("option_name")),
+                ("keys", keys),
+            ],
         )
     }
 
@@ -255,7 +290,8 @@ mod tests {
             decoded.prefixed_columns,
             [PrefixedColumn {
                 table: "options".into(),
-                column: "option_name".into()
+                column: "option_name".into(),
+                keys: None,
             }]
         );
         assert_eq!(decoded.app_version.as_deref(), Some("7.1.5"));
@@ -305,6 +341,38 @@ mod tests {
             let error = decode_backup_spec(&spec(&r, overrides), &r).unwrap_err();
             assert_eq!(error.field, field, "{error}");
         }
+    }
+
+    #[test]
+    fn prefixed_keys() {
+        let r = FakeReader::default();
+        let decoded = decode_backup_spec(
+            &spec(
+                &r,
+                vec![(
+                    "prefixedColumns",
+                    list(vec![keyed(&r, strings(&["user_roles"]))]),
+                )],
+            ),
+            &r,
+        )
+        .unwrap();
+        assert_eq!(
+            decoded.prefixed_columns[0].keys,
+            Some(vec!["user_roles".to_owned()])
+        );
+        let bad = decode_backup_spec(
+            &spec(
+                &r,
+                vec![(
+                    "prefixedColumns",
+                    list(vec![keyed(&r, strings(&["user roles"]))]),
+                )],
+            ),
+            &r,
+        )
+        .unwrap_err();
+        assert_eq!(bad.field, "prefixedColumns[0].keys[0]", "{bad}");
     }
 
     #[test]
