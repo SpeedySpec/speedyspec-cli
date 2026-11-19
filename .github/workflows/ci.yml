@@ -14,6 +14,21 @@ jobs:
   build:
     uses: ./.github/workflows/build.yml
 
+  # The container and WordPress Hook API crates are copied from speedyspec-server; a copy edited here fails.
+  copies:
+    name: copies match speedyspec-server
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: speedyspec-cli
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: speedyspec-cli
+
+      - name: Check copied paths
+        run: scripts/check-copies.sh
+
   kubernetes-e2e:
     name: kubernetes end to end (k3s)
     runs-on: ubuntu-latest
