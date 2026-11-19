@@ -267,3 +267,87 @@ fn the_checksum_is_checked_before_anything_is_unpacked() {
         .to_string();
     assert!(error.contains("checksum mismatch"), "{error}");
 }
+
+/// A server that never stops sending: the download must stop at the limit.
+struct Endless;
+
+impl speedyspec_driver_zip::Fetch for Endless {
+    fn fetch(
+        &self,
+        _: &str,
+        to: &mut dyn std::io::Write,
+    ) -> Result<u64, speedyspec_driver_zip::FetchError> {
+        let chunk = [0u8; 1024];
+        let mut sent = 0u64;
+        loop {
+            if to.write_all(&chunk).is_err() {
+                return Err(speedyspec_driver_zip::FetchError::Io {
+                    url: "endless".into(),
+                    message: "the body is over the limit".into(),
+                });
+            }
+            sent += 1024;
+            if sent > 64 * 1024 * 1024 {
+                return Ok(sent);
+            }
+        }
+    }
+}
+
+#[test]
+fn a_dist_that_never_ends_stops_at_the_limit() {
+    let dir = tempfile::tempdir().unwrap();
+    let lock = plugin(
+        dir.path(),
+        vec![package(
+            "acme/http",
+            "https://example.com/a.zip",
+            "",
+            json!({}),
+        )],
+    );
+    let error = speedyspec_composer::install_with_limit(
+        dir.path(),
+        &lock,
+        &Endless,
+        &platform(),
+        1024 * 1024,
+    )
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("more than"), "{error}");
+    assert!(!dir.path().join("vendor.speedyspec-new").exists());
+}
+
+#[test]
+fn a_root_classmap_into_vendor_is_read_from_the_new_packages() {
+    let zip = build_zip(&[
+        ("legacy/", Entry::Dir),
+        (
+            "legacy/old.php",
+            Entry::file("<?php class Acme_Old_Thing {}"),
+        ),
+        ("composer.json", Entry::file("{}")),
+    ]);
+    let server = Server::start(vec![("/old.zip", Route::ok(zip))]);
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(
+        dir.path().join("composer.json"),
+        json!({"require": {"acme/old": "^1"}, "autoload": {"classmap": ["vendor/acme/old/legacy"]}}).to_string(),
+    )
+    .unwrap();
+    let mut old = package("acme/old", &url(&server, "/old.zip"), "", json!({}));
+    old["autoload"] = json!({});
+    fs::write(
+        dir.path().join("composer.lock"),
+        json!({"packages": [old]}).to_string(),
+    )
+    .unwrap();
+    let lock = Lock::read(dir.path()).unwrap().unwrap();
+    install(dir.path(), &lock, &HttpFetch::new(), &platform()).unwrap();
+    let maps = Maps::read(dir.path()).unwrap().unwrap();
+    assert_eq!(
+        maps.find(dir.path(), "Acme_Old_Thing"),
+        Some(dir.path().join("vendor/acme/old/legacy/old.php"))
+    );
+}

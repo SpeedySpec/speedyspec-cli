@@ -95,7 +95,22 @@ impl Maps {
                 &package.autoload,
             );
         }
-        maps.add(base, "", &lock.root);
+        // The root's own paths into vendor/ (a classmap of a package without autoload) are read where the packages
+        // are now; `build_in` maps them back.
+        let mut root = lock.root.clone();
+        if vendor_dir != "vendor" {
+            let into = |path: &mut String| {
+                if let Some(rest) = path.strip_prefix("vendor/") {
+                    *path = format!("{vendor_dir}/{rest}");
+                }
+            };
+            for (_, dirs) in root.psr4.iter_mut().chain(root.psr0.iter_mut()) {
+                dirs.iter_mut().for_each(into);
+            }
+            root.classmap.iter_mut().for_each(into);
+            root.files.iter_mut().for_each(into);
+        }
+        maps.add(base, "", &root);
         // composer tries longer prefixes first; the sort is stable, so lock order breaks ties.
         maps.psr4.sort_by_key(|p| std::cmp::Reverse(p.0.len()));
         maps.psr0.sort_by_key(|p| std::cmp::Reverse(p.0.len()));

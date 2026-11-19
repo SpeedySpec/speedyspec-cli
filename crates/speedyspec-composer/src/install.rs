@@ -8,7 +8,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 use sha1::{Digest, Sha1};
-use speedyspec_driver_zip::{Archive, Fetch, FetchError, fetch_and_extract};
+use speedyspec_driver_zip::{Archive, Fetch, FetchError, Limits, fetch_and_extract};
 
 use crate::ComposerError;
 use crate::autoload::Maps;
@@ -46,15 +46,26 @@ impl Fetch for FileFetch {
 struct Sha1Fetch<'a> {
     inner: &'a dyn Fetch,
     digest: RefCell<Sha1>,
+    remaining: RefCell<u64>,
 }
 
 struct Tee<'w, 'd> {
     to: &'w mut dyn Write,
     digest: &'d RefCell<Sha1>,
+    /// Bytes still allowed; past them the write fails and `over` is set.
+    remaining: &'d RefCell<u64>,
 }
 
 impl Write for Tee<'_, '_> {
     fn write(&mut self, data: &[u8]) -> io::Result<usize> {
+        {
+            let mut remaining = self.remaining.borrow_mut();
+            if data.len() as u64 > *remaining {
+                *remaining = u64::MAX;
+                return Err(io::Error::other("the download is over the limit"));
+            }
+            *remaining -= data.len() as u64;
+        }
         let written = self.to.write(data)?;
         self.digest.borrow_mut().update(&data[..written]);
         Ok(written)
@@ -70,6 +81,7 @@ impl Fetch for Sha1Fetch<'_> {
         let mut tee = Tee {
             to,
             digest: &self.digest,
+            remaining: &self.remaining,
         };
         self.inner.fetch(url, &mut tee)
     }
@@ -80,7 +92,12 @@ fn io(path: &Path, what: &str, e: io::Error) -> ComposerError {
 }
 
 /// Downloads and unpacks one package into `staging/<name>`.
-fn place(package: &Package, staging: &Path, fetch: &dyn Fetch) -> Result<(), ComposerError> {
+fn place(
+    package: &Package,
+    staging: &Path,
+    fetch: &dyn Fetch,
+    limit: u64,
+) -> Result<(), ComposerError> {
     let named = |message: String| {
         ComposerError::new(format!("{} {}: {message}", package.name, package.version))
     };
@@ -93,12 +110,18 @@ fn place(package: &Package, staging: &Path, fetch: &dyn Fetch) -> Result<(), Com
     let hashing = Sha1Fetch {
         inner: fetch,
         digest: RefCell::new(Sha1::new()),
+        remaining: RefCell::new(limit),
     };
     {
         let mut file = fs::File::create(&download).map_err(|e| io(&download, "create", e))?;
-        hashing
-            .fetch(&package.dist.url, &mut file)
-            .map_err(|e| named(e.to_string()))?;
+        let fetched = hashing.fetch(&package.dist.url, &mut file);
+        if *hashing.remaining.borrow() == u64::MAX {
+            return Err(named(format!(
+                "{}: the download is more than the limit of {limit} bytes",
+                package.dist.url
+            )));
+        }
+        fetched.map_err(|e| named(e.to_string()))?;
     }
     if let Some(expected) = &package.dist.shasum {
         let actual: String = hashing
@@ -159,6 +182,17 @@ pub fn install(
     fetch: &dyn Fetch,
     platform: &Platform,
 ) -> Result<Installed, ComposerError> {
+    install_with_limit(dir, lock, fetch, platform, Limits::default().download_bytes)
+}
+
+/// As [`install`], with each dist's download stopped at `limit` bytes.
+pub fn install_with_limit(
+    dir: &Path,
+    lock: &Lock,
+    fetch: &dyn Fetch,
+    platform: &Platform,
+    limit: u64,
+) -> Result<Installed, ComposerError> {
     let warnings = check(&lock.packages, platform)?;
     let staging = dir.join(STAGING);
     let old = dir.join(OLD);
@@ -178,7 +212,7 @@ pub fn install(
     let built = lock
         .packages
         .iter()
-        .try_for_each(|package| place(package, &staging, fetch))
+        .try_for_each(|package| place(package, &staging, fetch, limit))
         .and_then(|()| {
             // The maps go in with the packages, so vendor/ is never without them.
             let maps = Maps::build_in(dir, STAGING, lock);
@@ -193,8 +227,9 @@ pub fn install(
         }
     };
     let had_vendor = vendor.exists();
-    if had_vendor {
-        fs::rename(&vendor, &old).map_err(|e| io(&vendor, "move aside", e))?;
+    if had_vendor && let Err(e) = fs::rename(&vendor, &old) {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(io(&vendor, "move aside", e));
     }
     if let Err(e) = fs::rename(&staging, &vendor) {
         if had_vendor {
