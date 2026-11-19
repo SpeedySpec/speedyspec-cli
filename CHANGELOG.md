@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.1.0](https://github.com/SpeedySpec/speedyspec-cli/compare/v1.0.1...v1.1.0) (2026-11-19)
+
+
+### Features
+
+* app foundation: install records, app runner, and app db commands ([#10](https://github.com/SpeedySpec/speedyspec-cli/issues/10)) ([82d7ad6](https://github.com/SpeedySpec/speedyspec-cli/commit/82d7ad6ff912688366459d939ad4f90ac186b5c9))
+* back up and restore an install, and move it to a new URL and prefix in Rust ([#13](https://github.com/SpeedySpec/speedyspec-cli/issues/13)) ([bd9a732](https://github.com/SpeedySpec/speedyspec-cli/commit/bd9a7323a5ee5c426ce123fdd3a422b3c4de44a9))
+* finish installs, manage plugin and theme files, and install composer packages in Rust ([#12](https://github.com/SpeedySpec/speedyspec-cli/issues/12)) ([0d6242f](https://github.com/SpeedySpec/speedyspec-cli/commit/0d6242f2c9f67407f86cd0a4b43c7fee5aa47527))
+* move plugin management to speedyspec self plugin ([#9](https://github.com/SpeedySpec/speedyspec-cli/issues/9)) ([1f1b5ce](https://github.com/SpeedySpec/speedyspec-cli/commit/1f1b5ce958a9b633b7caac7fe437d8abbee9a45a))
+* **php:** remove the global hook functions ([#7](https://github.com/SpeedySpec/speedyspec-cli/issues/7)) ([d0c90fb](https://github.com/SpeedySpec/speedyspec-cli/commit/d0c90fb390a2a435df2a1ac039307761bd9653b4))
+* the Rust container and WordPress Hook API, copied from speedyspec-server ([#11](https://github.com/SpeedySpec/speedyspec-cli/issues/11)) ([8cb127e](https://github.com/SpeedySpec/speedyspec-cli/commit/8cb127ec567691401245ef57c647b45a5d4581a5))
+
+
+### Bug Fixes
+
+* review findings for composer, extensions and backup; embed contracts 1.3.0 ([#14](https://github.com/SpeedySpec/speedyspec-cli/issues/14)) ([e57acdb](https://github.com/SpeedySpec/speedyspec-cli/commit/e57acdb4c7c0d3d82f04c168f241e13e802ed2de))
+
 ## [1.0.1](https://github.com/SpeedySpec/speedyspec-cli/compare/v1.0.0...v1.0.1) (2026-11-18)
 
 
