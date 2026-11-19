@@ -225,6 +225,9 @@ fn try_install(matches: &ArgMatches) -> Result<(), i32> {
         )));
     }
 
+    // Its composer packages, from its composer.lock, before anything already installed is touched.
+    crate::composer_cmd::install_in(&root, matches.get_flag("allow-composer-plugins")).map_err(fail)?;
+
     // Only now, with a valid plugin in hand, is anything already installed touched.
     let target = plugins.join(directory_name(&manifest.name));
     let aside = staging.path().join("old");

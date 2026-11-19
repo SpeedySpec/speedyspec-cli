@@ -151,7 +151,7 @@ Hook::add('speedyspec_commands', static function (array $commands): array
 A handler receives the arguments and options keyed by name (a flag option is `true` or `false`,
 a value option its string, its default or `null`) and returns the exit code (0 to 255; any other
 integer is reported as 1, never wrapped round to 0). An uncaught exception
-exits 1 with `speedyspec: <command>: <class>: <message>`. A command may not reuse `app`, `plugin`,
+exits 1 with `speedyspec: <command>: <class>: <message>`. A command may not reuse `app`, `plugin`, `theme`,
 `self`, `php` or `help`, or the name of a command an earlier plugin added (the first one wins);
 it is dropped with a message naming the plugin.
 
@@ -230,6 +230,19 @@ Hook::add('speedyspec_driver_zip', static function (array $sources, InstallReque
 `ZipSource` is `url` (https), `destination` (relative to the base; `.` is the base itself),
 `sha256` (optional, 64 hex characters) and `stripComponents` (leading path segments to drop,
 0 to 32). That plugin is `examples/install-wordpress`.
+
+### Finishing setup
+
+Once the files are in place, the app's plugin can finish the install: it answers
+`speedyspec_app_setup` (filtered from null with the `Install` and the `InstallRequest`) with a
+`SetupPlan` of `AppTask`s, which run in order in the install's directory, through the runner (see
+below). Each one is shown as `setup: <file> (<n>/<total>)` on stderr, followed by its result when
+that is a string. A task that fails stops the install with
+`speedyspec: setup stopped at <file>: <why>; run the same command again to finish it`. The install
+record keeps how many tasks finished (`"status": "files"`, `"setup_done": <n>`), so running the
+same command again downloads nothing and starts at the task that failed. Options are asked for
+again, since the record holds none, and each task must be safe to run twice. Setup runs only for
+installs on this machine (zip) for now.
 
 ## Working with an install's database
 
@@ -381,6 +394,85 @@ new one has validated. Both commands work when an installed plugin is broken, an
 `--no-plugins`. Only plugins in the user plugin directory can be removed. The name must be a plugin name
 (`vendor/package`); anything else is refused before any path is looked at.
 
+## A plugin's composer packages
+
+```
+speedyspec composer install       [--working-dir <dir>]
+speedyspec composer dump-autoload [--working-dir <dir>]
+speedyspec composer show          [--working-dir <dir>]
+speedyspec composer validate      [--working-dir <dir>]
+```
+
+A plugin can depend on composer packages (Guzzle, say). It commits its `composer.lock`, and speedyspec
+installs exactly what that lists, with its own composer written in Rust, so composer is not needed
+on the machine. Nothing is resolved: `update`, `require` and the other subcommands that need
+resolving are refused, so run composer itself for those, where the plugin is developed.
+
+- `install` downloads each locked package (never the dev ones; `--no-dev` is accepted), checks
+  its sha1 when the lock has one, unpacks it with the same path and link checks as any download,
+  and puts it in `vendor/<name>`. It checks each package's `ext-*` and `php` requirements against
+  the embedded PHP first, naming the package that needs what is missing. `vendor/` is built
+  beside the old one and swapped in at the end, so a failure leaves the old one as it was.
+- The autoload maps (PSR-4, PSR-0, a classmap scanned in Rust, and the `files` to include) are
+  kept in `vendor/speedyspec-autoload.json`. No `vendor/autoload.php` is generated: when the
+  plugin loads, speedyspec registers its maps with one autoloader of its own and includes the
+  `files` before the plugin's entry file. A package two plugins both bring is included once,
+  and a warning names the versions when they differ. The first plugin's version is the one used.
+- `dump-autoload` rebuilds the maps, `show` lists `name <TAB> version <TAB> type`, and `validate`
+  checks the two files the way speedyspec reads them.
+
+`self plugin install` installs a plugin's packages before putting the plugin in place, and a
+failure leaves nothing installed. A plugin whose packages speedyspec has not installed still
+loads, since it may bring its own autoloader (composer's `vendor/autoload.php`). It gets a
+warning with the `speedyspec composer install --working-dir <dir>` that installs them.
+### Composer plugins
+
+`speedyspec composer install --allow-plugins` (and `self plugin install --allow-composer-plugins`)
+also runs the packages' composer plugins and `composer.json`'s scripts. Without the flag they are
+listed and not run, as with composer's `allow-plugins`, because they run code at install time.
+They run in a separate process, against a replica of composer's plugin API written in Rust:
+`PluginInterface`, `EventSubscriberInterface`, `Capable`, `IOInterface`, `Composer` (its package,
+config, local repository, installation manager and event dispatcher), the package, operation and
+event classes, and the event-name constants.
+
+- Each `composer-plugin` package is activated in lock order (`extra.class`, one name or several).
+- Then what composer dispatches after an install is dispatched to the plugins' subscribed
+  listeners, by priority: `post-package-install` for each package that is not a composer plugin,
+  then `post-autoload-dump` and `post-install-cmd`.
+- A root script that is a PHP callable (`Class::method`) runs with its event. Any other script
+  (a shell command, `@php`, `@putenv`) is reported and not run.
+- The IO never asks: each question takes its default. `write` goes to stderr.
+- A method the replica does not have fails the install with
+  `composer's <Class>::<method> is not supported by speedyspec`, naming the plugin. So do custom
+  installers (`InstallationManager::addInstaller`), since packages have already been placed.
+
+## An install's plugins and themes
+
+```
+speedyspec plugin list | install <slug>[@<version>] | update <slug> | update --all | delete <slug> [--yes]  --install <name>
+speedyspec theme  list | install <slug>[@<version>] | update <slug> | update --all | delete <slug> [--yes]  --install <name>
+```
+
+These work on an install's plugin and theme files (zip installs). Activating one is done in the
+app itself. The app's plugin says where they live and how to recognize one, by answering
+`speedyspec_app_extensions` (filtered from null with the `Install`) with an `ExtensionLayout`. Source
+plugins say where to get them, by adding `ExtensionSource`s to `speedyspec_extension_sources`
+(filtered from `[]` with the `Install`). The sources are asked in order, and the first archive wins.
+
+- `list` prints `slug <TAB> name <TAB> version`, sorted by slug, for every entry the layout's
+  `inspect` recognizes (a directory, or a single `<slug>.php` file).
+- `install` downloads the archive (checked against its `sha256` when the source gives one, with
+  the same path and link checks as `app install`). It must hold exactly one top-level directory,
+  which becomes `<directory>/<slug>`. An installed one is refused: use `update`.
+- `update` replaces the files with the latest version, unless that is the version installed. The
+  old files stay in place until the new ones are unpacked and checked, and they are put back if
+  the swap fails. `update --all` goes through every installed one: the ones no source has are
+  skipped, a failure is reported and the rest go on, and the exit code is 1 if any failed.
+- `delete` asks first, or needs `--yes` when it cannot ask, then removes the files.
+
+A slug is 1 to 200 letters, digits, `.`, `_` and `-`, starting with neither `.` nor `-`. Anything
+else is a usage error before any plugin is asked or anything is downloaded.
+
 ## Updating speedyspec
 
 ```
@@ -420,6 +512,9 @@ uploaded (in the minutes after it is published) is reported as such; try again s
 | `speedyspec_install_after` | action | Receives the `InstallRequest` and the result. For zip: a list of `['url' => ..., 'destination' => ..., 'path' => ...]`. For kubernetes: a list of `['apiVersion' => ..., 'kind' => ..., 'namespace' => ..., 'name' => ...]`. Register with 2 accepted arguments. |
 | `speedyspec_app_runtime` | filter | Receives `null` (or an earlier plugin's answer) and the `Install` being worked on; return an `AppRuntime` saying how to load the app (its entry file, `ini` settings, `$_SERVER` entries). Register with 2 accepted arguments. |
 | `speedyspec_app_database` | filter | Receives `null` (or an earlier plugin's answer) and the `Install`; return a `DatabaseConnection`, or an `AppTask` whose callable returns the connection as an array (`host`, `database`, `user`, `password`, optionally `port`, `socket`, `tablePrefix`, `charset`). Register with 2 accepted arguments. |
+| `speedyspec_app_setup` | filter | Receives `null` (or an earlier plugin's answer), the `Install` and the `InstallRequest`, after the files are in place; return a `SetupPlan` whose `AppTask`s finish the install, in order. Zip installs only. Register with 3 accepted arguments. |
+| `speedyspec_app_extensions` | filter | Receives `null` (or an earlier plugin's answer) and the `Install`; return an `ExtensionLayout`: the directory of each kind (`plugin`, `theme`) relative to the install, and an `inspect` closure, `fn(string $kind, string $path): ?Extension`. Register with 2 accepted arguments. |
+| `speedyspec_extension_sources` | filter | Receives `[]` and the `Install`; append `ExtensionSource` objects, asked in order. Each `resolve` closure, `fn(string $kind, string $slug, ?string $version): ?ExtensionArchive`, gives an archive or `null` when the source does not have it. |
 
 The `Install` carries `name`, `app`, `parts`, `driver` and `root` (the install's directory on
 this machine, or `null` when its files are elsewhere). An `AppTask` runs in a separate process:

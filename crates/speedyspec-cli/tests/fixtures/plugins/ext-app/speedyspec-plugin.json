@@ -1,0 +1,6 @@
+{
+    "name": "speedyspec-fixture/ext-app",
+    "version": "1.0.0",
+    "contracts": "^1.1",
+    "entry": "plugin.php"
+}

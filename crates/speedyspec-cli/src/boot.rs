@@ -98,6 +98,18 @@ impl Loader for PhpLoader<'_> {
         // The owner makes the plugin's hook registrations traceable. Output stays on stderr
         // because `boot` redirects it for the whole of start-up.
         php.set_owner(Some(&plugin.manifest.name));
+        // Its composer packages autoload before its own code runs.
+        match crate::composer_area::load(&plugin.dir, &plugin.manifest.name) {
+            Ok(warnings) => {
+                for warning in warnings {
+                    eprintln!("speedyspec: warning: {warning}");
+                }
+            }
+            Err(reason) => {
+                php.set_owner(None);
+                return Err(reason);
+            }
+        }
         let result = php.require(plugin.entry_path());
         php.set_owner(None);
         result.map(drop).map_err(|error| load_reason(&error))
@@ -175,7 +187,11 @@ pub fn boot(args: &[String]) -> Result<Runtime, String> {
         Php::boot(BootOptions {
             hooks: hooks.clone(),
             preload: CONTRACTS,
-            areas: wordpress_areas(),
+            areas: {
+                let mut areas = wordpress_areas();
+                areas.push(Rc::new(crate::composer_area::ComposerArea));
+                areas
+            },
         })
         .map_err(|e| e.to_string())?,
     );

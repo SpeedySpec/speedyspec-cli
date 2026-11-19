@@ -16,3 +16,7 @@ speedyspec --plugin-dir examples/install-wordpress app install wordpress --base 
 The base directory must be empty, or pass `--force` to merge into it (files of the same path
 are replaced, nothing is deleted). On success the command prints the destination and the
 absolute path it was installed to.
+
+This example only downloads WordPress. The full plugin, which also writes `wp-config.php`, reaches the
+database and manages plugin and theme files, is
+[speedyspec/wordpress](https://github.com/SpeedySpec/speedyspec-cli-wordpress).

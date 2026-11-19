@@ -53,7 +53,7 @@ impl Target {
     }
 }
 
-fn install_value(runtime: &Runtime, install: &Install) -> Result<Value, String> {
+pub(crate) fn install_value(runtime: &Runtime, install: &Install) -> Result<Value, String> {
     let root = install.root.as_ref().map_or(Value::Null, |root| {
         Value::Str(root.to_string_lossy().into_owned())
     });
@@ -79,7 +79,22 @@ fn ask(
     hook: &str,
     check: fn(&Value, &dyn ObjectReader) -> Result<(), ContractError>,
 ) -> Result<Value, String> {
-    let install = install_value(runtime, &target.install)?;
+    ask_with(runtime, &target.install, &[], hook, Value::Null, check)
+}
+
+/// Filters `hook` from `seed` with the install and then `extra`, checking each answer with `check` and blaming a
+/// bad one on its plugin. A null answer is never checked.
+pub(crate) fn ask_with(
+    runtime: &Runtime,
+    install: &Install,
+    extra: &[Value],
+    hook: &str,
+    seed: Value,
+    check: fn(&Value, &dyn ObjectReader) -> Result<(), ContractError>,
+) -> Result<Value, String> {
+    let install = install_value(runtime, install)?;
+    let mut args = vec![install];
+    args.extend_from_slice(extra);
     let php = Rc::clone(&runtime.php);
     let validator: Rc<Validator> = Rc::new(move |given, returned| {
         if matches!(returned, Value::Null) {
@@ -101,9 +116,7 @@ fn ask(
     });
     runtime.php.redirect_output(Output::Stderr);
     runtime.hooks.validate(hook, validator);
-    let answer = runtime
-        .hooks
-        .filter(hook, Value::Null, std::slice::from_ref(&install));
+    let answer = runtime.hooks.filter(hook, seed, &args);
     runtime.hooks.clear_validators();
     runtime.php.redirect_output(Output::Stdout);
     let rejections = runtime.hooks.take_rejections();

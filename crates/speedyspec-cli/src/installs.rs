@@ -13,6 +13,24 @@ use speedyspec_driver::LocalInstall;
 /// The record format; a newer one is refused rather than misread.
 pub const SCHEMA: u64 = 1;
 
+/// How far an install got.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Status {
+    /// The files are in place; setup has not finished (`setup_done` tasks have).
+    Files,
+    /// Files and setup are done.
+    Installed,
+}
+
+impl Status {
+    fn as_str(self) -> &'static str {
+        match self {
+            Status::Files => "files",
+            Status::Installed => "installed",
+        }
+    }
+}
+
 /// One install on this machine.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Record {
@@ -25,6 +43,9 @@ pub struct Record {
     pub cli_version: String,
     /// RFC 3339, UTC.
     pub installed_at: String,
+    pub status: Status,
+    /// How many of the setup plan's tasks have finished.
+    pub setup_done: u64,
 }
 
 impl Record {
@@ -37,6 +58,8 @@ impl Record {
             location: local.location.to_string_lossy().into_owned(),
             cli_version: crate::self_cmd::VERSION.to_owned(),
             installed_at: now_rfc3339(),
+            status: Status::Files,
+            setup_done: 0,
         }
     }
 
@@ -50,7 +73,8 @@ impl Record {
             "location": self.location,
             "cli_version": self.cli_version,
             "installed_at": self.installed_at,
-            "status": "installed",
+            "status": self.status.as_str(),
+            "setup_done": self.setup_done,
         })
     }
 
@@ -77,7 +101,19 @@ impl Record {
                     .ok_or("a part is not a string")
             })
             .collect::<Result<Vec<_>, _>>()?;
+        // Records written before setup existed have neither field: they are finished installs.
+        let status = match json["status"].as_str() {
+            None | Some("installed") => Status::Installed,
+            Some("files") => Status::Files,
+            Some(other) => return Err(format!("it has an unknown status {other:?}")),
+        };
+        let setup_done = match &json["setup_done"] {
+            Json::Null => 0,
+            value => value.as_u64().ok_or("its setup_done is not a count")?,
+        };
         Ok(Record {
+            status,
+            setup_done,
             name: text("name")?,
             app: text("app")?,
             parts,
@@ -268,6 +304,17 @@ mod tests {
         assert_eq!(rfc3339(0), "1970-01-01T00:00:00Z");
         assert_eq!(rfc3339(951_782_400), "2000-02-29T00:00:00Z");
         assert_eq!(rfc3339(1_794_993_301), "2026-11-18T09:15:01Z");
+    }
+
+    #[test]
+    fn a_record_without_setup_fields_is_a_finished_install() {
+        let record = Record::from_json(&json!({
+            "schema": 1, "name": "blog", "app": "site", "parts": [], "driver": "zip",
+            "location": "/srv/blog", "cli_version": "1.0.0", "installed_at": "2026-11-18T09:15:01Z",
+            "status": "installed",
+        }))
+        .unwrap();
+        assert_eq!((record.status, record.setup_done), (Status::Installed, 0));
     }
 
     #[test]
