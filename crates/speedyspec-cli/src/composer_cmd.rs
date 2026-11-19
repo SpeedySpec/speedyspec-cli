@@ -191,12 +191,15 @@ pub fn run(matches: &ArgMatches) -> i32 {
         }
         "validate" => {
             let dir = dir_of(sub);
-            match read(&dir) {
-                Ok(_) => {
-                    let _ = writeln!(out, "composer.json and composer.lock are valid");
-                    0
+            let problems = Lock::problems(&dir);
+            if problems.is_empty() {
+                let _ = writeln!(out, "composer.json and composer.lock are valid");
+                0
+            } else {
+                for problem in &problems {
+                    eprintln!("speedyspec: {problem}");
                 }
-                Err(message) => failure(&message),
+                1
             }
         }
         other => {

@@ -23,6 +23,21 @@ const HOOK_SOURCES: &str = "speedyspec_extension_sources";
 /// Entries the CLI makes while it works; never plugins or themes.
 const WORK_PREFIX: &str = ".speedyspec-";
 
+/// Whether version `a` is older than `b`, comparing their numeric parts (`5.3.10` after `5.3.9`); `false` when
+/// either is not plain numbers, so an unusual version never blocks an update.
+fn older(a: &str, b: &str) -> bool {
+    let parts = |v: &str| -> Option<Vec<u64>> { v.split('.').map(|p| p.parse().ok()).collect() };
+    match (parts(a), parts(b)) {
+        (Some(mut a), Some(mut b)) => {
+            let len = a.len().max(b.len());
+            a.resize(len, 0);
+            b.resize(len, 0);
+            a < b
+        }
+        _ => false,
+    }
+}
+
 /// One kind of extension in one install.
 pub struct Shelf<'a> {
     runtime: &'a Runtime,
@@ -301,11 +316,26 @@ impl<'a> Shelf<'a> {
 
     /// Updates `slug` to the latest version, leaving the old one in place if anything fails.
     pub fn update(&self, slug: &str) -> Result<Updated, String> {
+        self.recognized(slug)?;
+        let archive = self.resolve_or_say(slug, None)?;
+        self.update_to(slug, archive)
+    }
+
+    /// Updates `slug` to `archive`, which a source already gave. Never goes back to an older version.
+    pub fn update_to(&self, slug: &str, archive: ExtensionArchive) -> Result<Updated, String> {
         let (old_path, found) = self.recognized(slug)?;
         let current = found.version;
-        let archive = self.resolve_or_say(slug, None)?;
         if current.as_deref() == Some(archive.version.as_str()) {
             return Ok(Updated::AlreadyAt(archive.version));
+        }
+        if let Some(current) = &current
+            && older(&archive.version, current)
+        {
+            return Err(format!(
+                "the source's latest {slug} is {}, older than the {current} installed; it is left as it is \
+                 (install a version with {slug}@<version> after deleting it, to go back)",
+                archive.version
+            ));
         }
         let (work, top) = self.unpack(&archive)?;
         let aside = work.path().join("old");
@@ -337,5 +367,19 @@ impl<'a> Shelf<'a> {
 
     pub fn install_name(&self) -> &str {
         &self.install.name
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::older;
+
+    #[test]
+    fn versions() {
+        assert!(older("1.5", "2.0"));
+        assert!(older("5.3.9", "5.3.10"));
+        assert!(!older("5.3.10", "5.3.9"));
+        assert!(!older("2.0", "2.0.0"));
+        assert!(!older("trunk", "2.0"));
     }
 }

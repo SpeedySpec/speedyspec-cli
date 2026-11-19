@@ -15,6 +15,10 @@ Hook::add('speedyspec_extension_sources', static function (array $sources): arra
 {
     $sources[] = new ExtensionSource('test', static function (string $kind, string $slug, ?string $version): ?ExtensionArchive
     {
+        if (getenv('EXT_RESOLVE_LOG'))
+        {
+            file_put_contents((string) getenv('EXT_RESOLVE_LOG'), $slug . "\n", FILE_APPEND);
+        }
         if (str_starts_with($slug, 'unknown'))
         {
             return null;

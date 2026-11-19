@@ -269,6 +269,40 @@ pub fn is_platform(name: &str) -> bool {
 impl Lock {
     /// The lock in `dir`; `Ok(None)` when there is nothing to install (no `composer.json`, or one that requires only
     /// platform packages and has no lock).
+    /// Every problem with `dir`'s `composer.json` and `composer.lock` as this replica reads them, each package checked
+    /// on its own rather than stopping at the first.
+    pub fn problems(dir: &Path) -> Vec<String> {
+        let mut found = Vec::new();
+        let json = match read_json(&dir.join("composer.json")) {
+            Ok(Some(json)) => json,
+            Ok(None) => return vec![format!("there is no composer.json in {}", dir.display())],
+            Err(e) => return vec![e.to_string()],
+        };
+        if let Err(e) = autoload("composer.json", json.get("autoload")) {
+            found.push(e.to_string());
+        }
+        match read_json(&dir.join("composer.lock")) {
+            Ok(Some(lock)) => match lock.get("packages") {
+                None => {}
+                Some(Json::Array(items)) => {
+                    for (i, item) in items.iter().enumerate() {
+                        if let Err(e) = package(i, item) {
+                            found.push(e.to_string());
+                        }
+                    }
+                }
+                Some(_) => found.push("composer.lock: packages must be a list".to_owned()),
+            },
+            Ok(None) => {
+                if let Err(e) = Lock::read(dir) {
+                    found.push(e.to_string());
+                }
+            }
+            Err(e) => found.push(e.to_string()),
+        }
+        found
+    }
+
     pub fn read(dir: &Path) -> Result<Option<Lock>, ComposerError> {
         let Some(json) = read_json(&dir.join("composer.json"))? else {
             return Ok(None);

@@ -853,3 +853,29 @@ Hook::add('speedyspec_commands', static function (array $commands): array
     assert!(out.stderr.contains("broken-http skipped"), "{}", out.stderr);
     assert_eq!(out.stdout, "nothing\n", "{}", out.stderr);
 }
+
+#[test]
+fn composer_validate_names_every_problem() {
+    let home = TempDir::new().unwrap();
+    let dir = TempDir::new().unwrap();
+    fs::write(dir.path().join("composer.json"), "{}").unwrap();
+    fs::write(
+        dir.path().join("composer.lock"),
+        json!({"packages": [
+            {"name": "Bad Name", "version": "1", "dist": {"type": "zip", "url": "https://e/a.zip"}},
+            {"name": "acme/path", "version": "1", "dist": {"type": "path", "url": "../x"}},
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+    let out = composer(
+        home.path(),
+        &["validate", "--working-dir", dir.path().to_str().unwrap()],
+    );
+    assert_eq!(out.code, 1, "{}", out.stderr);
+    assert!(
+        out.stderr.contains("not a package name") && out.stderr.contains("only zip dists"),
+        "{}",
+        out.stderr
+    );
+}
