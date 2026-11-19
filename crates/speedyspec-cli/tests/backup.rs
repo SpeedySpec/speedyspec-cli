@@ -568,3 +568,48 @@ fn a_backup_of_another_app_is_refused() {
         out.stderr
     );
 }
+
+#[test]
+#[ignore = "needs scripts/mysql.sh up"]
+fn a_large_table_round_trips() {
+    for (label, url) in servers() {
+        let mut db = Database::new(&url, "big");
+        fill_source(&mut db, "wp_");
+        db.exec("CREATE TABLE `wp_rows` (`id` int PRIMARY KEY, `text` varchar(255))");
+        for chunk in 0..50 {
+            let rows: Vec<String> = (0..1000)
+                .map(|i| {
+                    let id = chunk * 1000 + i;
+                    format!("({id},'row {id} https://old.example/{id}')")
+                })
+                .collect();
+            db.exec(&format!("INSERT INTO `wp_rows` VALUES {}", rows.join(",")));
+        }
+        let checksum = |db: &mut Database| {
+            db.value("SELECT CONCAT(COUNT(*), ':', SUM(CRC32(CONCAT(id, '|', text)))) FROM wp_rows")
+        };
+        let before = checksum(&mut db);
+        let (home, server) = (
+            TempDir::new().unwrap(),
+            Server::start(vec![("/app.zip", Route::ok(app_zip()))]),
+        );
+        let site = install(home.path(), &server, "blog", &db.json("wp_"));
+        let archive = home.path().join("b.tar.gz");
+        assert_eq!(site.backup(&archive).code, 0, "{label}");
+        db.exec("DELETE FROM `wp_rows` WHERE id % 2 = 0");
+        let out = site.run(&[
+            "app",
+            "restore",
+            archive.to_str().unwrap(),
+            "--install",
+            "blog",
+            "--yes",
+        ]);
+        assert_eq!(out.code, 0, "{label}: {}", out.stderr);
+        assert_eq!(checksum(&mut db), before, "{label}");
+        assert!(
+            before.as_deref().is_some_and(|c| c.starts_with("50000:")),
+            "{label}: {before:?}"
+        );
+    }
+}

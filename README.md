@@ -276,6 +276,53 @@ secure transport refuses it.
   the data, index and total bytes; `check` runs `CHECK TABLE` and exits 1 when a table is not
   `OK`.
 
+## Backing up and restoring an install
+
+```
+speedyspec app backup  --install <name> [--to <file>] [--force]
+speedyspec app restore <file> --install <name> [--url <new URL>] [--table-prefix <prefix>] [--yes]
+```
+
+A backup is one gzipped tar file, created readable only by you, because it holds the site's
+database and secrets such as its configuration. The default path is
+`$SPEEDYSPEC_HOME/backups/<install>-<time>.tar.gz`. The archive holds:
+
+- `manifest.json`: the format, the app, its parts and version, the plugins and themes, the
+  database engine and table prefix, the site URL, the install and driver it came from, and the
+  CLI version and time. Never the password.
+- `files/`: the install's files, as the app's plugin includes and excludes them. Symbolic links
+  are kept as links.
+- `database.sql`: a dump in `app db export`'s format. It goes through a temporary file, so
+  nothing is held in memory.
+
+What a backup holds comes from the app's plugin, which answers `speedyspec_app_backup` with a
+`BackupSpec`. speedyspec does the rest in Rust, and nothing in a backup depends on the driver
+that made it.
+
+`app restore` puts a backup back onto the same site, or onto another install of the same app
+with `--url` (and `--table-prefix`, which defaults to the target's own prefix). In order:
+
+1. It reads the manifest and refuses a backup of another app, or one made by a newer speedyspec.
+2. If the target's database already has tables with its prefix, it asks first (`--yes`, or
+   refused without a terminal), then backs up what is there and names that file.
+3. It unpacks the files beside the install. Every entry is checked, and none may leave the
+   install or link out of it.
+4. It imports the dump straight from the archive, moving it on the way: the table prefix is
+   renamed in table names and in the columns the plugin names (`wp_user_roles` becomes
+   `site_user_roles`). The old site URL is replaced everywhere, with PHP-serialized values
+   rewritten so their lengths stay right.
+5. Only then does it swap the files in. Paths the plugin marks `preserve` (WordPress's
+   `wp-config.php`) and `exclude` (caches) stay the target's own.
+
+If the import fails, the files have not been replaced, and the message names the backup that
+undoes the change. The move's limits:
+
+- A multisite network is not moved: its domain columns need more than a URL replace.
+- URLs written JSON-escaped (`https:\/\/…`) are not replaced.
+- Tables in the target that the backup does not have are left in place.
+
+Backups and restores are for zip installs for now.
+
 ## Installing into Kubernetes
 
 ```
@@ -514,6 +561,7 @@ uploaded (in the minutes after it is published) is reported as such; try again s
 | `speedyspec_app_database` | filter | Receives `null` (or an earlier plugin's answer) and the `Install`; return a `DatabaseConnection`, or an `AppTask` whose callable returns the connection as an array (`host`, `database`, `user`, `password`, optionally `port`, `socket`, `tablePrefix`, `charset`). Register with 2 accepted arguments. |
 | `speedyspec_app_setup` | filter | Receives `null` (or an earlier plugin's answer), the `Install` and the `InstallRequest`, after the files are in place; return a `SetupPlan` whose `AppTask`s finish the install, in order. Zip installs only. Register with 3 accepted arguments. |
 | `speedyspec_app_extensions` | filter | Receives `null` (or an earlier plugin's answer) and the `Install`; return an `ExtensionLayout`: the directory of each kind (`plugin`, `theme`) relative to the install, and an `inspect` closure, `fn(string $kind, string $path): ?Extension`. Register with 2 accepted arguments. |
+| `speedyspec_app_backup` | filter | Receives `null` (or an earlier plugin's answer) and the `Install`; return a `BackupSpec`: the paths to include, exclude and keep from the target, the `SiteUrl` row, the `PrefixedColumn`s and the app's version. Register with 2 accepted arguments. |
 | `speedyspec_extension_sources` | filter | Receives `[]` and the `Install`; append `ExtensionSource` objects, asked in order. Each `resolve` closure, `fn(string $kind, string $slug, ?string $version): ?ExtensionArchive`, gives an archive or `null` when the source does not have it. |
 
 The `Install` carries `name`, `app`, `parts`, `driver` and `root` (the install's directory on
