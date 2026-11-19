@@ -481,3 +481,16 @@ fn password_in_input_is_not_in_argv_or_env() {
         "the environment is inherited"
     );
 }
+
+/// The runner carries none of WordPress's legacy hook names, so an app that declares them loads.
+#[test]
+fn an_app_may_declare_wordpress_hook_functions() {
+    let root = app("<?php\nfunction add_filter($a, $b) { return true; }\nclass WP_Hook {}\n");
+    let file = task(
+        root.path(),
+        "task.php",
+        "return static fn (array $input): string => 'loaded';",
+    );
+    let got = outcome(&run_task(root.path(), &file, &[]));
+    assert_eq!(got["result"], "loaded", "{got}");
+}

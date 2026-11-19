@@ -137,15 +137,21 @@ fn report_skipped(error: &PluginError) {
     }
 }
 
-/// The speedyspec_wordpress extension's areas: the service container (`SpeedySpec\Container\Container`) and
-/// WordPress's Hook API (`add_filter` and the rest, `WP_Hook`, the hook globals), each over its own Rust state.
-/// The CLI's plugin API (`SpeedySpec\Hooks\Hook`) is separate and unchanged.
-pub fn wordpress_areas() -> Vec<Rc<dyn speedyspec_php::NativeArea>> {
+/// The speedyspec_wordpress extension's areas: the service container (`SpeedySpec\Container\Container`) and the
+/// native Hook API (`SpeedySpec\WpHooks\Native\*`), each over its own Rust state. WordPress's legacy names
+/// (`add_filter` and the rest, `WP_Hook`, the hook globals) are left out: the CLI never runs WordPress, and an app's
+/// own code may declare them. The CLI's plugin API (`SpeedySpec\Hooks\Hook`) is separate and unchanged.
+pub fn native_areas() -> Vec<Rc<dyn speedyspec_php::NativeArea>> {
     let container = Rc::new(speedyspec_container::Container::new());
     let memory = Rc::new(speedyspec_wp_hooks_memory::MemoryHookStore::new());
-    let hooks = speedyspec_wp_hooks_php::WpHooksArea::new(container.clone(), memory);
+    let hooks =
+        speedyspec_wp_hooks_php::WpHooksArea::new(container.clone(), memory).without_legacy();
     let container_area = speedyspec_container_php::ContainerArea::new("cli", container);
-    vec![speedyspec_php_ext::twins_area(), Rc::new(container_area), Rc::new(hooks)]
+    vec![
+        speedyspec_php_ext::twins_area(),
+        Rc::new(container_area),
+        Rc::new(hooks),
+    ]
 }
 
 /// Everything start-up produced. `php` is the last field so it is dropped last: the values
@@ -175,7 +181,7 @@ pub fn boot(args: &[String]) -> Result<Runtime, String> {
         Php::boot(BootOptions {
             hooks: hooks.clone(),
             preload: CONTRACTS,
-            areas: wordpress_areas(),
+            areas: native_areas(),
         })
         .map_err(|e| e.to_string())?,
     );
