@@ -384,3 +384,238 @@ fn two_versions_of_one_package_warn() {
         out.stderr
     );
 }
+
+// ----- composer plugins
+
+const PLUGIN_SRC: &str = r#"<?php
+namespace Acme\ComposerPlugin;
+
+use Composer\Composer;
+use Composer\EventDispatcher\EventSubscriberInterface;
+use Composer\Installer\PackageEvent;
+use Composer\Installer\PackageEvents;
+use Composer\IO\IOInterface;
+use Composer\Plugin\PluginInterface;
+use Composer\Script\Event;
+use Composer\Script\ScriptEvents;
+
+final class Plugin implements PluginInterface, EventSubscriberInterface
+{
+    private static string $log = '';
+
+    public static function log(string $line): void
+    {
+        file_put_contents(self::$log, $line . "\n", FILE_APPEND);
+    }
+
+    public function activate(Composer $composer, IOInterface $io): void
+    {
+        self::$log = dirname($composer->getConfig()->get('vendor-dir')) . '/plugin.log';
+        self::log('activate ' . PluginInterface::PLUGIN_API_VERSION . ' ' . $composer->getPackage()->getName());
+        $io->write('acme plugin active');
+        if (getenv('ACME_UNSUPPORTED') === '1') {
+            $composer->getInstallationManager()->addInstaller(new \stdClass());
+        }
+        if (getenv('ACME_FATAL') === '1') {
+            acme_function_that_does_not_exist();
+        }
+    }
+
+    public function deactivate(Composer $composer, IOInterface $io): void
+    {
+    }
+
+    public function uninstall(Composer $composer, IOInterface $io): void
+    {
+    }
+
+    public static function getSubscribedEvents(): array
+    {
+        return [
+            PackageEvents::POST_PACKAGE_INSTALL => 'onPackage',
+            ScriptEvents::POST_AUTOLOAD_DUMP => ['onDump', 5],
+        ];
+    }
+
+    public function onPackage(PackageEvent $event): void
+    {
+        $package = $event->getOperation()->getPackage();
+        $path = $event->getComposer()->getInstallationManager()->getInstallPath($package);
+        self::log('package ' . $package->getName() . ' ' . $package->getVersion() . ' ' . (is_dir($path) ? 'present' : 'missing'));
+    }
+
+    public function onDump(Event $event): void
+    {
+        self::log('dump ' . $event->getName() . ' ' . ($event->getIO() instanceof IOInterface ? 'io' : 'no io'));
+    }
+}
+"#;
+
+const SCRIPTS_SRC: &str = r#"<?php
+namespace Acme\ComposerPlugin;
+
+use Composer\Script\Event;
+
+final class Scripts
+{
+    public static function installed(Event $event): void
+    {
+        Plugin::log('script ' . $event->getName() . ' ' . count($event->getComposer()->getRepositoryManager()->getLocalRepository()->getPackages()));
+    }
+}
+"#;
+
+fn plugin_dist() -> Vec<u8> {
+    build_zip(&[
+        ("acme-composer-plugin-1/", Entry::Dir),
+        ("acme-composer-plugin-1/src/", Entry::Dir),
+        (
+            "acme-composer-plugin-1/src/Plugin.php",
+            Entry::file(PLUGIN_SRC),
+        ),
+        (
+            "acme-composer-plugin-1/src/Scripts.php",
+            Entry::file(SCRIPTS_SRC),
+        ),
+    ])
+}
+
+/// A directory whose lock holds a composer plugin and a library, with root scripts.
+fn with_composer_plugin(server: &Server) -> TempDir {
+    server.route("/acme-composer-plugin.zip", Route::ok(plugin_dist()));
+    let dir = TempDir::new().unwrap();
+    let plugin = json!({
+        "name": "acme/composer-plugin", "version": "1.0.0", "type": "composer-plugin",
+        "dist": {"type": "zip", "url": format!("{}/acme-composer-plugin.zip", server.url()), "shasum": ""},
+        "require": {"composer-plugin-api": "^2.0"},
+        "autoload": {"psr-4": {"Acme\\ComposerPlugin\\": "src/"}},
+        "extra": {"class": "Acme\\ComposerPlugin\\Plugin"},
+    });
+    fs::write(
+        dir.path().join("composer.json"),
+        json!({
+            "name": "acme/site",
+            "require": {"acme/composer-plugin": "^1", "acme/http": "^1"},
+            "scripts": {"post-install-cmd": ["Acme\\ComposerPlugin\\Scripts::installed", "echo hi"]},
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join("composer.lock"),
+        json!({"packages": [plugin, locked(server, "1.0.0")]}).to_string(),
+    )
+    .unwrap();
+    dir
+}
+
+fn log(dir: &Path) -> String {
+    fs::read_to_string(dir.join("plugin.log")).unwrap_or_default()
+}
+
+#[test]
+fn a_composer_plugin_is_activated_and_hears_the_events() {
+    let (home, server) = (TempDir::new().unwrap(), server());
+    let dir = with_composer_plugin(&server);
+    let out = composer(
+        home.path(),
+        &[
+            "install",
+            "--allow-plugins",
+            "--working-dir",
+            dir.path().to_str().unwrap(),
+        ],
+    );
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(
+        log(dir.path()),
+        "activate 2.6.0 acme/site\npackage acme/http 1.0.0 present\ndump post-autoload-dump io\nscript post-install-cmd 2\n"
+    );
+    assert!(out.stderr.contains("acme plugin active"), "{}", out.stderr);
+}
+
+#[test]
+fn composer_plugins_need_permission() {
+    let (home, server) = (TempDir::new().unwrap(), server());
+    let dir = with_composer_plugin(&server);
+    let out = composer(
+        home.path(),
+        &["install", "--working-dir", dir.path().to_str().unwrap()],
+    );
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(log(dir.path()), "");
+    assert!(
+        out.stderr.contains("composer plugins were not run: acme/composer-plugin (run with --allow-plugins to run them)"),
+        "{}",
+        out.stderr
+    );
+}
+
+#[test]
+fn a_shell_script_is_reported_not_run() {
+    let (home, server) = (TempDir::new().unwrap(), server());
+    let dir = with_composer_plugin(&server);
+    let out = composer(
+        home.path(),
+        &[
+            "install",
+            "--allow-plugins",
+            "--working-dir",
+            dir.path().to_str().unwrap(),
+        ],
+    );
+    assert!(
+        out.stderr
+            .contains("post-install-cmd: not run, speedyspec runs only PHP callables: echo hi"),
+        "{}",
+        out.stderr
+    );
+}
+
+#[test]
+fn an_unsupported_composer_api_names_it() {
+    let (home, server) = (TempDir::new().unwrap(), server());
+    let dir = with_composer_plugin(&server);
+    let out = Speedyspec::with_home(&[], home.path())
+        .env("ACME_UNSUPPORTED", "1")
+        .run(&[
+            "--no-interaction",
+            "composer",
+            "install",
+            "--allow-plugins",
+            "--working-dir",
+            dir.path().to_str().unwrap(),
+        ]);
+    assert_eq!(out.code, 1, "{}", out.stderr);
+    assert!(
+        out.stderr.contains("acme/composer-plugin")
+            && out.stderr.contains(
+                "composer's InstallationManager::addInstaller is not supported by speedyspec"
+            ),
+        "{}",
+        out.stderr
+    );
+}
+
+#[test]
+fn a_composer_plugin_fatal_error_fails_the_install() {
+    let (home, server) = (TempDir::new().unwrap(), server());
+    let dir = with_composer_plugin(&server);
+    let out = Speedyspec::with_home(&[], home.path())
+        .env("ACME_FATAL", "1")
+        .run(&[
+            "--no-interaction",
+            "composer",
+            "install",
+            "--allow-plugins",
+            "--working-dir",
+            dir.path().to_str().unwrap(),
+        ]);
+    assert_eq!(out.code, 1, "{}", out.stderr);
+    assert!(
+        out.stderr.contains("acme/composer-plugin")
+            && out.stderr.contains("acme_function_that_does_not_exist"),
+        "{}",
+        out.stderr
+    );
+}

@@ -31,6 +31,12 @@ pub fn clap() -> Clap {
                 .about("Install exactly the packages composer.lock lists (never dev ones)")
                 .arg(working_dir())
                 .arg(
+                    Arg::new("allow-plugins")
+                        .long("allow-plugins")
+                        .action(ArgAction::SetTrue)
+                        .help("Run the packages' composer plugins and composer.json's PHP-callable scripts"),
+                )
+                .arg(
                     Arg::new("no-dev")
                         .long("no-dev")
                         .action(ArgAction::SetTrue)
@@ -89,7 +95,7 @@ pub fn platform() -> Result<Platform, String> {
 
 /// Installs the packages of the plugin in `dir`, if it has any; prints the warnings. `Ok(false)` when there was
 /// nothing to install.
-pub fn install_in(dir: &Path) -> Result<bool, String> {
+pub fn install_in(dir: &Path, allow_plugins: bool) -> Result<bool, String> {
     let Some(lock) = Lock::read(dir).map_err(|e| e.to_string())? else {
         return Ok(false);
     };
@@ -107,10 +113,20 @@ pub fn install_in(dir: &Path) -> Result<bool, String> {
         .filter(|p| p.kind == "composer-plugin")
         .map(|p| p.name.as_str())
         .collect();
-    if !plugins.is_empty() {
+    let scripts = lock
+        .scripts
+        .iter()
+        .any(|(_, commands)| !commands.is_empty());
+    if allow_plugins && (!plugins.is_empty() || scripts) {
+        crate::composer_child::run_plugins(dir)?;
+    } else if !plugins.is_empty() {
         eprintln!(
-            "speedyspec: composer plugins were not run: {} (speedyspec does not run composer plugins yet)",
+            "speedyspec: composer plugins were not run: {} (run with --allow-plugins to run them)",
             plugins.join(", ")
+        );
+    } else if scripts {
+        eprintln!(
+            "speedyspec: composer.json's scripts were not run (run with --allow-plugins to run them)"
         );
     }
     Ok(true)
@@ -142,7 +158,7 @@ pub fn run(matches: &ArgMatches) -> i32 {
             if let Err(message) = read(&dir) {
                 return failure(&message);
             }
-            match install_in(&dir) {
+            match install_in(&dir, sub.get_flag("allow-plugins")) {
                 Ok(_) => 0,
                 Err(message) => failure(&message),
             }

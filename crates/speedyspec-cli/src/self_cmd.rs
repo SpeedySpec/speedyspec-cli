@@ -30,6 +30,12 @@ pub fn clap() -> Clap {
                         .help("Only say whether a newer release exists"),
                 ),
         )
+        // The composer plugins' child side: started by `composer install --allow-plugins`, never by hand.
+        .subcommand(
+            Clap::new("composer-plugins")
+                .hide(true)
+                .arg(Arg::new("dir").long("dir").required(true)),
+        )
         // The runner's child side: started by the CLI itself, never by hand.
         .subcommand(
             Clap::new("run-task")
@@ -76,7 +82,10 @@ pub fn runs_before_plugins(args: &[String]) -> bool {
             }
         }
     }
-    matches!(words[..], ["self", "update" | "run-task" | "task"])
+    matches!(
+        words[..],
+        ["self", "update" | "run-task" | "task" | "composer-plugins"]
+    )
 }
 
 fn say(line: &str) {
@@ -92,6 +101,9 @@ pub fn run(matches: &ArgMatches) -> i32 {
             std::path::Path::new(run.get_one::<String>("result").expect("required")),
         ),
         Some(("task", task)) => run_one_task(task),
+        Some(("composer-plugins", plugins)) => crate::composer_child::run_child(
+            std::path::Path::new(plugins.get_one::<String>("dir").expect("required")),
+        ),
         _ => unreachable!("commands.rs dispatches every other self subcommand"),
     }
 }

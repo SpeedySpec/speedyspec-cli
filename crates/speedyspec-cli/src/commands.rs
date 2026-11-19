@@ -212,6 +212,12 @@ fn self_plugin_clap() -> Clap {
                         .value_name("SOURCE")
                         .help("https://... zip URL, owner/repo or owner/repo@tag"),
                 )
+                .arg(
+                    Arg::new("allow-composer-plugins")
+                        .long("allow-composer-plugins")
+                        .action(ArgAction::SetTrue)
+                        .help("Run the composer plugins and scripts of the plugin's composer packages"),
+                )
                 .arg(yes_flag()),
         )
         .subcommand(

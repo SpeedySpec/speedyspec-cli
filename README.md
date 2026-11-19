@@ -424,7 +424,26 @@ resolving are refused, so run composer itself for those, where the plugin is dev
 `self plugin install` installs a plugin's packages before putting the plugin in place, and a
 failure leaves nothing installed. A plugin given with `--plugin-dir` whose packages are not
 installed is skipped, with the `speedyspec composer install --working-dir <dir>` that fixes it.
-Composer plugins (packages of type `composer-plugin`) are not run yet, and `install` lists them.
+### Composer plugins
+
+`speedyspec composer install --allow-plugins` (and `self plugin install --allow-composer-plugins`)
+also runs the packages' composer plugins and `composer.json`'s scripts. Without the flag they are
+listed and not run, as with composer's `allow-plugins`, because they run code at install time.
+They run in a separate process, against a replica of composer's plugin API written in Rust:
+`PluginInterface`, `EventSubscriberInterface`, `Capable`, `IOInterface`, `Composer` (its package,
+config, local repository, installation manager and event dispatcher), the package, operation and
+event classes, and the event-name constants.
+
+- Each `composer-plugin` package is activated in lock order (`extra.class`, one name or several).
+- Then what composer dispatches after an install is dispatched to the plugins' subscribed
+  listeners, by priority: `post-package-install` for each package that is not a composer plugin,
+  then `post-autoload-dump` and `post-install-cmd`.
+- A root script that is a PHP callable (`Class::method`) runs with its event. Any other script
+  (a shell command, `@php`, `@putenv`) is reported and not run.
+- The IO never asks: each question takes its default. `write` goes to stderr.
+- A method the replica does not have fails the install with
+  `composer's <Class>::<method> is not supported by speedyspec`, naming the plugin. So do custom
+  installers (`InstallationManager::addInstaller`), since packages have already been placed.
 
 ## An install's plugins and themes
 
