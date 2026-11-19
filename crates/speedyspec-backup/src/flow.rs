@@ -357,68 +357,97 @@ fn scope(root: &Path, staged: &Path, spec: &BackupSpec) -> Result<Vec<PathBuf>, 
     Ok(found)
 }
 
-/// Moves `from` to `to`, making `to`'s parents.
-fn move_to(from: &Path, to: &Path) -> io::Result<()> {
+/// A rename: `fs::rename`, or a failing one in tests.
+type Rename<'a> = dyn FnMut(&Path, &Path) -> io::Result<()> + 'a;
+
+/// Moves `from` to `to` with `rename`, making `to`'s parents.
+fn move_to(rename: &mut Rename<'_>, from: &Path, to: &Path) -> io::Result<()> {
     if let Some(parent) = to.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::rename(from, to)
+    rename(from, to)
 }
 
-/// Puts the unpacked files in place of the install's: each entry in scope is moved aside and its new copy moved in,
-/// then the target's own preserved and excluded paths are moved back into the new tree. On failure, what was moved
-/// is put back.
+/// Puts the unpacked files in place of the install's.
 fn swap(root: &Path, staged: &Path, spec: &BackupSpec) -> Result<(), String> {
+    swap_with(root, staged, spec, &mut |from, to| fs::rename(from, to))
+}
+
+/// Puts the unpacked files in place of the install's, with `rename` for every move. Each entry in scope is moved
+/// aside and its new copy moved in; then the target's own preserved and excluded paths are moved back from aside into
+/// the new tree. If anything fails, every move is undone in reverse. Only when undoing fails too are the originals
+/// left in the aside directory, which the error names; otherwise it is removed.
+fn swap_with(
+    root: &Path,
+    staged: &Path,
+    spec: &BackupSpec,
+    rename: &mut Rename<'_>,
+) -> Result<(), String> {
     let aside = root.join(random_name("restore-old"));
     fs::create_dir(&aside).map_err(|e| io_error("create", &aside, e))?;
-    let mut moved_aside: Vec<PathBuf> = Vec::new();
-    let mut moved_in: Vec<PathBuf> = Vec::new();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&aside, fs::Permissions::from_mode(0o700));
+    }
+    // Every move made, as (from, to), to undo in reverse.
+    let mut done: Vec<(PathBuf, PathBuf)> = Vec::new();
+    let keep: Vec<&String> = spec.preserve.iter().chain(spec.exclude.iter()).collect();
     let result = (|| -> Result<(), String> {
-        let keep: Vec<&String> = spec.preserve.iter().chain(spec.exclude.iter()).collect();
         for entry in scope(root, staged, spec)? {
             // A kept path at the top level stays where it is.
             if keep.iter().any(|k| Path::new(k.as_str()) == entry) {
                 continue;
             }
-            if fs::symlink_metadata(root.join(&entry)).is_ok() {
-                move_to(&root.join(&entry), &aside.join(&entry))
-                    .map_err(|e| io_error("move aside", &root.join(&entry), e))?;
-                moved_aside.push(entry.clone());
+            let (live, old, new) = (root.join(&entry), aside.join(&entry), staged.join(&entry));
+            if fs::symlink_metadata(&live).is_ok() {
+                move_to(rename, &live, &old).map_err(|e| io_error("move aside", &live, e))?;
+                done.push((live.clone(), old));
             }
-            if fs::symlink_metadata(staged.join(&entry)).is_ok() {
-                move_to(&staged.join(&entry), &root.join(&entry))
-                    .map_err(|e| io_error("restore", &root.join(&entry), e))?;
-                moved_in.push(entry);
+            if fs::symlink_metadata(&new).is_ok() {
+                move_to(rename, &new, &live).map_err(|e| io_error("restore", &live, e))?;
+                done.push((new, live));
             }
         }
-        for kept in keep {
-            let old = aside.join(kept);
+        for kept in &keep {
+            let old = aside.join(kept.as_str());
             if fs::symlink_metadata(&old).is_err() {
                 continue;
             }
-            let live = root.join(kept);
-            if let Ok(meta) = fs::symlink_metadata(&live) {
-                let removed = if meta.is_dir() {
-                    fs::remove_dir_all(&live)
-                } else {
-                    fs::remove_file(&live)
-                };
-                removed.map_err(|e| io_error("replace", &live, e))?;
+            let live = root.join(kept.as_str());
+            if fs::symlink_metadata(&live).is_ok() {
+                // The backup's copy of a kept path goes back to the unpacked files, never deleted.
+                let unwanted = staged.join(kept.as_str());
+                move_to(rename, &live, &unwanted).map_err(|e| io_error("replace", &live, e))?;
+                done.push((live.clone(), unwanted));
             }
-            move_to(&old, &live).map_err(|e| io_error("keep", &live, e))?;
+            move_to(rename, &old, &live).map_err(|e| io_error("keep", &live, e))?;
+            done.push((old, live));
         }
         Ok(())
     })();
-    if result.is_err() {
-        for entry in &moved_in {
-            let _ = move_to(&root.join(entry), &staged.join(entry));
+    match result {
+        Ok(()) => {
+            let _ = fs::remove_dir_all(&aside);
+            Ok(())
         }
-        for entry in &moved_aside {
-            let _ = move_to(&aside.join(entry), &root.join(entry));
+        Err(message) => {
+            let mut undone = true;
+            for (from, to) in done.iter().rev() {
+                if move_to(rename, to, from).is_err() {
+                    undone = false;
+                }
+            }
+            if undone {
+                let _ = fs::remove_dir_all(&aside);
+                Err(message)
+            } else {
+                Err(format!(
+                    "{message}; putting the files back failed too, so the install's original files are in {}",
+                    aside.display()
+                ))
+            }
         }
     }
-    let _ = fs::remove_dir_all(&aside);
-    result
 }
 
 /// Restores `archive` into the install at `root` and its database: the files are unpacked beside the install, the
@@ -1111,6 +1140,110 @@ pub(crate) mod tests {
             error.message
         );
         assert!(!root.path().join("b").exists());
+    }
+
+    /// A live install and an unpacked backup, with a nested kept path (`content/keep`, preserved).
+    fn swap_case() -> (tempfile::TempDir, tempfile::TempDir, BackupSpec) {
+        let root = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("index.php"), "old index").unwrap();
+        fs::create_dir_all(root.path().join("content/keep")).unwrap();
+        fs::write(
+            root.path().join("content/keep/mine.txt"),
+            "the target's own",
+        )
+        .unwrap();
+        fs::write(root.path().join("content/old.txt"), "old content").unwrap();
+        let staged = tempfile::tempdir().unwrap();
+        fs::write(staged.path().join("index.php"), "new index").unwrap();
+        fs::create_dir_all(staged.path().join("content/keep")).unwrap();
+        fs::write(staged.path().join("content/keep/mine.txt"), "the backup's").unwrap();
+        let mut spec = spec();
+        spec.preserve = vec!["content/keep".into()];
+        spec.exclude = Vec::new();
+        (root, staged, spec)
+    }
+
+    fn work_dirs(root: &Path) -> Vec<String> {
+        fs::read_dir(root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.starts_with(WORK_PREFIX))
+            .collect()
+    }
+
+    #[test]
+    fn a_swap_keeps_nested_preserved_paths() {
+        let (root, staged, spec) = swap_case();
+        swap_with(root.path(), staged.path(), &spec, &mut |a, b| {
+            fs::rename(a, b)
+        })
+        .unwrap();
+        assert_eq!(
+            fs::read_to_string(root.path().join("index.php")).unwrap(),
+            "new index"
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("content/keep/mine.txt")).unwrap(),
+            "the target's own"
+        );
+        assert!(!root.path().join("content/old.txt").exists());
+        assert!(work_dirs(root.path()).is_empty());
+    }
+
+    #[test]
+    fn a_swap_that_fails_puts_everything_back() {
+        // Every rename from the fourth on fails once (the keep phase), then renames work again for the rollback.
+        let (root, staged, spec) = swap_case();
+        let mut calls = 0;
+        let error = swap_with(root.path(), staged.path(), &spec, &mut |a, b| {
+            calls += 1;
+            if calls == 5 {
+                return Err(io::Error::other("disk full"));
+            }
+            fs::rename(a, b)
+        })
+        .unwrap_err();
+        assert!(error.contains("disk full"), "{error}");
+        assert_eq!(
+            fs::read_to_string(root.path().join("index.php")).unwrap(),
+            "old index"
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("content/keep/mine.txt")).unwrap(),
+            "the target's own"
+        );
+        assert_eq!(
+            fs::read_to_string(root.path().join("content/old.txt")).unwrap(),
+            "old content"
+        );
+        assert!(
+            work_dirs(root.path()).is_empty(),
+            "{:?}",
+            work_dirs(root.path())
+        );
+    }
+
+    #[test]
+    fn a_rollback_that_fails_keeps_the_originals_and_names_them() {
+        let (root, staged, spec) = swap_case();
+        let mut calls = 0;
+        let error = swap_with(root.path(), staged.path(), &spec, &mut |a, b| {
+            calls += 1;
+            if calls >= 3 {
+                return Err(io::Error::other("disk full"));
+            }
+            fs::rename(a, b)
+        })
+        .unwrap_err();
+        let kept = work_dirs(root.path());
+        assert_eq!(kept.len(), 1, "{kept:?}");
+        assert!(error.contains(&kept[0]), "{error}");
+        let originals = root.path().join(&kept[0]);
+        let still_there = fs::read_to_string(originals.join("index.php"))
+            .or_else(|_| fs::read_to_string(root.path().join("index.php")))
+            .unwrap();
+        assert_eq!(still_there, "old index");
     }
 
     #[test]
