@@ -4,6 +4,7 @@
 
 mod autoload;
 mod classmap;
+mod install;
 mod lock;
 mod platform;
 
@@ -11,6 +12,7 @@ use std::fmt;
 
 pub use autoload::{MAPS_FILE, Maps};
 pub use classmap::declared;
+pub use install::{Installed, install};
 pub use lock::{Autoload, Dist, Lock, Package, is_package_name, is_platform};
 pub use platform::{Platform, allows, check};
 

@@ -12,4 +12,5 @@ tempfile = "3"
 speedyspec-driver-zip = { path = "../speedyspec-driver-zip" }
 
 [dev-dependencies]
+sha1 = "0.10"
 speedyspec-testkit = { path = "../speedyspec-testkit" }
