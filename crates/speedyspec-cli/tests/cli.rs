@@ -184,13 +184,10 @@ fn plugin_dir_accepts_equals_form_and_comes_anywhere() {
 
 #[test]
 fn plugin_management_lives_under_self() {
+    // The top-level `plugin` is an install's plugins, which need --install.
     let out = run(&["good"], &["plugin", "list"]);
     assert_eq!(out.code, 2, "{}", out.stdout);
-    assert!(
-        out.stderr.contains("unrecognized subcommand 'plugin'"),
-        "{}",
-        out.stderr
-    );
+    assert!(out.stderr.contains("--install"), "{}", out.stderr);
     let help = run(&[], &["self", "--help"]);
     assert_eq!(help.code, 0, "{}", help.stderr);
     assert!(help.stdout.contains("plugin"), "{}", help.stdout);
