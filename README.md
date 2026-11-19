@@ -394,6 +394,38 @@ new one has validated. Both commands work when an installed plugin is broken, an
 `--no-plugins`. Only plugins in the user plugin directory can be removed. The name must be a plugin name
 (`vendor/package`); anything else is refused before any path is looked at.
 
+## A plugin's composer packages
+
+```
+speedyspec composer install       [--working-dir <dir>]
+speedyspec composer dump-autoload [--working-dir <dir>]
+speedyspec composer show          [--working-dir <dir>]
+speedyspec composer validate      [--working-dir <dir>]
+```
+
+A plugin can depend on composer packages (Guzzle, say). It commits its `composer.lock`, and speedyspec
+installs exactly what that lists, with its own composer written in Rust, so composer is not needed
+on the machine. Nothing is resolved: `update`, `require` and the other subcommands that need
+resolving are refused, so run composer itself for those, where the plugin is developed.
+
+- `install` downloads each locked package (never the dev ones; `--no-dev` is accepted), checks
+  its sha1 when the lock has one, unpacks it with the same path and link checks as any download,
+  and puts it in `vendor/<name>`. It checks each package's `ext-*` and `php` requirements against
+  the embedded PHP first, naming the package that needs what is missing. `vendor/` is built
+  beside the old one and swapped in at the end, so a failure leaves the old one as it was.
+- The autoload maps (PSR-4, PSR-0, a classmap scanned in Rust, and the `files` to include) are
+  kept in `vendor/speedyspec-autoload.json`. No `vendor/autoload.php` is generated: when the
+  plugin loads, speedyspec registers its maps with one autoloader of its own and includes the
+  `files` before the plugin's entry file. A package two plugins both bring is included once,
+  and a warning names the versions when they differ. The first plugin's version is the one used.
+- `dump-autoload` rebuilds the maps, `show` lists `name <TAB> version <TAB> type`, and `validate`
+  checks the two files the way speedyspec reads them.
+
+`self plugin install` installs a plugin's packages before putting the plugin in place, and a
+failure leaves nothing installed. A plugin given with `--plugin-dir` whose packages are not
+installed is skipped, with the `speedyspec composer install --working-dir <dir>` that fixes it.
+Composer plugins (packages of type `composer-plugin`) are not run yet, and `install` lists them.
+
 ## An install's plugins and themes
 
 ```

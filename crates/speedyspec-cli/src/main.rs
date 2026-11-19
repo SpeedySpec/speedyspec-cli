@@ -5,6 +5,8 @@ mod app_target;
 mod attribution;
 mod boot;
 mod commands;
+mod composer_area;
+mod composer_cmd;
 mod db_cmd;
 mod drivers;
 mod extension_cmd;
