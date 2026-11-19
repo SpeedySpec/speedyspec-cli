@@ -448,6 +448,7 @@ fn restore_to_another_url_and_prefix() {
             "target",
             "--url",
             "https://new.example.org",
+            "--yes",
         ]);
         assert_eq!(out.code, 0, "{label}: {}", out.stderr);
         assert_eq!(target_db.tables(), ["site_options"], "{label}");
@@ -484,9 +485,9 @@ fn restore_to_another_url_and_prefix() {
             target_config,
             "{label}"
         );
-        // The empty target had nothing to back up first.
+        // Its database was empty, but its files are replaced, so they were backed up first.
         assert!(
-            !out.stderr.contains("backed up to"),
+            out.stderr.contains("what was there is backed up to"),
             "{label}: {}",
             out.stderr
         );
@@ -616,6 +617,91 @@ fn a_large_table_round_trips() {
         assert!(
             before.as_deref().is_some_and(|c| c.starts_with("50000:")),
             "{label}: {before:?}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "needs scripts/mysql.sh up"]
+fn a_site_without_tables_is_still_asked_about_for_its_files() {
+    for (label, url) in servers() {
+        let mut source_db = Database::new(&url, "nf_src");
+        fill_source(&mut source_db, "wp_");
+        let target_db = Database::new(&url, "nf_dst");
+        let (home, server) = (
+            TempDir::new().unwrap(),
+            Server::start(vec![("/app.zip", Route::ok(app_zip()))]),
+        );
+        let source = install(home.path(), &server, "source", &source_db.json("wp_"));
+        let target = install(home.path(), &server, "target", &target_db.json("wp_"));
+        fs::write(
+            target.base.path().join("content/since-the-backup.txt"),
+            "a new upload",
+        )
+        .unwrap();
+        let archive = home.path().join("b.tar.gz");
+        assert_eq!(source.backup(&archive).code, 0, "{label}");
+        let out = target.run(&[
+            "app",
+            "restore",
+            archive.to_str().unwrap(),
+            "--install",
+            "target",
+        ]);
+        assert_eq!(out.code, 2, "{label}: {}", out.stderr);
+        assert!(
+            target
+                .base
+                .path()
+                .join("content/since-the-backup.txt")
+                .exists(),
+            "{label}"
+        );
+    }
+}
+
+#[test]
+#[ignore = "needs scripts/mysql.sh up"]
+fn another_prefix_is_asked_about_and_backed_up() {
+    for (label, url) in servers() {
+        let mut source_db = Database::new(&url, "op_src");
+        fill_source(&mut source_db, "wp_");
+        let mut target_db = Database::new(&url, "op_dst");
+        target_db.exec("CREATE TABLE `other_options` (`option_name` varchar(191) PRIMARY KEY, `option_value` longtext)");
+        target_db.exec("INSERT INTO `other_options` VALUES ('keep','the other install''s')");
+        let (home, server) = (
+            TempDir::new().unwrap(),
+            Server::start(vec![("/app.zip", Route::ok(app_zip()))]),
+        );
+        let source = install(home.path(), &server, "source", &source_db.json("wp_"));
+        let target = install(home.path(), &server, "target", &target_db.json("site_"));
+        let archive = home.path().join("b.tar.gz");
+        assert_eq!(source.backup(&archive).code, 0, "{label}");
+        let out = target.run(&[
+            "app",
+            "restore",
+            archive.to_str().unwrap(),
+            "--install",
+            "target",
+            "--table-prefix",
+            "other_",
+            "--yes",
+        ]);
+        assert_eq!(out.code, 0, "{label}: {}", out.stderr);
+        let before = fs::read_dir(home.path().join("backups"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .find(|p| {
+                p.file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .starts_with("target-before-restore-")
+            })
+            .unwrap_or_else(|| panic!("{label}: no backup was taken first"));
+        assert!(
+            read_entry(&before, "database.sql").contains("the other install\\'s"),
+            "{label}: the tables about to be overwritten were not backed up"
         );
     }
 }

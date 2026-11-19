@@ -6,7 +6,7 @@ use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 
 use clap::{Arg, ArgAction, ArgMatches, Command as Clap};
-use speedyspec_backup::flow::{SiteDatabase, backup, plan_move, read_manifest, restore};
+use speedyspec_backup::flow::{SiteDatabase, backup, has_files, plan_move, read_manifest, restore};
 use speedyspec_backup::manifest::Manifest;
 use speedyspec_backup::rewrite::{Move, rewrite};
 use speedyspec_db::{Connection, ExportOptions};
@@ -77,6 +77,12 @@ impl SiteDatabase for LiveDatabase {
     }
 
     fn site_url(&mut self, at: &SiteUrl) -> Result<Option<String>, String> {
+        // A database without the table (an install whose app has not set itself up yet) has no site URL.
+        let table = format!("{}{}", self.prefix, at.table);
+        let tables = self.connection.tables().map_err(|e| e.to_string())?;
+        if !tables.iter().any(|t| t.name == table) {
+            return Ok(None);
+        }
         self.connection
             .site_value(&at.table, &at.key_column, &at.key, &at.value_column)
             .map_err(|e| e.to_string())
@@ -157,14 +163,22 @@ pub fn backup_dir(path: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// Backs up install `name` to `to`.
-pub fn backup_to(runtime: &Runtime, name: &str, to: &Path) -> Result<(), String> {
+/// Backs up install `name` to `to`; `prefix` backs up the tables under another prefix than the install's own.
+pub fn backup_to(
+    runtime: &Runtime,
+    name: &str,
+    to: &Path,
+    prefix: Option<&str>,
+) -> Result<(), String> {
     let target = Target::find(name)?;
     let root = target.install.root.clone().ok_or_else(|| {
         format!("install {name} is not on this machine; backups are for zip installs for now")
     })?;
     let spec = spec(runtime, &target.install)?;
-    let settings = app_target::database(runtime, &target)?;
+    let mut settings = app_target::database(runtime, &target)?;
+    if let Some(prefix) = prefix {
+        settings.table_prefix = prefix.to_owned();
+    }
     let mut db = open(&settings)?;
     let record = crate::installs::read(name)?;
     let manifest = Manifest {
@@ -206,7 +220,7 @@ pub fn run_backup(runtime: &Runtime, matches: &ArgMatches) -> i32 {
         );
         return 1;
     }
-    match backup_to(runtime, name, &to) {
+    match backup_to(runtime, name, &to, None) {
         Ok(()) => {
             eprintln!(
                 "speedyspec: the backup holds the site's database and secrets (such as its configuration); keep it private"
@@ -322,13 +336,16 @@ pub fn run_restore(runtime: &Runtime, matches: &ArgMatches) -> i32 {
         Ok(plan) => plan,
         Err(message) => return fail(&message),
     };
-    let mut db = match open(&settings) {
+    // The tables the restore writes are those under the prefix it restores to.
+    let mut written = settings.clone();
+    written.table_prefix = to_prefix.clone();
+    let mut db = match open(&written) {
         Ok(db) => db,
         Err(message) => return fail(&message),
     };
-    // 4. Ask.
+    // 4. Ask, when anything the restore replaces is there: the tables under that prefix, or the install's files.
     let has_content = match db.has_prefixed_tables() {
-        Ok(found) => found,
+        Ok(found) => found || has_files(&root, &spec),
         Err(message) => return fail(&message),
     };
     if has_content {
@@ -345,7 +362,7 @@ pub fn run_restore(runtime: &Runtime, matches: &ArgMatches) -> i32 {
                 "there is no speedyspec home to keep the backup of what is there in; set SPEEDYSPEC_HOME",
             );
         };
-        if let Err(message) = backup_to(runtime, name, &path) {
+        if let Err(message) = backup_to(runtime, name, &path, Some(&to_prefix)) {
             return fail(&format!(
                 "could not back up what is there first, so nothing was restored: {message}"
             ));

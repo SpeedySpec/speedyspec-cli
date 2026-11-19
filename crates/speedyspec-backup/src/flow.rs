@@ -303,6 +303,24 @@ fn target_through_link(staged: &Path, relative: &Path, target: &Path) -> bool {
     false
 }
 
+/// Whether the install at `root` has files a restore would replace: anything under the included paths that is not
+/// kept from the target (preserved or excluded) and not speedyspec's own work.
+pub fn has_files(root: &Path, spec: &BackupSpec) -> bool {
+    let keep: Vec<&String> = spec.preserve.iter().chain(spec.exclude.iter()).collect();
+    let mut entries = Vec::new();
+    for include in &spec.include {
+        if walk(root, Path::new(include), spec, &[], &mut entries).is_err() {
+            return true;
+        }
+    }
+    entries.iter().any(|entry| {
+        let kept = keep
+            .iter()
+            .any(|k| entry == Path::new(k.as_str()) || entry.starts_with(k.as_str()));
+        !kept && fs::symlink_metadata(root.join(entry)).is_ok_and(|m| !m.is_dir())
+    })
+}
+
 /// Whether a link at `relative` pointing to `target` stays inside the install.
 fn link_stays_inside(relative: &Path, target: &Path) -> bool {
     if target.is_absolute() {
