@@ -155,6 +155,18 @@ exits 1 with `speedyspec: <command>: <class>: <message>`. A command may not reus
 `self`, `php` or `help`, or the name of a command an earlier plugin added (the first one wins);
 it is dropped with a message naming the plugin.
 
+Besides the hooks, plugins get two APIs in PHP: the service container
+(`SpeedySpec\Container\Container::getInstance()`) and the native Hook API
+(`SpeedySpec\WpHooks\Native\*`). WordPress's legacy hook names (`add_filter` and the rest,
+`WP_Hook`, `$wp_filter`) are not defined: the CLI never runs WordPress.
+
+A plugin that needs to fetch something (an API answer, say) calls
+`SpeedySpec\Cli\http_get(string $url, int $maxBytes = 8388608): string`. It downloads with the
+CLI's own root certificates and rules: `https://`, or plain `http://` only to this machine, and
+never from `https` down to `http` on a redirect. Any failure (a refused URL, a status other than
+success, a body over `$maxBytes`) throws a `RuntimeException` with the reason. Tasks running inside
+an app (see below) do not have it.
+
 ## Installing an app
 
 ```

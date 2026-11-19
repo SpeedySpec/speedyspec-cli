@@ -1,0 +1,6 @@
+{
+    "name": "speedyspec-fixture/http-get",
+    "version": "1.0.0",
+    "contracts": "^1.0",
+    "entry": "plugin.php"
+}
