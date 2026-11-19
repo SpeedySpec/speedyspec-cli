@@ -14,6 +14,7 @@ mod prompt;
 mod runner;
 mod runner_child;
 mod self_cmd;
+mod setup;
 
 use std::process::ExitCode;
 

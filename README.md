@@ -231,6 +231,19 @@ Hook::add('speedyspec_driver_zip', static function (array $sources, InstallReque
 `sha256` (optional, 64 hex characters) and `stripComponents` (leading path segments to drop,
 0 to 32). That plugin is `examples/install-wordpress`.
 
+### Finishing setup
+
+Once the files are in place, the app's plugin can finish the install: it answers
+`speedyspec_app_setup` (filtered from null with the `Install` and the `InstallRequest`) with a
+`SetupPlan` of `AppTask`s, which run in order in the install's directory, through the runner (see
+below). Each one is shown as `setup: <file> (<n>/<total>)` on stderr, followed by its result when
+that is a string. A task that fails stops the install with
+`speedyspec: setup stopped at <file>: <why>; run the same command again to finish it`. The install
+record keeps how many tasks finished (`"status": "files"`, `"setup_done": <n>`), so running the
+same command again downloads nothing and starts at the task that failed. Options are asked for
+again, since the record holds none, and each task must be safe to run twice. Setup runs only for
+installs on this machine (zip) for now.
+
 ## Working with an install's database
 
 ```

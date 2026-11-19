@@ -6,7 +6,7 @@ use std::rc::Rc;
 
 use clap::ArgMatches;
 use speedyspec_driver::{
-    App, Driver, DriverInput, InstallOption, PluginRef, Progress, UninstallInput,
+    App, Driver, DriverInput, Install, InstallOption, PluginRef, Progress, UninstallInput,
     decode_install_option,
 };
 use speedyspec_hooks::{Hooks, Key, Value};
@@ -403,6 +403,13 @@ pub fn install(runtime: &Runtime, matches: &ArgMatches, prepass: Option<Prepass>
             }
         }
     }
+    // A record of this install whose setup did not finish means its files are already in place: only the setup
+    // is left, from the first task that did not finish.
+    let resume = local.as_ref().and_then(|local| {
+        let record = crate::installs::find(&local.name).ok().flatten()?;
+        let same = record.app == choices.app && record.location == local.location.to_string_lossy();
+        (same && record.status == crate::installs::Status::Files).then_some(record.setup_done)
+    });
 
     let request = match runtime.php.construct(
         INSTALL_REQUEST,
@@ -432,12 +439,15 @@ pub fn install(runtime: &Runtime, matches: &ArgMatches, prepass: Option<Prepass>
         return 1;
     }
 
-    // Each plugin's answer is checked as it comes back, so a bad one is blamed on its plugin.
-    let hook = format!("speedyspec_driver_{}", driver.id());
-    let (checker, php) = (Rc::clone(driver), Rc::clone(&runtime.php));
-    let validator: Rc<Validator> =
-        Rc::new(
-            move |given, returned| match checker.check_answer(&returned, &PhpReader(&php)) {
+    let result = if resume.is_some() {
+        eprintln!("speedyspec: files already in place; finishing setup");
+        Value::Array(Vec::new())
+    } else {
+        // Each plugin's answer is checked as it comes back, so a bad one is blamed on its plugin.
+        let hook = format!("speedyspec_driver_{}", driver.id());
+        let (checker, php) = (Rc::clone(driver), Rc::clone(&runtime.php));
+        let validator: Rc<Validator> = Rc::new(move |given, returned| {
+            match checker.check_answer(&returned, &PhpReader(&php)) {
                 Ok(()) => Checked {
                     value: returned,
                     problems: Vec::new(),
@@ -446,59 +456,95 @@ pub fn install(runtime: &Runtime, matches: &ArgMatches, prepass: Option<Prepass>
                     value: given.clone(),
                     problems: vec![error.to_string()],
                 },
-            },
-        );
-    runtime.php.redirect_output(Output::Stderr);
-    runtime.hooks.validate(&hook, validator);
-    let answer = runtime
-        .hooks
-        .filter(&hook, driver.seed(), std::slice::from_ref(&request));
-    // Who answered, before the validators (and this list with them) are cleared.
-    let plugins: Vec<PluginRef> = runtime
-        .hooks
-        .take_contributors()
-        .into_iter()
-        .map(|name| {
-            let version = runtime
-                .loaded
-                .iter()
-                .find(|plugin| plugin.manifest.name == name)
-                .map(|plugin| plugin.manifest.version.to_string())
-                .unwrap_or_default();
-            PluginRef { name, version }
-        })
-        .collect();
-    runtime.hooks.clear_validators();
-    runtime.php.redirect_output(Output::Stdout);
-    let rejections = runtime.hooks.take_rejections();
-    if !rejections.is_empty() {
-        return refuse(&rejections);
-    }
-    let answer = match answer {
-        Ok(answer) => answer,
-        Err(error) => {
-            report_hook_error(&error);
-            eprintln!("speedyspec: nothing was installed");
-            return 1;
+            }
+        });
+        runtime.php.redirect_output(Output::Stderr);
+        runtime.hooks.validate(&hook, validator);
+        let answer = runtime
+            .hooks
+            .filter(&hook, driver.seed(), std::slice::from_ref(&request));
+        // Who answered, before the validators (and this list with them) are cleared.
+        let plugins: Vec<PluginRef> = runtime
+            .hooks
+            .take_contributors()
+            .into_iter()
+            .map(|name| {
+                let version = runtime
+                    .loaded
+                    .iter()
+                    .find(|plugin| plugin.manifest.name == name)
+                    .map(|plugin| plugin.manifest.version.to_string())
+                    .unwrap_or_default();
+                PluginRef { name, version }
+            })
+            .collect();
+        runtime.hooks.clear_validators();
+        runtime.php.redirect_output(Output::Stdout);
+        let rejections = runtime.hooks.take_rejections();
+        if !rejections.is_empty() {
+            return refuse(&rejections);
         }
-    };
+        let answer = match answer {
+            Ok(answer) => answer,
+            Err(error) => {
+                report_hook_error(&error);
+                eprintln!("speedyspec: nothing was installed");
+                return 1;
+            }
+        };
 
-    let reader = PhpReader(&runtime.php);
-    let result = match driver.install(&prepared, &answer, &reader, &plugins, &mut StderrProgress) {
-        Ok(result) => result,
-        Err(error) => {
-            eprintln!("speedyspec: {error}");
-            return 1;
+        let reader = PhpReader(&runtime.php);
+        match driver.install(&prepared, &answer, &reader, &plugins, &mut StderrProgress) {
+            Ok(result) => result,
+            Err(error) => {
+                eprintln!("speedyspec: {error}");
+                return 1;
+            }
         }
     };
 
     let mut code = 0;
-    if let Some(local) = &local {
-        let record =
+    let mut record = local.as_ref().map(|local| {
+        let mut record =
             crate::installs::Record::new(local, &choices.app, &choices.parts, &choices.driver);
-        if let Err(problem) = crate::installs::write(&record) {
-            eprintln!("speedyspec: installed, but {problem}");
-            code = 1;
+        record.setup_done = resume.unwrap_or(0);
+        record
+    });
+    if let Some(record) = &record
+        && let Err(problem) = crate::installs::write(record)
+    {
+        eprintln!("speedyspec: installed, but {problem}");
+        code = 1;
+    }
+    if let (Some(local), Some(record)) = (&local, &mut record) {
+        let install = Install {
+            name: local.name.clone(),
+            app: choices.app.clone(),
+            parts: choices.parts.clone(),
+            driver: choices.driver.clone(),
+            root: Some(local.location.clone()),
+        };
+        match crate::setup::plan(runtime, &install, &request) {
+            Err(problem) => {
+                eprintln!("speedyspec: the files are in place, but {problem}");
+                return 1;
+            }
+            Ok(None) => {}
+            Ok(Some(plan)) => {
+                let from = usize::try_from(record.setup_done).unwrap_or(usize::MAX);
+                match crate::setup::run(runtime, &install, &plan, from) {
+                    Ok(()) => record.setup_done = plan.tasks.len() as u64,
+                    Err(failure) => {
+                        record.setup_done = failure.done as u64;
+                        let _ = crate::installs::write(record);
+                        eprintln!(
+                            "speedyspec: {}; run the same command again to finish it",
+                            failure.message
+                        );
+                        return 1;
+                    }
+                }
+            }
         }
     }
     if let Err(error) = runtime
@@ -511,6 +557,13 @@ pub fn install(runtime: &Runtime, matches: &ArgMatches, prepass: Option<Prepass>
             error.hook, error.message
         );
         code = 1;
+    }
+    if let Some(record) = &mut record {
+        record.status = crate::installs::Status::Installed;
+        if let Err(problem) = crate::installs::write(record) {
+            eprintln!("speedyspec: installed, but {problem}");
+            code = 1;
+        }
     }
     let mut out = std::io::stdout().lock();
     for line in driver.report(&result) {
