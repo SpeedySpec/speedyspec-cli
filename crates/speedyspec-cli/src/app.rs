@@ -408,6 +408,10 @@ pub fn install(runtime: &Runtime, matches: &ArgMatches, prepass: Option<Prepass>
     let resume = local.as_ref().and_then(|local| {
         let record = crate::installs::find(&local.name).ok().flatten()?;
         let same = record.app == choices.app && record.location == local.location.to_string_lossy();
+        // A directory that is gone (or emptied) since is installed again, not resumed.
+        let present =
+            std::fs::read_dir(&local.location).is_ok_and(|mut entries| entries.next().is_some());
+        let same = same && present;
         (same && record.status == crate::installs::Status::Files).then_some(record.setup_done)
     });
 

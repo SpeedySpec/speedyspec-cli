@@ -284,16 +284,25 @@ impl<'a> Shelf<'a> {
         Ok(archive.version)
     }
 
-    /// Updates `slug` to the latest version, leaving the old one in place if anything fails.
-    pub fn update(&self, slug: &str) -> Result<Updated, String> {
-        let old_path = self.installed_path(slug).ok_or_else(|| {
+    /// Where `slug` is installed and what the app's plugin says it is; an entry the plugin does not recognize (say
+    /// WordPress's own `index.php` in the plugins directory) is not one.
+    fn recognized(&self, slug: &str) -> Result<(PathBuf, Extension), String> {
+        let missing = || {
             format!(
                 "no {} {slug} in install {}",
                 self.kind_name(),
                 self.install.name
             )
-        })?;
-        let current = self.inspect(&old_path, slug)?.and_then(|e| e.version);
+        };
+        let path = self.installed_path(slug).ok_or_else(missing)?;
+        let found = self.inspect(&path, slug)?.ok_or_else(missing)?;
+        Ok((path, found))
+    }
+
+    /// Updates `slug` to the latest version, leaving the old one in place if anything fails.
+    pub fn update(&self, slug: &str) -> Result<Updated, String> {
+        let (old_path, found) = self.recognized(slug)?;
+        let current = found.version;
         let archive = self.resolve_or_say(slug, None)?;
         if current.as_deref() == Some(archive.version.as_str()) {
             return Ok(Updated::AlreadyAt(archive.version));
@@ -317,13 +326,7 @@ impl<'a> Shelf<'a> {
 
     /// Removes `slug`'s files.
     pub fn delete(&self, slug: &str) -> Result<(), String> {
-        let path = self.installed_path(slug).ok_or_else(|| {
-            format!(
-                "no {} {slug} in install {}",
-                self.kind_name(),
-                self.install.name
-            )
-        })?;
+        let (path, _) = self.recognized(slug)?;
         let removed = if path.is_dir() {
             fs::remove_dir_all(&path)
         } else {

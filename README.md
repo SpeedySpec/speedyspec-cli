@@ -422,8 +422,9 @@ resolving are refused, so run composer itself for those, where the plugin is dev
   checks the two files the way speedyspec reads them.
 
 `self plugin install` installs a plugin's packages before putting the plugin in place, and a
-failure leaves nothing installed. A plugin given with `--plugin-dir` whose packages are not
-installed is skipped, with the `speedyspec composer install --working-dir <dir>` that fixes it.
+failure leaves nothing installed. A plugin whose packages speedyspec has not installed still
+loads, since it may bring its own autoloader (composer's `vendor/autoload.php`). It gets a
+warning with the `speedyspec composer install --working-dir <dir>` that installs them.
 ### Composer plugins
 
 `speedyspec composer install --allow-plugins` (and `self plugin install --allow-composer-plugins`)

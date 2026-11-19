@@ -81,19 +81,33 @@ fn autoload(args: &[Value]) -> Result<Value, NativeError> {
 /// `files`. A plugin that locks packages but has not had them installed is refused with the command that fixes it.
 /// Gives back warnings: a package another plugin already brought at a different version.
 pub fn load(dir: &Path, name: &str) -> Result<Vec<String>, String> {
-    let lock = Lock::read(dir).map_err(|e| e.to_string())?;
-    let maps = Maps::read(dir).map_err(|e| e.to_string())?;
-    let (lock, maps) = match (lock, maps) {
-        (lock, Some(maps)) => (lock, maps),
-        (Some(lock), None) if !lock.packages.is_empty() => {
-            return Err(format!(
-                "its composer packages are not installed ({MAPS_FILE} is missing); run speedyspec composer install \
-                 --working-dir {}",
-                dir.display()
-            ));
+    // A plugin may bring its own autoloader (composer's vendor/, required by its entry file), so what speedyspec
+    // cannot read or has not installed is a warning, never a reason to skip the plugin.
+    let maps = match Maps::read(dir) {
+        Ok(Some(maps)) => maps,
+        Ok(None) => {
+            let needs = match Lock::read(dir) {
+                Ok(Some(lock)) => !lock.packages.is_empty(),
+                Ok(None) => false,
+                Err(_) => true,
+            };
+            return Ok(if needs {
+                vec![format!(
+                    "{name}'s composer packages are not installed by speedyspec ({MAPS_FILE} is missing); if it does \
+                     not bring its own autoloader, run speedyspec composer install --working-dir {}",
+                    dir.display()
+                )]
+            } else {
+                Vec::new()
+            });
         }
-        _ => return Ok(Vec::new()),
+        Err(e) => {
+            return Ok(vec![format!(
+                "{name}: {e}; its composer packages are not autoloaded"
+            )]);
+        }
     };
+    let lock = Lock::read(dir).ok().flatten();
     let mut warnings = Vec::new();
     STATE.with(|s| {
         let mut state = s.borrow_mut();

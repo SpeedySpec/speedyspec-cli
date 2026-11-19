@@ -178,3 +178,20 @@ fn no_setup_plan_means_no_setup() {
     let r: serde_json::Value = serde_json::from_str(&text).unwrap();
     assert_eq!(r["status"], "installed");
 }
+
+#[test]
+fn a_deleted_directory_is_installed_again_rather_than_resumed() {
+    let (home, base, server) = (TempDir::new().unwrap(), TempDir::new().unwrap(), server());
+    assert_eq!(install(home.path(), &server, base.path(), true).code, 1);
+    fs::remove_dir_all(base.path()).unwrap();
+    let out = install(home.path(), &server, base.path(), false);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(
+        !out.stderr.contains("files already in place"),
+        "{}",
+        out.stderr
+    );
+    assert_eq!(downloads(&server), 2);
+    assert_eq!(order(base.path()), "1 2 3");
+    assert_eq!(record(home.path())["status"], "installed");
+}

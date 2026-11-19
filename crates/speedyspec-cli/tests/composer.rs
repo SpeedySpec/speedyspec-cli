@@ -126,18 +126,71 @@ fn composer_install_for_a_development_directory() {
 }
 
 #[test]
-fn a_plugin_whose_packages_are_not_installed_is_skipped_with_the_fix() {
+fn a_plugin_whose_packages_are_not_installed_loads_with_a_warning() {
     let (home, plugins, server) = (TempDir::new().unwrap(), TempDir::new().unwrap(), server());
     let dir = plugins.path().join("uses-http");
     plugin(&dir, &server, "uses-http", "1.0.0");
-    let out = run_plugin(home.path(), &dir, "uses-http");
-    assert_ne!(out.code, 0);
+    let out = Speedyspec::with_home(&[], home.path()).run(&[
+        &format!("--plugin-dir={}", dir.display()),
+        "self",
+        "plugin",
+        "list",
+    ]);
+    assert!(!out.stderr.contains("skipped"), "{}", out.stderr);
     assert!(
         out.stderr
             .contains("speedyspec composer install --working-dir"),
         "{}",
         out.stderr
     );
+}
+
+/// A plugin that ships composer's own vendor/ (and requires its autoload.php itself) loads as it did before.
+#[test]
+fn a_plugin_with_its_own_autoloader_still_loads() {
+    let (home, plugins) = (TempDir::new().unwrap(), TempDir::new().unwrap());
+    let dir = plugins.path().join("own-autoloader");
+    fs::create_dir_all(dir.join("vendor")).unwrap();
+    fs::write(
+        dir.join("speedyspec-plugin.json"),
+        json!({"name": "speedyspec-fixture/own-autoloader", "version": "1.0.0", "contracts": "^1.0", "entry": "plugin.php"}).to_string(),
+    )
+    .unwrap();
+    fs::write(
+        dir.join("vendor/autoload.php"),
+        "<?php function own_autoloader_ran(): string { return 'own'; }\n",
+    )
+    .unwrap();
+    fs::write(
+        dir.join("plugin.php"),
+        r#"<?php
+declare(strict_types=1);
+require __DIR__ . '/vendor/autoload.php';
+use SpeedySpec\Cli\Contracts\Command;
+use SpeedySpec\Hooks\Hook;
+Hook::add('speedyspec_commands', static function (array $commands): array
+{
+    $commands[] = new Command('own-autoloader', 'Uses its own autoloader.', static function (array $a, array $o): int
+    {
+        echo own_autoloader_ran(), "\n";
+
+        return 0;
+    });
+
+    return $commands;
+});
+"#,
+    )
+    .unwrap();
+    // It requires packages and has no composer.lock: speedyspec cannot install them, but the plugin brings its own.
+    fs::write(
+        dir.join("composer.json"),
+        json!({"require": {"acme/http": "^1"}}).to_string(),
+    )
+    .unwrap();
+    let out = run_plugin(home.path(), &dir, "own-autoloader");
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.stdout, "own\n");
 }
 
 #[test]

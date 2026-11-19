@@ -521,3 +521,23 @@ fn theme_is_a_command_of_its_own() {
     assert_eq!(out.code, 0, "{}", out.stderr);
     assert!(out.stdout.contains("list"), "{}", out.stdout);
 }
+
+/// Only what the app's plugin recognizes is a plugin: WordPress's own index.php in the plugins directory is not.
+#[test]
+fn delete_and_update_leave_files_that_are_not_plugins() {
+    let site = Site::new();
+    fs::create_dir_all(site.dir("plugin")).unwrap();
+    fs::write(
+        site.dir("plugin").join("index.php"),
+        "<?php // Silence is golden.\n",
+    )
+    .unwrap();
+    let out = site.run(&["plugin", "delete", "index", "--yes"]);
+    assert_eq!(out.code, 1, "{}", out.stderr);
+    assert!(out.stderr.contains("no plugin index"), "{}", out.stderr);
+    assert!(site.dir("plugin").join("index.php").is_file());
+    let out = site.run(&["plugin", "update", "index"]);
+    assert_eq!(out.code, 1, "{}", out.stderr);
+    assert!(out.stderr.contains("no plugin index"), "{}", out.stderr);
+    assert_eq!(site.requests(), 0);
+}
