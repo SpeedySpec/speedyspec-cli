@@ -151,7 +151,7 @@ Hook::add('speedyspec_commands', static function (array $commands): array
 A handler receives the arguments and options keyed by name (a flag option is `true` or `false`,
 a value option its string, its default or `null`) and returns the exit code (0 to 255; any other
 integer is reported as 1, never wrapped round to 0). An uncaught exception
-exits 1 with `speedyspec: <command>: <class>: <message>`. A command may not reuse `app`, `plugin`,
+exits 1 with `speedyspec: <command>: <class>: <message>`. A command may not reuse `app`, `plugin`, `theme`,
 `self`, `php` or `help`, or the name of a command an earlier plugin added (the first one wins);
 it is dropped with a message naming the plugin.
 
@@ -393,6 +393,33 @@ directory as `<vendor>.<name>`; an installed plugin of the same name is replaced
 new one has validated. Both commands work when an installed plugin is broken, and with
 `--no-plugins`. Only plugins in the user plugin directory can be removed. The name must be a plugin name
 (`vendor/package`); anything else is refused before any path is looked at.
+
+## An install's plugins and themes
+
+```
+speedyspec plugin list | install <slug>[@<version>] | update <slug> | update --all | delete <slug> [--yes]  --install <name>
+speedyspec theme  list | install <slug>[@<version>] | update <slug> | update --all | delete <slug> [--yes]  --install <name>
+```
+
+These work on an install's plugin and theme files (zip installs). Activating one is done in the
+app itself. The app's plugin says where they live and how to recognize one, by answering
+`speedyspec_app_extensions` (filtered from null with the `Install`) with an `ExtensionLayout`. Source
+plugins say where to get them, by adding `ExtensionSource`s to `speedyspec_extension_sources`
+(filtered from `[]` with the `Install`). The sources are asked in order, and the first archive wins.
+
+- `list` prints `slug <TAB> name <TAB> version`, sorted by slug, for every entry the layout's
+  `inspect` recognizes (a directory, or a single `<slug>.php` file).
+- `install` downloads the archive (checked against its `sha256` when the source gives one, with
+  the same path and link checks as `app install`). It must hold exactly one top-level directory,
+  which becomes `<directory>/<slug>`. An installed one is refused: use `update`.
+- `update` replaces the files with the latest version, unless that is the version installed. The
+  old files stay in place until the new ones are unpacked and checked, and they are put back if
+  the swap fails. `update --all` goes through every installed one: the ones no source has are
+  skipped, a failure is reported and the rest go on, and the exit code is 1 if any failed.
+- `delete` asks first, or needs `--yes` when it cannot ask, then removes the files.
+
+A slug is 1 to 200 letters, digits, `.`, `_` and `-`, starting with neither `.` nor `-`. Anything
+else is a usage error before any plugin is asked or anything is downloaded.
 
 ## Updating speedyspec
 

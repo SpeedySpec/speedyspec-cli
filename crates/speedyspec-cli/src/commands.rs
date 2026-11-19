@@ -15,7 +15,7 @@ use crate::boot::{CONTRACTS_VERSION, Runtime, boot};
 use crate::drivers;
 
 /// Names a plugin command may not take: the built-in commands, and `help`, which is clap's own.
-pub(crate) const RESERVED: &[&str] = &["app", "plugin", "self", "php", "help"];
+pub(crate) const RESERVED: &[&str] = &["app", "plugin", "theme", "self", "php", "help"];
 
 /// Names no plugin argument or option may take: they would clash with the global flags.
 const GLOBAL_NAMES: &[&str] = &[
@@ -140,6 +140,12 @@ fn dispatch(runtime: &Runtime, args: &[String]) -> i32 {
             },
             _ => crate::self_cmd::run(sub),
         },
+        Some(("plugin", sub)) => {
+            crate::extension_cmd::run(runtime, speedyspec_driver::Kind::Plugin, sub)
+        }
+        Some(("theme", sub)) => {
+            crate::extension_cmd::run(runtime, speedyspec_driver::Kind::Theme, sub)
+        }
         Some(("app", sub)) => match sub.subcommand() {
             Some(("list", _)) => crate::app::list(&runtime.apps),
             Some(("installs", _)) => crate::installs::print_list(),
@@ -279,7 +285,9 @@ fn build_tree(plugin_commands: &[PluginCommand], install_options: &[InstallOptio
                 .subcommand(install_clap(install_options))
                 .subcommand(uninstall_clap())
                 .subcommand(crate::db_cmd::clap()),
-        );
+        )
+        .subcommand(crate::extension_cmd::clap(speedyspec_driver::Kind::Plugin))
+        .subcommand(crate::extension_cmd::clap(speedyspec_driver::Kind::Theme));
     for command in plugin_commands {
         tree = tree.subcommand(plugin_clap(command));
     }
