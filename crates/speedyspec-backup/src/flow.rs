@@ -251,6 +251,47 @@ fn entry_path(path: &Path) -> Result<PathBuf, String> {
     Ok(clean)
 }
 
+/// Whether writing `relative` under `staged` would go through, or replace, a symbolic link an earlier entry made. Each
+/// link is checked on its own when it is made, so a chain of links (`a -> .`, `b -> a/..`) could otherwise reach
+/// outside the install.
+fn through_link(staged: &Path, relative: &Path) -> bool {
+    let mut at = staged.to_path_buf();
+    for component in relative.components() {
+        at.push(component);
+        if fs::symlink_metadata(&at).is_ok_and(|m| m.file_type().is_symlink()) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether a link at `relative` pointing to `target` passes through a link an earlier entry made (`b -> a/..` with
+/// `a -> .`), which `link_stays_inside` cannot see.
+fn target_through_link(staged: &Path, relative: &Path, target: &Path) -> bool {
+    let mut at: Vec<std::ffi::OsString> = relative
+        .parent()
+        .map(|p| p.components().map(|c| c.as_os_str().to_owned()).collect())
+        .unwrap_or_default();
+    for component in target.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                at.pop();
+            }
+            std::path::Component::Normal(part) => {
+                at.push(part.to_owned());
+                let path: PathBuf = at.iter().collect();
+                if fs::symlink_metadata(staged.join(&path))
+                    .is_ok_and(|m| m.file_type().is_symlink())
+                {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Whether a link at `relative` pointing to `target` stays inside the install.
 fn link_stays_inside(relative: &Path, target: &Path) -> bool {
     if target.is_absolute() {
@@ -421,6 +462,12 @@ pub fn restore(
             continue;
         }
         let dest = staged.path().join(&relative);
+        if through_link(staged.path(), &relative) {
+            return Err(plain(format!(
+                "archive entry {} was refused: it goes through a link an earlier entry made",
+                path.display()
+            )));
+        }
         match entry.header().entry_type() {
             tar::EntryType::Directory => {
                 fs::create_dir_all(&dest).map_err(|e| plain(io_error("create", &dest, e)))?;
@@ -439,7 +486,9 @@ pub fn restore(
                     .map_err(|_| not_backup())?
                     .ok_or_else(not_backup)?
                     .into_owned();
-                if !link_stays_inside(&relative, &target) {
+                if !link_stays_inside(&relative, &target)
+                    || target_through_link(staged.path(), &relative, &target)
+                {
                     return Err(plain(format!(
                         "archive entry {} was refused: its link points outside the install",
                         path.display()
@@ -946,6 +995,87 @@ pub(crate) mod tests {
             fs::read_to_string(root.path().join("index.php")).unwrap(),
             before
         );
+    }
+
+    /// A gzipped tar with a manifest and raw entries `(name, type, link)`, written by hand.
+    fn crafted_many(
+        items: &[(&str, tar::EntryType, Option<&str>)],
+    ) -> (tempfile::TempDir, PathBuf) {
+        let out = tempfile::tempdir().unwrap();
+        let path = out.path().join("bad.tar.gz");
+        let gz = GzEncoder::new(File::create(&path).unwrap(), Compression::default());
+        let mut tar = tar::Builder::new(gz);
+        let manifest_bytes = serde_json::to_vec(&manifest().to_json()).unwrap();
+        let mut header = tar::Header::new_gnu();
+        header.set_size(manifest_bytes.len() as u64);
+        header.set_cksum();
+        tar.append_data(&mut header, "manifest.json", &manifest_bytes[..])
+            .unwrap();
+        for (name, kind, link) in items {
+            let mut header = tar::Header::new_old();
+            header.as_old_mut().name[..name.len()].copy_from_slice(name.as_bytes());
+            header.set_entry_type(*kind);
+            header.set_size(0);
+            header.set_mode(0o644);
+            if let Some(link) = link {
+                header.as_old_mut().linkname[..link.len()].copy_from_slice(link.as_bytes());
+            }
+            header.set_cksum();
+            tar.append(&header, &[][..]).unwrap();
+        }
+        tar.into_inner().unwrap().finish().unwrap();
+        (out, path)
+    }
+
+    #[test]
+    fn chained_links_cannot_reach_outside() {
+        let root = site();
+        let outside = root.path().parent().unwrap().join("evil.txt");
+        let _ = fs::remove_file(&outside);
+        let (_d, archive) = crafted_many(&[
+            ("files/a", tar::EntryType::Symlink, Some(".")),
+            ("files/b", tar::EntryType::Symlink, Some("a/..")),
+            ("files/c", tar::EntryType::Symlink, Some("b/..")),
+            ("files/c/evil.txt", tar::EntryType::Regular, None),
+        ]);
+        let m = read_manifest(&archive).unwrap();
+        let result = restore(
+            &archive,
+            root.path(),
+            &spec(),
+            &mut FakeDatabase::new(),
+            &same_site(&m),
+            &mut Vec::new(),
+        );
+        assert!(!outside.exists(), "a file was written outside the install");
+        let error = result.unwrap_err();
+        assert!(!error.database_changed, "{}", error.message);
+        assert!(error.message.contains("refused"), "{}", error.message);
+    }
+
+    #[test]
+    fn a_link_through_an_earlier_link_is_refused() {
+        let root = site();
+        let (_d, archive) = crafted_many(&[
+            ("files/a", tar::EntryType::Symlink, Some(".")),
+            ("files/b", tar::EntryType::Symlink, Some("a/..")),
+        ]);
+        let m = read_manifest(&archive).unwrap();
+        let error = restore(
+            &archive,
+            root.path(),
+            &spec(),
+            &mut FakeDatabase::new(),
+            &same_site(&m),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert!(
+            error.message.contains("points outside"),
+            "{}",
+            error.message
+        );
+        assert!(!root.path().join("b").exists());
     }
 
     #[test]
