@@ -19,6 +19,11 @@ speedyspec-driver-kubernetes = { path = "../speedyspec-driver-kubernetes" }
 speedyspec-hooks = { path = "../speedyspec-hooks" }
 speedyspec-hooks-memory = { path = "../speedyspec-hooks-memory" }
 speedyspec-php = { path = "../speedyspec-php" }
+speedyspec-php-ext = { path = "../speedyspec-php-ext" }
+speedyspec-container = { path = "../speedyspec-container" }
+speedyspec-container-php = { path = "../speedyspec-container-php" }
+speedyspec-wp-hooks-memory = { path = "../speedyspec-wp-hooks-memory" }
+speedyspec-wp-hooks-php = { path = "../speedyspec-wp-hooks-php" }
 speedyspec-plugin = { path = "../speedyspec-plugin" }
 # The command tree is built at run time from what plugins contribute, so the
 # builder API is used; `string` lets plugin-supplied names become clap ids.
