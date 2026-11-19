@@ -56,6 +56,7 @@ impl Scratch {
             table_prefix: prefix.to_owned(),
             charset: "utf8mb4".to_owned(),
             engine: "mysql".to_owned(),
+            tls: Default::default(),
         };
         Scratch {
             admin,

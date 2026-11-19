@@ -692,6 +692,7 @@ mod tests {
             table_prefix: String::new(),
             charset: "utf8mb4".to_owned(),
             engine: "mysql".to_owned(),
+            tls: Default::default(),
         };
         for host in [
             "localhost",
