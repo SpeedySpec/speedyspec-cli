@@ -2376,6 +2376,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "speedyspec-backup"
+version = "0.1.0"
+dependencies = [
+ "speedyspec-hooks",
+ "speedyspec-hooks-memory",
+ "speedyspec-php",
+]
+
+[[package]]
 name = "speedyspec-cli"
 version = "0.1.0"
 dependencies = [

@@ -1,0 +1,17 @@
+[package]
+name = "speedyspec-backup"
+version = "0.1.0"
+description = "speedyspec's backups: the archive, and moving a site to a new URL and table prefix, in Rust."
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+speedyspec-php = { path = "../speedyspec-php" }
+speedyspec-hooks = { path = "../speedyspec-hooks" }
+speedyspec-hooks-memory = { path = "../speedyspec-hooks-memory" }
+
+[[test]]
+name = "php"
+harness = false
