@@ -204,10 +204,21 @@ pub fn plan_move(
     let urls = match url {
         None => None,
         Some(new) => {
+            let new = new.trim_end_matches('/');
+            let host = new
+                .strip_prefix("https://")
+                .or_else(|| new.strip_prefix("http://"))
+                .unwrap_or("");
+            if host.is_empty() || host.starts_with('/') {
+                return Err(format!(
+                    "--url must be the site's whole URL, such as https://example.com; got {new:?}"
+                ));
+            }
             let old = manifest.site_url.clone().ok_or(
                 "the backup does not say what its site URL was, so --url cannot be used; restore without it",
             )?;
-            Some((old, new.trim_end_matches('/').to_owned()))
+            // Both without a trailing slash, so `https://old/about` becomes `https://new/about`.
+            Some((old.trim_end_matches('/').to_owned(), new.to_owned()))
         }
     };
     Ok(Move {
@@ -862,6 +873,30 @@ pub(crate) mod tests {
         )
         .unwrap();
         assert!(String::from_utf8_lossy(&db.imported).contains("CREATE TABLE `site_options`"));
+    }
+
+    #[test]
+    fn urls_are_checked_and_trimmed_alike() {
+        let mut m = manifest();
+        m.site_url = Some("https://old.example/".into());
+        let plan = plan_move(&m, "wp_", Some("https://new.example.org/"), &spec()).unwrap();
+        assert_eq!(
+            plan.urls,
+            Some((
+                "https://old.example".into(),
+                "https://new.example.org".into()
+            ))
+        );
+        for bad in [
+            "",
+            "/",
+            "new.example.org",
+            "ftp://new.example.org",
+            "https://",
+        ] {
+            let error = plan_move(&m, "wp_", Some(bad), &spec()).unwrap_err();
+            assert!(error.contains("--url"), "{bad:?}: {error}");
+        }
     }
 
     #[test]
