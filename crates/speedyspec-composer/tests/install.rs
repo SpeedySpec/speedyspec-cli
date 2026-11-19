@@ -101,7 +101,12 @@ fn a_flat_dist_is_the_package_itself() {
     let dir = tempfile::tempdir().unwrap();
     let lock = plugin(
         dir.path(),
-        vec![package("acme/http", &url(&server, "/flat.zip"), "", json!({}))],
+        vec![package(
+            "acme/http",
+            &url(&server, "/flat.zip"),
+            "",
+            json!({}),
+        )],
     );
     install(dir.path(), &lock, &HttpFetch::new(), &platform()).unwrap();
     assert!(dir.path().join("vendor/acme/http/src/Client.php").is_file());
@@ -149,7 +154,12 @@ fn an_unsafe_dist_is_refused() {
     old_vendor(dir.path());
     let lock = plugin(
         dir.path(),
-        vec![package("acme/http", &url(&server, "/evil.zip"), "", json!({}))],
+        vec![package(
+            "acme/http",
+            &url(&server, "/evil.zip"),
+            "",
+            json!({}),
+        )],
     );
     let error = install(dir.path(), &lock, &HttpFetch::new(), &platform())
         .unwrap_err()
@@ -178,7 +188,10 @@ fn a_missing_extension_names_the_package_before_downloading() {
     let error = install(dir.path(), &lock, &HttpFetch::new(), &platform())
         .unwrap_err()
         .to_string();
-    assert!(error.contains("acme/http") && error.contains("gmp"), "{error}");
+    assert!(
+        error.contains("acme/http") && error.contains("gmp"),
+        "{error}"
+    );
     assert!(server.requests().is_empty());
 }
 
@@ -198,6 +211,59 @@ fn a_failed_download_names_the_package() {
     let error = install(dir.path(), &lock, &HttpFetch::new(), &platform())
         .unwrap_err()
         .to_string();
-    assert!(error.contains("acme/http") && error.contains("404"), "{error}");
+    assert!(
+        error.contains("acme/http") && error.contains("404"),
+        "{error}"
+    );
     assert!(!dir.path().join("vendor").exists());
+}
+
+#[test]
+fn a_leftover_old_vendor_is_put_back_rather_than_deleted() {
+    // A crash between moving vendor/ aside and moving the new one in leaves only vendor.speedyspec-old.
+    let server = Server::start(vec![("/missing.zip", Route::status(404))]);
+    let dir = tempfile::tempdir().unwrap();
+    fs::create_dir_all(dir.path().join("vendor.speedyspec-old/old/kept")).unwrap();
+    fs::write(
+        dir.path().join("vendor.speedyspec-old/old/kept/file.php"),
+        "<?php",
+    )
+    .unwrap();
+    let lock = plugin(
+        dir.path(),
+        vec![package(
+            "acme/http",
+            &url(&server, "/missing.zip"),
+            "",
+            json!({}),
+        )],
+    );
+    assert!(install(dir.path(), &lock, &HttpFetch::new(), &platform()).is_err());
+    assert!(
+        dir.path().join("vendor/old/kept/file.php").is_file(),
+        "the only copy was deleted"
+    );
+}
+
+#[test]
+fn the_checksum_is_checked_before_anything_is_unpacked() {
+    let zip = build_zip(&[
+        ("x/", Entry::Dir),
+        ("x/../../evil.php", Entry::file("<?php")),
+    ]);
+    let server = Server::start(vec![("/evil.zip", Route::ok(zip))]);
+    let dir = tempfile::tempdir().unwrap();
+    let lock = plugin(
+        dir.path(),
+        vec![package(
+            "acme/http",
+            &url(&server, "/evil.zip"),
+            &"0".repeat(40),
+            json!({}),
+        )],
+    );
+    let error = install(dir.path(), &lock, &HttpFetch::new(), &platform())
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("checksum mismatch"), "{error}");
 }
