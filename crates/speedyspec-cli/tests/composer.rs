@@ -466,6 +466,18 @@ final class Plugin implements PluginInterface, EventSubscriberInterface
         self::$log = dirname($composer->getConfig()->get('vendor-dir')) . '/plugin.log';
         self::log('activate ' . PluginInterface::PLUGIN_API_VERSION . ' ' . $composer->getPackage()->getName());
         $io->write('acme plugin active');
+        echo "echoed by the plugin\n";
+        if (getenv('ACME_EXTRA') === '1') {
+            self::log('extra ' . var_export(($composer->getPackage()->getExtra()[123] ?? null) === 'numeric', true));
+        }
+        if (getenv('ACME_REUSE') === '1') {
+            try {
+                new \Composer\Composer(0);
+                self::log('reuse allowed');
+            } catch (\Throwable $e) {
+                self::log('reuse refused');
+            }
+        }
         if (getenv('ACME_UNSUPPORTED') === '1') {
             $composer->getInstallationManager()->addInstaller(new \stdClass());
         }
@@ -548,6 +560,7 @@ fn with_composer_plugin(server: &Server) -> TempDir {
         dir.path().join("composer.json"),
         json!({
             "name": "acme/site",
+            "extra": {"123": "numeric"},
             "require": {"acme/composer-plugin": "^1", "acme/http": "^1"},
             "scripts": {"post-install-cmd": ["Acme\\ComposerPlugin\\Scripts::installed", "echo hi"]},
         })
@@ -671,4 +684,172 @@ fn a_composer_plugin_fatal_error_fails_the_install() {
         "{}",
         out.stderr
     );
+}
+
+#[test]
+fn composer_plugin_output_goes_to_stderr() {
+    let (home, server) = (TempDir::new().unwrap(), server());
+    let dir = with_composer_plugin(&server);
+    let out = composer(
+        home.path(),
+        &[
+            "install",
+            "--allow-plugins",
+            "--working-dir",
+            dir.path().to_str().unwrap(),
+        ],
+    );
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(
+        !out.stdout.contains("echoed by the plugin"),
+        "{}",
+        out.stdout
+    );
+    assert!(
+        out.stderr.contains("echoed by the plugin"),
+        "{}",
+        out.stderr
+    );
+}
+
+#[test]
+fn numeric_extra_keys_stay_numeric() {
+    let (home, server) = (TempDir::new().unwrap(), server());
+    let dir = with_composer_plugin(&server);
+    let out = Speedyspec::with_home(&[], home.path())
+        .env("ACME_EXTRA", "1")
+        .run(&[
+            "--no-interaction",
+            "composer",
+            "install",
+            "--allow-plugins",
+            "--working-dir",
+            dir.path().to_str().unwrap(),
+        ]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(
+        log(dir.path()).contains("extra true"),
+        "{}",
+        log(dir.path())
+    );
+}
+
+#[test]
+fn a_plugin_cannot_remake_composer_objects() {
+    let (home, server) = (TempDir::new().unwrap(), server());
+    let dir = with_composer_plugin(&server);
+    let out = Speedyspec::with_home(&[], home.path())
+        .env("ACME_REUSE", "1")
+        .run(&[
+            "--no-interaction",
+            "composer",
+            "install",
+            "--allow-plugins",
+            "--working-dir",
+            dir.path().to_str().unwrap(),
+        ]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(
+        log(dir.path()).contains("reuse refused"),
+        "{}",
+        log(dir.path())
+    );
+}
+
+/// Adds `file` (written with `body`) to the `files` an installed plugin's maps include, as a newer version of the
+/// package would list it.
+fn add_vendor_file(dir: &Path, file: &str, body: &str) {
+    fs::write(dir.join(file), body).unwrap();
+    let maps = dir.join("vendor/speedyspec-autoload.json");
+    let mut json: Json = serde_json::from_str(&fs::read_to_string(&maps).unwrap()).unwrap();
+    json["files"].as_array_mut().unwrap().push(json!(file));
+    fs::write(&maps, json.to_string()).unwrap();
+}
+
+#[test]
+fn a_second_version_of_a_package_does_not_add_its_files() {
+    let (home, plugins, server) = (TempDir::new().unwrap(), TempDir::new().unwrap(), server());
+    for (name, version) in [("first-http", "1.0.0"), ("second-http", "1.1.0")] {
+        let dir = plugins.path().join(name);
+        plugin(&dir, &server, name, version);
+        assert_eq!(
+            composer(
+                home.path(),
+                &["install", "--working-dir", dir.to_str().unwrap()]
+            )
+            .code,
+            0
+        );
+    }
+    add_vendor_file(
+        &plugins.path().join("second-http"),
+        "vendor/acme/http/src/extra.php",
+        "<?php fwrite(STDERR, \"extra file loaded\\n\");",
+    );
+    let out = Speedyspec::with_home(&[], home.path()).run(&[
+        &format!(
+            "--plugin-dir={}",
+            plugins.path().join("first-http").display()
+        ),
+        &format!(
+            "--plugin-dir={}",
+            plugins.path().join("second-http").display()
+        ),
+        "first-http",
+    ]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(!out.stderr.contains("extra file loaded"), "{}", out.stderr);
+}
+
+#[test]
+fn a_plugin_skipped_while_loading_its_files_autoloads_nothing() {
+    let (home, plugins, server) = (TempDir::new().unwrap(), TempDir::new().unwrap(), server());
+    let broken = plugins.path().join("broken-http");
+    plugin(&broken, &server, "broken-http", "1.0.0");
+    assert_eq!(
+        composer(
+            home.path(),
+            &["install", "--working-dir", broken.to_str().unwrap()]
+        )
+        .code,
+        0
+    );
+    add_vendor_file(
+        &broken,
+        "vendor/acme/http/src/throws.php",
+        "<?php throw new RuntimeException('boom');",
+    );
+    let checker = plugins.path().join("checker");
+    fs::create_dir_all(&checker).unwrap();
+    fs::write(
+        checker.join("speedyspec-plugin.json"),
+        json!({"name": "speedyspec-fixture/checker", "version": "1.0.0", "contracts": "^1.0", "entry": "plugin.php"}).to_string(),
+    )
+    .unwrap();
+    fs::write(
+        checker.join("plugin.php"),
+        r#"<?php
+use SpeedySpec\Cli\Contracts\Command;
+use SpeedySpec\Hooks\Hook;
+Hook::add('speedyspec_commands', static function (array $commands): array
+{
+    $commands[] = new Command('check', 'Says whether a skipped plugin still autoloads.', static function (array $a, array $o): int
+    {
+        echo class_exists('Acme\Http\Client') ? "still autoloads\n" : "nothing\n";
+
+        return 0;
+    });
+
+    return $commands;
+});
+"#,
+    )
+    .unwrap();
+    let out = Speedyspec::with_home(&[], home.path()).run(&[
+        &format!("--plugin-dir={}", broken.display()),
+        &format!("--plugin-dir={}", checker.display()),
+        "check",
+    ]);
+    assert!(out.stderr.contains("broken-http skipped"), "{}", out.stderr);
+    assert_eq!(out.stdout, "nothing\n", "{}", out.stderr);
 }

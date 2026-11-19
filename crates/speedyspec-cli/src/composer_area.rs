@@ -109,42 +109,69 @@ pub fn load(dir: &Path, name: &str) -> Result<Vec<String>, String> {
     };
     let lock = Lock::read(dir).ok().flatten();
     let mut warnings = Vec::new();
+    // Packages another plugin brought first: theirs are used, so this plugin's copies add no files.
+    let mut theirs: Vec<String> = Vec::new();
+    let mut ours: Vec<String> = Vec::new();
     STATE.with(|s| {
         let mut state = s.borrow_mut();
         for package in lock.iter().flat_map(|l| l.packages.iter()) {
             match state.packages.get(&package.name) {
-                Some((version, first)) if *version != package.version => warnings.push(format!(
-                    "{name} brings {} {}, but {first} already brought {version}, which is the one used",
-                    package.name, package.version
-                )),
-                Some(_) => {}
+                Some((version, first)) => {
+                    if *version != package.version {
+                        warnings.push(format!(
+                            "{name} brings {} {}, but {first} already brought {version}, which is the one used",
+                            package.name, package.version
+                        ));
+                    }
+                    theirs.push(format!("vendor/{}/", package.name));
+                }
                 None => {
                     state
                         .packages
                         .insert(package.name.clone(), (package.version.clone(), name.to_owned()));
+                    ours.push(package.name.clone());
                 }
             }
         }
         state.plugins.push((dir.to_path_buf(), maps.clone()));
     });
-    let first = STATE.with(|s| !std::mem::replace(&mut s.borrow_mut().registered, true));
-    if first {
-        speedyspec_php::call(
-            &Value::Str("spl_autoload_register".to_owned()),
-            &[Value::Str(AUTOLOAD.to_owned())],
-        )
-        .map_err(|e| format!("could not register the autoloader: {e}"))?;
-    }
-    for file in &maps.files {
-        let key = if file.starts_with("vendor/") {
-            file.clone()
-        } else {
-            dir.join(file).to_string_lossy().into_owned()
-        };
-        let first = STATE.with(|s| s.borrow_mut().files_done.insert(key));
+    let loaded = (|| -> Result<(), String> {
+        let first = STATE.with(|s| !std::mem::replace(&mut s.borrow_mut().registered, true));
         if first {
-            require(&dir.join(file))?;
+            speedyspec_php::call(
+                &Value::Str("spl_autoload_register".to_owned()),
+                &[Value::Str(AUTOLOAD.to_owned())],
+            )
+            .map_err(|e| format!("could not register the autoloader: {e}"))?;
         }
+        for file in &maps.files {
+            if theirs
+                .iter()
+                .any(|package| file.starts_with(package.as_str()))
+            {
+                continue;
+            }
+            let key = if file.starts_with("vendor/") {
+                file.clone()
+            } else {
+                dir.join(file).to_string_lossy().into_owned()
+            };
+            let first = STATE.with(|s| s.borrow_mut().files_done.insert(key));
+            if first {
+                require(&dir.join(file))?;
+            }
+        }
+        Ok(())
+    })();
+    if loaded.is_err() {
+        // A plugin that is skipped autoloads nothing for the others either.
+        STATE.with(|s| {
+            let mut state = s.borrow_mut();
+            state.plugins.retain(|(plugin, _)| plugin != dir);
+            for package in &ours {
+                state.packages.remove(package);
+            }
+        });
     }
-    Ok(warnings)
+    loaded.map(|()| warnings)
 }
