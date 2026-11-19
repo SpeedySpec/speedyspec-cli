@@ -20,6 +20,8 @@ pub struct Move {
     /// `(table without prefix, column, keys)` whose values carry the prefix: with `keys`, only the prefix followed by
     /// exactly one of them; without, every value that starts with the prefix.
     pub prefixed_columns: Vec<(String, String, Option<Vec<String>>)>,
+    /// `(table without prefix, column)` whose values keep the old URL (identifiers that only look like links).
+    pub keep_urls: Vec<(String, String)>,
 }
 
 impl Move {
@@ -271,6 +273,17 @@ impl<'a, 'w> Rewriter<'a, 'w> {
                 })
             })
             .collect();
+        let keeps: Vec<bool> = columns
+            .iter()
+            .map(|column| {
+                base.as_ref().is_some_and(|base| {
+                    self.plan
+                        .keep_urls
+                        .iter()
+                        .any(|(table, c)| table == base && c == column)
+                })
+            })
+            .collect();
         self.copy_space();
         if !self.copy_words(&["VALUES"]) {
             return None;
@@ -286,7 +299,10 @@ impl<'a, 'w> Rewriter<'a, 'w> {
             let mut index = 0;
             loop {
                 self.copy_space();
-                self.value(prefixed.get(index).and_then(Option::as_ref))?;
+                self.value(
+                    prefixed.get(index).and_then(Option::as_ref),
+                    keeps.get(index).copied().unwrap_or(false),
+                )?;
                 index += 1;
                 self.copy_space();
                 match self.peek()? {
@@ -380,7 +396,7 @@ impl<'a, 'w> Rewriter<'a, 'w> {
 
     /// One value of a row.
     /// `prefixed` is `None` for a plain column, or the column's keys (`Some(&None)` for every prefixed value).
-    fn value(&mut self, prefixed: Option<&Option<Vec<String>>>) -> Option<()> {
+    fn value(&mut self, prefixed: Option<&Option<Vec<String>>>, keep_url: bool) -> Option<()> {
         match self.peek()? {
             b'\'' => {
                 let text = self.string()?;
@@ -395,7 +411,9 @@ impl<'a, 'w> Rewriter<'a, 'w> {
                     renamed.extend_from_slice(rest);
                     text = Cow::Owned(renamed);
                 }
-                if let Some((old, new)) = &self.plan.urls {
+                if let Some((old, new)) = &self.plan.urls
+                    && !keep_url
+                {
                     let replaced =
                         serialized::replace(&text, old.as_bytes(), new.as_bytes()).into_owned();
                     text = Cow::Owned(replaced);
@@ -489,6 +507,7 @@ mod tests {
                 ),
                 ("usermeta".into(), "meta_key".into(), None),
             ],
+            keep_urls: vec![("posts".into(), "guid".into())],
         }
     }
 
@@ -616,6 +635,7 @@ mod tests {
             to_prefix: "wp_".into(),
             urls: None,
             prefixed_columns: Vec::new(),
+            keep_urls: Vec::new(),
         };
         let insert = b"INSERT INTO `wp_t` (`a`) VALUES\n('x')";
         assert!(matches!(
@@ -634,6 +654,17 @@ mod tests {
                 .iter()
                 .any(|w| w.contains("could not be read for the move")),
             "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn columns_that_keep_their_urls_are_not_moved() {
+        let (out, _) = run(
+            "INSERT INTO `wp_posts` (`ID`,`guid`,`post_content`) VALUES\n(1,'https://old.example/?p=1','see https://old.example')",
+        );
+        assert_eq!(
+            out,
+            "INSERT INTO `site_posts` (`ID`,`guid`,`post_content`) VALUES\n(1,'https://old.example/?p=1','see https://new.example.org')"
         );
     }
 

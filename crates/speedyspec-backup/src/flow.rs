@@ -256,6 +256,7 @@ pub fn plan_move(
             .iter()
             .map(|c| (c.table.clone(), c.column.clone(), c.keys.clone()))
             .collect(),
+        keep_urls: spec.keep_urls.clone(),
     })
 }
 
@@ -697,6 +698,7 @@ pub(crate) mod tests {
             }),
             prefixed_columns: Vec::new(),
             app_version: Some("1.0".into()),
+            keep_urls: Vec::new(),
         }
     }
 

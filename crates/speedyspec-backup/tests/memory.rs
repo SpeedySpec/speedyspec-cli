@@ -93,6 +93,7 @@ fn main() {
         site_url: None,
         prefixed_columns: vec![],
         app_version: None,
+        keep_urls: vec![],
     };
     let manifest = Manifest {
         app: "site".into(),
