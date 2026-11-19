@@ -4,6 +4,7 @@
 mod app;
 mod contracts;
 mod driver;
+mod extensions;
 #[cfg(test)]
 mod fake_reader;
 mod kubernetes;
@@ -22,6 +23,11 @@ pub use contracts::{
 pub use driver::{
     Driver, DriverError, DriverFlag, DriverInput, LocalInstall, PluginRef, Prepared, Progress,
     UninstallInput, UninstallPlan,
+};
+pub use extensions::{
+    Extension, ExtensionArchive, ExtensionLayout, ExtensionSource, Kind, SetupPlan,
+    decode_extension, decode_extension_archive, decode_extension_layout, decode_extension_sources,
+    decode_setup_plan, slug_problem,
 };
 pub use kubernetes::{KubernetesResources, WaitFor, decode_kubernetes_resources, value_to_json};
 pub use names::{install_name_problem, namespace_problem};
