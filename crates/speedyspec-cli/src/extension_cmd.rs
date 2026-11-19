@@ -185,6 +185,12 @@ pub fn run(runtime: &Runtime, kind: Kind, matches: &ArgMatches) -> i32 {
 fn report(out: &mut impl Write, kind: &str, slug: &str, updated: &Updated) {
     let _ = match updated {
         Updated::AlreadyAt(version) => writeln!(out, "{slug} is already at {version}"),
+        Updated::Newer { installed, latest } => {
+            eprintln!(
+                "speedyspec: skipped {slug}: the {installed} installed is newer than the source's latest {latest}"
+            );
+            Ok(())
+        }
         Updated::From { old, new } => writeln!(
             out,
             "updated {kind} {slug} {} -> {new}",

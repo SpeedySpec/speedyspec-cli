@@ -518,6 +518,13 @@ pub fn install(runtime: &Runtime, matches: &ArgMatches, prepass: Option<Prepass>
         {
             record.installed_at = earlier.installed_at;
             record.cli_version = earlier.cli_version;
+            if earlier.parts != choices.parts {
+                eprintln!(
+                    "speedyspec: warning: the setup is finished with the parts it was started with ({}), not {}",
+                    earlier.parts.join(", "),
+                    choices.parts.join(", ")
+                );
+            }
             record.parts = earlier.parts;
         }
         record

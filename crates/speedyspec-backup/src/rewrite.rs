@@ -30,6 +30,21 @@ impl Move {
     }
 }
 
+/// `text` from its first token, past leading whitespace and `--`, `#` and `/* */` comments.
+fn past_comments(text: &str) -> &str {
+    let mut rest = text.trim_start();
+    loop {
+        rest = if rest.starts_with("--") || rest.starts_with('#') {
+            rest.split_once('\n').map_or("", |(_, after)| after)
+        } else if let Some(body) = rest.strip_prefix("/*") {
+            body.split_once("*/").map_or("", |(_, after)| after)
+        } else {
+            return rest;
+        }
+        .trim_start();
+    }
+}
+
 /// `statement` as the move leaves it; warnings name tables without the old prefix. Unchanged statements are borrowed.
 pub fn rewrite<'a>(statement: &'a [u8], plan: &Move, warnings: &mut Vec<String>) -> Cow<'a, [u8]> {
     if plan.changes_nothing() {
@@ -41,7 +56,7 @@ pub fn rewrite<'a>(statement: &'a [u8], plan: &Move, warnings: &mut Vec<String>)
         None => {
             // A statement of a kind the move rewrites, in a form it cannot read, runs unmoved: say so.
             let text = String::from_utf8_lossy(statement);
-            let start = text.trim_start();
+            let start = past_comments(&text);
             let kind = start
                 .split_whitespace()
                 .next()
@@ -665,6 +680,17 @@ mod tests {
         assert_eq!(
             out,
             "INSERT INTO `site_posts` (`ID`,`guid`,`post_content`) VALUES\n(1,'https://old.example/?p=1','see https://new.example.org')"
+        );
+    }
+
+    #[test]
+    fn the_warning_looks_past_leading_comments() {
+        let (_, warnings) = run("-- a comment\n/* another */ INSERT INTO `wp_t` VALUES (1)");
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("could not be read for the move")),
+            "{warnings:?}"
         );
     }
 

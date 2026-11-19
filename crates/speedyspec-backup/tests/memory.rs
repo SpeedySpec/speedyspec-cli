@@ -39,7 +39,7 @@ struct Big;
 impl SiteDatabase for Big {
     fn export(&mut self, out: &mut dyn Write) -> Result<(), String> {
         for i in 0..50_000 {
-            writeln!(out, "INSERT INTO `wp_rows` (`id`,`text`) VALUES\n({i},'row {i} with some text to make it longer');")
+            writeln!(out, "INSERT INTO `wp_rows` (`id`,`text`) VALUES ({i},'row {i} links to http://old.example/{i}');")
                 .map_err(|e| e.to_string())?;
         }
         Ok(())
@@ -62,7 +62,11 @@ impl SiteDatabase for Big {
             {
                 return Ok(count);
             }
-            let _ = speedyspec_backup::rewrite::rewrite(&line, plan, warnings);
+            let moved = speedyspec_backup::rewrite::rewrite(&line, plan, warnings);
+            let moved = String::from_utf8_lossy(&moved);
+            if !moved.contains("`site_rows`") || !moved.contains("http://new.example/") {
+                return Err(format!("the row was not moved: {moved}"));
+            }
             count += 1;
         }
     }
@@ -70,7 +74,7 @@ impl SiteDatabase for Big {
         Ok(true)
     }
     fn site_url(&mut self, _: &SiteUrl) -> Result<Option<String>, String> {
-        Ok(None)
+        Ok(Some("http://old.example".into()))
     }
     fn prefix(&self) -> String {
         "wp_".into()
@@ -90,7 +94,12 @@ fn main() {
         include: vec![".".into()],
         exclude: vec![],
         preserve: vec![],
-        site_url: None,
+        site_url: Some(SiteUrl {
+            table: "options".into(),
+            key_column: "option_name".into(),
+            key: "siteurl".into(),
+            value_column: "option_value".into(),
+        }),
         prefixed_columns: vec![],
         app_version: None,
         keep_urls: vec![],
@@ -102,8 +111,8 @@ fn main() {
         app_version: None,
         extensions: vec![],
         engine: "mysql".into(),
-        table_prefix: String::new(),
-        site_url: None,
+        table_prefix: "wp_".into(),
+        site_url: Some("http://old.example".into()),
         source_install: "big".into(),
         source_driver: "zip".into(),
         created_at: "2026-11-19T10:00:00Z".into(),
@@ -137,7 +146,7 @@ fn main() {
     let archive = out.path().join("big.tar.gz");
     let target = tempfile::tempdir().unwrap();
     let m = read_manifest(&archive).unwrap();
-    let plan = plan_move(&m, "site_", None, &spec).unwrap();
+    let plan = plan_move(&m, "site_", Some("http://new.example"), &spec).unwrap();
     let before = NOW.load(Ordering::SeqCst);
     PEAK.store(before, Ordering::SeqCst);
     restore(

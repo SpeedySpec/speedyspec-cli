@@ -136,13 +136,13 @@ pub fn load(dir: &Path, name: &str) -> Result<Vec<String>, String> {
         state.plugins.push((dir.to_path_buf(), maps.clone()));
     });
     let loaded = (|| -> Result<(), String> {
-        let first = STATE.with(|s| !std::mem::replace(&mut s.borrow_mut().registered, true));
-        if first {
+        if !STATE.with(|s| s.borrow().registered) {
             speedyspec_php::call(
                 &Value::Str("spl_autoload_register".to_owned()),
                 &[Value::Str(AUTOLOAD.to_owned())],
             )
             .map_err(|e| format!("could not register the autoloader: {e}"))?;
+            STATE.with(|s| s.borrow_mut().registered = true);
         }
         for file in &maps.files {
             if theirs
@@ -156,8 +156,8 @@ pub fn load(dir: &Path, name: &str) -> Result<Vec<String>, String> {
             } else {
                 dir.join(file).to_string_lossy().into_owned()
             };
-            let first = STATE.with(|s| s.borrow_mut().files_done.insert(key));
-            if first {
+            // A file stays done even if this plugin is skipped: what it declared is still declared.
+            if STATE.with(|s| s.borrow_mut().files_done.insert(key)) {
                 require(&dir.join(file))?;
             }
         }

@@ -879,3 +879,41 @@ fn composer_validate_names_every_problem() {
         out.stderr
     );
 }
+
+#[test]
+fn files_a_skipped_plugin_already_ran_are_not_run_again() {
+    // The same package in two plugins; a later file of it fails the first time, so the first plugin is skipped. The
+    // files that ran stay declared in PHP, so the second plugin must not require them again.
+    let (home, plugins, server) = (TempDir::new().unwrap(), TempDir::new().unwrap(), server());
+    for name in ["first-http", "second-http"] {
+        let dir = plugins.path().join(name);
+        plugin(&dir, &server, name, "1.0.0");
+        assert_eq!(
+            composer(
+                home.path(),
+                &["install", "--working-dir", dir.to_str().unwrap()]
+            )
+            .code,
+            0
+        );
+        add_vendor_file(
+            &dir,
+            "vendor/acme/http/src/once.php",
+            "<?php if (!isset($GLOBALS['acme_tries'])) { $GLOBALS['acme_tries'] = 1; throw new RuntimeException('first try'); }",
+        );
+    }
+    let out = Speedyspec::with_home(&[], home.path()).run(&[
+        &format!(
+            "--plugin-dir={}",
+            plugins.path().join("first-http").display()
+        ),
+        &format!(
+            "--plugin-dir={}",
+            plugins.path().join("second-http").display()
+        ),
+        "second-http",
+    ]);
+    assert!(out.stderr.contains("first-http skipped"), "{}", out.stderr);
+    assert!(!out.stderr.contains("Cannot redeclare"), "{}", out.stderr);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+}

@@ -595,3 +595,51 @@ fn update_does_not_go_back_to_an_older_version() {
     assert!(out.stderr.contains("older"), "{}", out.stderr);
     assert!(site.info("plugin", "akismet").contains("Version: 2.0"));
 }
+
+#[test]
+fn update_all_skips_a_plugin_newer_than_its_source() {
+    let site = Site::new();
+    site.serve(
+        "plugin",
+        "akismet",
+        "2.0",
+        ext_zip("akismet", "Akismet", "2.0"),
+    );
+    assert_eq!(site.run(&["plugin", "install", "akismet"]).code, 0);
+    let out = site.cli().env("EXT_LATEST", "1.5").run(&[
+        "--no-interaction",
+        "plugin",
+        "update",
+        "--all",
+        "--install",
+        "site",
+    ]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(
+        out.stderr.contains("skipped akismet") && out.stderr.contains("newer"),
+        "{}",
+        out.stderr
+    );
+}
+
+#[test]
+fn the_same_version_written_differently_is_already_installed() {
+    let site = Site::new();
+    site.serve(
+        "plugin",
+        "akismet",
+        "2.0",
+        ext_zip("akismet", "Akismet", "2.0"),
+    );
+    assert_eq!(site.run(&["plugin", "install", "akismet"]).code, 0);
+    let out = site.cli().env("EXT_LATEST", "2.0.0").run(&[
+        "--no-interaction",
+        "plugin",
+        "update",
+        "akismet",
+        "--install",
+        "site",
+    ]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(out.stdout.contains("already at"), "{}", out.stdout);
+}

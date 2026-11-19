@@ -267,8 +267,6 @@ pub fn is_platform(name: &str) -> bool {
 }
 
 impl Lock {
-    /// The lock in `dir`; `Ok(None)` when there is nothing to install (no `composer.json`, or one that requires only
-    /// platform packages and has no lock).
     /// Every problem with `dir`'s `composer.json` and `composer.lock` as this replica reads them, each package checked
     /// on its own rather than stopping at the first.
     pub fn problems(dir: &Path) -> Vec<String> {
@@ -303,6 +301,8 @@ impl Lock {
         found
     }
 
+    /// The lock in `dir`; `Ok(None)` when there is nothing to install (no `composer.json`, or one that requires only
+    /// platform packages and has no lock).
     pub fn read(dir: &Path) -> Result<Option<Lock>, ComposerError> {
         let Some(json) = read_json(&dir.join("composer.json"))? else {
             return Ok(None);
