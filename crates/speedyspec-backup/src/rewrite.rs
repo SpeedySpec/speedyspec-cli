@@ -196,12 +196,16 @@ impl<'a, 'w> Rewriter<'a, 'w> {
 
     fn run(mut self) -> Option<Vec<u8>> {
         self.copy_space();
-        if self.copy_words(&["DROP", "TABLE", "IF", "EXISTS"])
-            || self.copy_words(&["CREATE", "TABLE"])
-        {
+        if self.copy_words(&["DROP", "TABLE", "IF", "EXISTS"]) {
             self.copy_space();
             self.table()?;
             self.copy_rest();
+            return Some(self.out);
+        }
+        if self.copy_words(&["CREATE", "TABLE"]) {
+            self.copy_space();
+            self.table()?;
+            self.definitions()?;
             return Some(self.out);
         }
         if !self.copy_words(&["INSERT", "INTO"]) {
@@ -291,6 +295,67 @@ impl<'a, 'w> Rewriter<'a, 'w> {
                 _ => return None,
             }
         }
+    }
+
+    /// The rest of a `CREATE TABLE`: the identifier after `REFERENCES` (another table) or `CONSTRAINT` (a name that is
+    /// unique in the database) gets the new prefix when it has the old one. Column and index names are left alone,
+    /// and string literals (`COMMENT '…'`, `DEFAULT '…'`) are copied as they are.
+    fn definitions(&mut self) -> Option<()> {
+        let mut last_word = String::new();
+        while let Some(b) = self.peek() {
+            match b {
+                b'\'' | b'"' => {
+                    let start = self.pos;
+                    self.pos += 1;
+                    while let Some(c) = self.peek() {
+                        self.pos += 1;
+                        if c == b'\\' {
+                            self.pos += 1;
+                        } else if c == b {
+                            break;
+                        }
+                    }
+                    self.pos = self.pos.min(self.input.len());
+                    self.out.extend_from_slice(&self.input[start..self.pos]);
+                    last_word.clear();
+                }
+                b'`' => {
+                    let name = self.identifier()?;
+                    let after_keyword = last_word.eq_ignore_ascii_case("REFERENCES")
+                        || last_word.eq_ignore_ascii_case("CONSTRAINT");
+                    match name.strip_prefix(&self.plan.from_prefix) {
+                        Some(rest) if after_keyword => {
+                            let renamed = format!("{}{rest}", self.plan.to_prefix);
+                            self.push_identifier(&renamed);
+                        }
+                        _ => self.push_identifier(&name),
+                    }
+                    last_word.clear();
+                }
+                b if b.is_ascii_alphabetic() => {
+                    let start = self.pos;
+                    while self
+                        .peek()
+                        .is_some_and(|c| c.is_ascii_alphanumeric() || c == b'_')
+                    {
+                        self.pos += 1;
+                    }
+                    let word = &self.input[start..self.pos];
+                    self.out.extend_from_slice(word);
+                    last_word = String::from_utf8_lossy(word).into_owned();
+                }
+                b if b.is_ascii_whitespace() => {
+                    self.out.push(b);
+                    self.pos += 1;
+                }
+                other => {
+                    self.out.push(other);
+                    self.pos += 1;
+                    last_word.clear();
+                }
+            }
+        }
+        Some(())
     }
 
     /// One value of a row.
@@ -413,6 +478,19 @@ mod tests {
         assert_eq!(
             run("CREATE TABLE `wp_blog_wp_x` (\n  `id` int NOT NULL\n)").0,
             "CREATE TABLE `site_blog_wp_x` (\n  `id` int NOT NULL\n)"
+        );
+    }
+
+    #[test]
+    fn foreign_keys_follow_the_prefix_but_columns_do_not() {
+        let (out, _) = run(
+            "CREATE TABLE `wp_download_log` (\n  `wp_id` int,\n  `post` int COMMENT 'REFERENCES `wp_posts`',\n  \
+             CONSTRAINT `wp_fk_post` FOREIGN KEY (`post`) REFERENCES `wp_posts` (`ID`)\n)",
+        );
+        assert_eq!(
+            out,
+            "CREATE TABLE `site_download_log` (\n  `wp_id` int,\n  `post` int COMMENT 'REFERENCES `wp_posts`',\n  \
+             CONSTRAINT `site_fk_post` FOREIGN KEY (`post`) REFERENCES `site_posts` (`ID`)\n)"
         );
     }
 
