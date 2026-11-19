@@ -175,7 +175,7 @@ pub fn boot(args: &[String]) -> Result<Runtime, String> {
         Php::boot(BootOptions {
             hooks: hooks.clone(),
             preload: CONTRACTS,
-            areas: crate::http_area::cli_areas(),
+            areas: wordpress_areas(),
         })
         .map_err(|e| e.to_string())?,
     );

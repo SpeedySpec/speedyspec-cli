@@ -7,7 +7,6 @@ mod boot;
 mod commands;
 mod db_cmd;
 mod drivers;
-mod http_area;
 mod install;
 mod installs;
 mod plugin_cmd;
