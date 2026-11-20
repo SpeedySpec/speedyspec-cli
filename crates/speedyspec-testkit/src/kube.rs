@@ -70,6 +70,7 @@ impl FakeCluster {
             ("", "v1", "Secret", "secrets", true),
             ("", "v1", "Service", "services", true),
             ("", "v1", "Pod", "pods", true),
+            ("", "v1", "Node", "nodes", false),
             (
                 "",
                 "v1",
@@ -406,6 +407,83 @@ fn resource_list(state: &State, group: &str, version: &str) -> Reply {
     )
 }
 
+/// A query parameter's value, percent-decoded.
+fn query_value(query: &str, name: &str) -> Option<String> {
+    query.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        (key == name).then(|| {
+            let mut out = Vec::new();
+            let bytes = value.as_bytes();
+            let mut i = 0;
+            while i < bytes.len() {
+                match bytes[i] {
+                    b'%' if i + 2 < bytes.len() => {
+                        let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or("");
+                        out.push(u8::from_str_radix(hex, 16).unwrap_or(b'?'));
+                        i += 3;
+                    }
+                    b'+' => {
+                        out.push(b' ');
+                        i += 1;
+                    }
+                    b => {
+                        out.push(b);
+                        i += 1;
+                    }
+                }
+            }
+            String::from_utf8_lossy(&out).into_owned()
+        })
+    })
+}
+
+/// The objects of one kind, in `namespace` (or all of them), that match the request's `labelSelector` (only
+/// `key=value` terms, joined with commas).
+fn list(
+    state: &State,
+    request: &Received,
+    group: &str,
+    version: &str,
+    namespace: Option<&str>,
+    plural: &str,
+) -> Reply {
+    let Some(kind) = state
+        .kinds
+        .iter()
+        .find(|kind| kind.group == group && kind.version == version && kind.plural == plural)
+    else {
+        return status(
+            404,
+            "NotFound",
+            "the server could not find the requested resource",
+        );
+    };
+    let selector = query_value(&request.query, "labelSelector").unwrap_or_default();
+    let terms: Vec<(&str, &str)> = selector
+        .split(',')
+        .filter(|term| !term.is_empty())
+        .filter_map(|term| term.split_once('='))
+        .collect();
+    let items: Vec<Json> = state
+        .objects
+        .iter()
+        .filter(|(key, _)| key.0 == kind.api_version() && key.1 == kind.kind)
+        .filter(|(key, _)| namespace.is_none() || key.2.as_deref() == namespace)
+        .filter(|(_, object)| {
+            terms
+                .iter()
+                .all(|(k, v)| object["metadata"]["labels"][*k].as_str() == Some(*v))
+        })
+        .map(|(_, object)| object.clone())
+        .collect();
+    Reply::json(
+        200,
+        json!({"kind": format!("{}List", kind.kind), "apiVersion": kind.api_version(),
+               "metadata": {"resourceVersion": "1"}, "items": items})
+        .to_string(),
+    )
+}
+
 /// `rest` is `<plural>/<name>` or `namespaces/<ns>/<plural>/<name>`.
 fn object_request(
     state: &mut State,
@@ -416,6 +494,12 @@ fn object_request(
 ) -> Reply {
     let (namespace, plural, name) = match rest {
         ["namespaces", namespace, plural, name] => (Some(*namespace), *plural, *name),
+        ["namespaces", namespace, plural] if request.method == "GET" => {
+            return list(state, request, group, version, Some(namespace), plural);
+        }
+        [plural] if request.method == "GET" => {
+            return list(state, request, group, version, None, plural);
+        }
         [plural, name] => (None, *plural, *name),
         _ => {
             return status(
@@ -786,5 +870,37 @@ mod tests {
         let (code, list) = send(&cluster, "GET", "/apis/example.test/v1", token, "");
         assert_eq!(code, 200);
         assert_eq!(list["resources"][0]["kind"], "Widget");
+    }
+
+    #[test]
+    fn lists_by_label_and_has_nodes() {
+        let cluster = FakeCluster::start();
+        let token = Some(cluster.token());
+        for (name, app) in [("a", "web"), ("b", "web"), ("c", "worker")] {
+            cluster.put(json!({"apiVersion": "v1", "kind": "Pod",
+                               "metadata": {"name": name, "namespace": "default", "labels": {"app": app}}}));
+        }
+        let (code, list) = send(
+            &cluster,
+            "GET",
+            "/api/v1/namespaces/default/pods?labelSelector=app%3Dweb",
+            token,
+            "",
+        );
+        assert_eq!(code, 200);
+        let names: Vec<&str> = list["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["metadata"]["name"].as_str().unwrap())
+            .collect();
+        assert_eq!(names, ["a", "b"]);
+        cluster.put(
+            json!({"apiVersion": "v1", "kind": "Node", "metadata": {"name": "n1"},
+                           "status": {"nodeInfo": {"architecture": "arm64"}}}),
+        );
+        let (code, node) = send(&cluster, "GET", "/api/v1/nodes/n1", token, "");
+        assert_eq!(code, 200);
+        assert_eq!(node["status"]["nodeInfo"]["architecture"], "arm64");
     }
 }

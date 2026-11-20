@@ -68,6 +68,7 @@ pub fn install_args() -> Vec<Arg> {
             .help("The install, as app installs lists it"),
     ];
     args.extend(with_cluster_args(Clap::new("x")).get_arguments().cloned());
+    args.extend(crate::remote::runner_args());
     args
 }
 

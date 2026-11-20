@@ -130,10 +130,19 @@ impl Connection {
                     }
                     Ok::<(), ClusterError>(())
                 };
-                tokio::pin!(input, output);
+                // A stopping signal (Ctrl-C) ends the stream, so the runner pod can be deleted before the CLI goes.
+                let stopped = async {
+                    while crate::runner::stopping_signal().is_none() {
+                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                    }
+                };
+                tokio::pin!(input, output, stopped);
                 let mut input_done = false;
                 loop {
                     tokio::select! {
+                        () = &mut stopped => {
+                            return Err(ClusterError::Other(format!("stopped while running a command in {pod}")));
+                        }
                         sent = &mut input, if !input_done => {
                             sent?;
                             input_done = true;

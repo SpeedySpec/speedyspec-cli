@@ -294,3 +294,57 @@ fn release_sums_script_output_is_read_back() {
     sorted.sort_unstable();
     assert_eq!(names, sorted);
 }
+
+#[test]
+fn a_checked_download_gives_its_digest() {
+    let (_server, release) = good(NEW);
+    let dir = tempfile::tempdir().unwrap();
+    let (path, digest) =
+        speedyspec_selfupdate::download_checked(&HttpFetch::new(), &release, ASSET, dir.path())
+            .unwrap();
+    assert_eq!(digest, sha256(NEW.as_bytes()));
+    assert_eq!(fs::read_to_string(&path).unwrap(), NEW);
+}
+
+#[test]
+fn a_checked_download_that_does_not_match_is_refused() {
+    let (_server, release) = serve(
+        Route::ok(NEW),
+        Route::ok(sums_for(ASSET, b"other")),
+        NEW.len() as u64,
+    );
+    let dir = tempfile::tempdir().unwrap();
+    let error =
+        speedyspec_selfupdate::download_checked(&HttpFetch::new(), &release, ASSET, dir.path())
+            .unwrap_err();
+    assert!(error.0.contains("does not match"), "{error}");
+    assert_eq!(
+        fs::read_dir(dir.path()).unwrap().count(),
+        0,
+        "the download was left behind"
+    );
+}
+
+#[test]
+fn a_release_is_found_by_its_version() {
+    let body = r#"{"tag_name":"v0.4.1","assets":[{"name":"SHA256SUMS","browser_download_url":"https://x/s","size":9}]}"#;
+    let server = Server::start(vec![(
+        "/repos/SpeedySpec/speedyspec-cli/releases/tags/v0.4.1",
+        Route::ok(body),
+    )]);
+    let release = speedyspec_selfupdate::release_of(
+        &HttpFetch::new(),
+        &server.url(),
+        &Version::parse("0.4.1").unwrap(),
+    )
+    .unwrap();
+    assert_eq!(release.tag, "v0.4.1");
+    assert!(release.asset(SUMS).is_some());
+    let error = speedyspec_selfupdate::release_of(
+        &HttpFetch::new(),
+        &server.url(),
+        &Version::parse("0.4.2").unwrap(),
+    )
+    .unwrap_err();
+    assert!(error.0.contains("no release v0.4.2"), "{error}");
+}

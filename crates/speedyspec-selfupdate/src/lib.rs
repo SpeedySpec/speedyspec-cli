@@ -6,6 +6,6 @@ mod replace;
 
 pub use release::{
     Asset, Check, REPOSITORY, Release, SUMS, UpdateError, Version, asset_name, check,
-    current_asset, latest_release, parse_sums,
+    current_asset, latest_release, parse_sums, release_of,
 };
-pub use replace::{install, target_executable, writable_problem};
+pub use replace::{download_checked, install, target_executable, writable_problem};
