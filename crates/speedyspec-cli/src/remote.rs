@@ -1,18 +1,21 @@
 //! The CLI side of work on a Kubernetes install: the runner pod beside the app's pod, with this release's own Linux
 //! binary in it, checked twice (against the release's `SHA256SUMS` here, with `sha256sum` in the pod).
 
+use std::cell::{Cell, RefCell};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use clap::{Arg, ArgMatches};
+use serde_json::json;
 use sha2::{Digest, Sha256};
-use speedyspec_driver::Workload;
-use speedyspec_driver_kubernetes::{RunnerPod, RunnerSpec, place_runner};
+use speedyspec_driver::{AppRuntime, AppTask, Workload};
+use speedyspec_driver_kubernetes::{RUNNER_DIR, RunnerPod, RunnerSpec, place_runner};
 use speedyspec_fetch::{Fetch, HttpFetch, github_api_base};
 use speedyspec_selfupdate::{Version, asset_name, download_checked, release_of};
 
 use crate::app_target::{self, Target};
 use crate::boot::Runtime;
+use crate::runner::{RunnerError, TaskOutcome};
 
 /// A small image that only sleeps, pinned by digest so it is the same image everywhere.
 pub const DEFAULT_RUNNER_IMAGE: &str =
@@ -120,6 +123,137 @@ pub struct Remote<'t> {
     pub pod: RunnerPod<'t>,
     pub workload: Workload,
     _binary: RunnerBinary,
+    /// Plugin directories already copied into the pod, and where they are there.
+    plugins: RefCell<Vec<(PathBuf, String)>>,
+    /// For unique file names in the pod.
+    files: Cell<u32>,
+}
+
+/// The plugin directory a task file belongs to (the nearest one up that has `speedyspec-plugin.json`, or the task's
+/// own directory), and the task's path inside it.
+fn plugin_of(file: &Path) -> (PathBuf, PathBuf) {
+    let parent = file.parent().unwrap_or(Path::new("/"));
+    let root = parent
+        .ancestors()
+        .find(|dir| dir.join("speedyspec-plugin.json").is_file())
+        .unwrap_or(parent);
+    let relative = file.strip_prefix(root).unwrap_or(file).to_path_buf();
+    (root.to_path_buf(), relative)
+}
+
+impl Remote<'_> {
+    /// A new private path under the pod's runner directory.
+    pub fn private_path(&self, what: &str) -> String {
+        let n = self.files.get() + 1;
+        self.files.set(n);
+        format!("{RUNNER_DIR}/{what}-{n}")
+    }
+
+    /// Where the plugin directory `root` is in the pod, copying it there the first time.
+    fn plugin_in_pod(&self, root: &Path) -> Result<String, String> {
+        if let Some((_, there)) = self.plugins.borrow().iter().find(|(here, _)| here == root) {
+            return Ok(there.clone());
+        }
+        let there = self.private_path("plugin");
+        let mut archive =
+            tempfile::tempfile().map_err(|e| format!("cannot pack {}: {e}", root.display()))?;
+        {
+            let mut builder = tar::Builder::new(&mut archive);
+            builder.follow_symlinks(false);
+            builder
+                .append_dir_all(".", root)
+                .and_then(|()| builder.finish())
+                .map_err(|e| format!("cannot pack {}: {e}", root.display()))?;
+        }
+        use std::io::Seek;
+        archive
+            .rewind()
+            .map_err(|e| format!("cannot pack {}: {e}", root.display()))?;
+        let mut err = Vec::new();
+        let code = self
+            .pod
+            .command(
+                &[
+                    "sh",
+                    "-c",
+                    "mkdir -p \"$1\" && tar -x -C \"$1\"",
+                    "sh",
+                    &there,
+                ],
+                Some(&mut archive),
+                &mut std::io::sink(),
+                &mut err,
+            )
+            .map_err(|e| e.0)?;
+        if code != 0 {
+            return Err(format!(
+                "could not copy {} into the runner pod: {}",
+                root.display(),
+                String::from_utf8_lossy(&err).trim()
+            ));
+        }
+        self.plugins
+            .borrow_mut()
+            .push((root.to_path_buf(), there.clone()));
+        Ok(there)
+    }
+
+    /// Runs `task` in the app at the workload's root, in the runner pod, as `runner::run` does on this machine. The
+    /// request (with the task's input) goes in as a private file the pod deletes on reading.
+    pub fn run_task(&self, app: &AppRuntime, task: &AppTask) -> Result<TaskOutcome, RunnerError> {
+        let name = task.file.display().to_string();
+        let fail = |message: String| RunnerError(format!("the task {name}: {message}"));
+        let (plugin, relative) = plugin_of(&task.file);
+        let dir = self.plugin_in_pod(&plugin).map_err(fail)?;
+        let map = |pairs: &[(String, String)]| -> serde_json::Value {
+            serde_json::Value::Object(
+                pairs
+                    .iter()
+                    .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+                    .collect(),
+            )
+        };
+        let request = json!({
+            "root": self.workload.root,
+            "entry": app.entry,
+            "ini": map(&app.ini),
+            "server": map(&app.server),
+            "file": format!("{dir}/{}", relative.display()),
+            "input": task.input,
+            "loads_app": task.loads_app,
+            "timeout": task.timeout.as_secs(),
+        })
+        .to_string();
+        let path = self.private_path("task.json");
+        self.pod
+            .put(&path, &mut request.as_bytes(), 0o600)
+            .map_err(|e| fail(e.0))?;
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let ran = self.pod.run(
+            &["self", "task-request", "--request", &path],
+            None,
+            &mut out,
+            &mut err,
+        );
+        // `self task-request` deletes it on reading; this is for when it never ran.
+        let _ = self.pod.remove(&path);
+        let code = ran.map_err(|e| fail(e.0))?;
+        let reply: serde_json::Value = serde_json::from_slice(&out).map_err(|_| {
+            fail(format!(
+                "the runner pod gave no answer (exit {code}): {}",
+                String::from_utf8_lossy(&err).trim()
+            ))
+        })?;
+        if reply["ok"] == serde_json::Value::Bool(true) {
+            return Ok(TaskOutcome::from_json(&reply["outcome"]));
+        }
+        Err(RunnerError(
+            reply["error"]
+                .as_str()
+                .unwrap_or("the task failed")
+                .to_owned(),
+        ))
+    }
 }
 
 /// Starts the runner pod for `target`, which must be a Kubernetes install.
@@ -166,6 +300,8 @@ pub fn open<'t>(
         pod,
         workload,
         _binary: binary,
+        plugins: RefCell::new(Vec::new()),
+        files: Cell::new(0),
     })
 }
 

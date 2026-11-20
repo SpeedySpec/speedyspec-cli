@@ -89,7 +89,7 @@ pub fn run(runtime: &Runtime, matches: &ArgMatches) -> i32 {
                 "app db on Kubernetes install {name} is not done yet"
             ));
         }
-        app_target::database(runtime, &target)
+        app_target::database(runtime, &target, None)
     }) {
         Ok(settings) => settings,
         Err(message) => return fail(message),

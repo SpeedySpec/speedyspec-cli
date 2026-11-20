@@ -64,6 +64,12 @@ pub fn clap() -> Clap {
                         .value_parser(clap::value_parser!(u64)),
                 ),
         )
+        // In a runner pod: one task from a request file (deleted once read), its outcome printed as JSON.
+        .subcommand(
+            Clap::new("task-request")
+                .hide(true)
+                .arg(Arg::new("request").long("request").required(true)),
+        )
 }
 
 /// Whether the arguments name a `self` command that runs before plugins are loaded (global flags
@@ -84,7 +90,10 @@ pub fn runs_before_plugins(args: &[String]) -> bool {
     }
     matches!(
         words[..],
-        ["self", "update" | "run-task" | "task" | "composer-plugins"]
+        [
+            "self",
+            "update" | "run-task" | "task" | "task-request" | "composer-plugins"
+        ]
     )
 }
 
@@ -101,6 +110,9 @@ pub fn run(matches: &ArgMatches) -> i32 {
             std::path::Path::new(run.get_one::<String>("result").expect("required")),
         ),
         Some(("task", task)) => run_one_task(task),
+        Some(("task-request", request)) => run_task_request(std::path::Path::new(
+            request.get_one::<String>("request").expect("required"),
+        )),
         Some(("composer-plugins", plugins)) => crate::composer_child::run_child(
             std::path::Path::new(plugins.get_one::<String>("dir").expect("required")),
         ),
@@ -139,6 +151,60 @@ fn run_one_task(matches: &ArgMatches) -> i32 {
             eprintln!("speedyspec: {error}");
             1
         }
+    }
+}
+
+/// `self task-request`: in a runner pod, the task a request file describes. The file holds the task's input, which
+/// may be a secret, so it is deleted as soon as it is read; the runner's own files go to the pod's private directory.
+/// The outcome is printed as one line of JSON: `{"ok": true, "outcome": ...}` or `{"ok": false, "error": ...}`.
+fn run_task_request(path: &std::path::Path) -> i32 {
+    let text = std::fs::read_to_string(path);
+    let _ = std::fs::remove_file(path);
+    let reply = |reply: serde_json::Value| {
+        say(&reply.to_string());
+        0
+    };
+    let request: serde_json::Value = match text
+        .map_err(|e| e.to_string())
+        .and_then(|text| serde_json::from_str(&text).map_err(|e| e.to_string()))
+    {
+        Ok(request) => request,
+        Err(e) => {
+            return reply(
+                serde_json::json!({"ok": false, "error": format!("the task request: {e}")}),
+            );
+        }
+    };
+    if let Some(dir) = path.parent() {
+        // SAFETY: nothing else runs yet; the runner's temporary files then stay in the pod's private directory.
+        unsafe { std::env::set_var("TMPDIR", dir) };
+    }
+    let pairs = |value: &serde_json::Value| -> Vec<(String, String)> {
+        value
+            .as_object()
+            .map(|map| {
+                map.iter()
+                    .map(|(k, v)| (k.clone(), v.as_str().unwrap_or_default().to_owned()))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    let runtime = speedyspec_driver::AppRuntime {
+        entry: request["entry"].as_str().map(str::to_owned),
+        ini: pairs(&request["ini"]),
+        server: pairs(&request["server"]),
+        ..Default::default()
+    };
+    let task = speedyspec_driver::AppTask {
+        file: request["file"].as_str().unwrap_or_default().into(),
+        input: request["input"].clone(),
+        loads_app: request["loads_app"].as_bool().unwrap_or(false),
+        timeout: std::time::Duration::from_secs(request["timeout"].as_u64().unwrap_or(600)),
+    };
+    let root = std::path::PathBuf::from(request["root"].as_str().unwrap_or("/"));
+    match crate::runner::run(&root, &runtime, &task) {
+        Ok(outcome) => reply(serde_json::json!({"ok": true, "outcome": outcome.to_json()})),
+        Err(error) => reply(serde_json::json!({"ok": false, "error": error.0})),
     }
 }
 

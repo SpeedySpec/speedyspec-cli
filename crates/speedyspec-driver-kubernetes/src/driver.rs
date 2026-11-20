@@ -160,6 +160,37 @@ pub(crate) fn timeout_of(flags: &BTreeMap<String, String>) -> Result<Duration, D
         .map_err(|problem| DriverError(format!("--timeout {problem}")))
 }
 
+/// The cluster a prepared Kubernetes install goes to: its connection, the install's name and namespace. The CLI takes
+/// it over once the resources are in place, to run the app's setup there; `None` for another driver's install.
+pub fn into_cluster(prepared: Prepared) -> Option<(Connection, String, String)> {
+    let settings = prepared.state.downcast::<Settings>().ok()?;
+    let Settings {
+        connection,
+        name,
+        namespace,
+        ..
+    } = *settings;
+    Some((connection, name, namespace))
+}
+
+/// How many setup tasks an earlier run of a prepared Kubernetes install finished, when its record says its setup did
+/// not finish; `None` when there is no such record (or it is another driver's install).
+pub fn unfinished_setup(prepared: &Prepared) -> Result<Option<u64>, String> {
+    let Some(settings) = prepared.state.downcast_ref::<Settings>() else {
+        return Ok(None);
+    };
+    let identity = InstallIdentity {
+        app: &settings.app,
+        name: &settings.name,
+        namespace: &settings.namespace,
+    };
+    Ok(
+        crate::install::read_record(&settings.connection, &identity)?
+            .filter(|record| record.status == crate::record::Status::Files)
+            .map(|record| record.setup_done.unwrap_or(0)),
+    )
+}
+
 fn settings_of(prepared: &Prepared) -> Result<&Settings, DriverError> {
     prepared.state.downcast_ref::<Settings>().ok_or_else(|| {
         DriverError("the kubernetes driver was handed another driver's state".to_owned())

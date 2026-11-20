@@ -28,10 +28,6 @@ const HOOK_DATABASE: &str = "speedyspec_app_database";
 const INSTALL: &str = "SpeedySpec\\Cli\\Contracts\\Install";
 
 /// The cluster a Kubernetes install is in, and the namespace of its record.
-#[expect(
-    dead_code,
-    reason = "the runner pod (plan 8, task 5) reaches the install through these"
-)]
 pub struct Cluster {
     pub connection: Connection,
     pub namespace: String,
@@ -77,11 +73,12 @@ pub fn install_args() -> Vec<Arg> {
 pub fn given_cluster_flags(matches: &ArgMatches) -> Option<BTreeMap<String, String>> {
     let mut given = BTreeMap::new();
     for flag in cluster_flags() {
+        // A command may not have every flag (app install has each driver's own): one it lacks is not given.
         if flag.takes_value {
-            if let Some(value) = matches.get_one::<String>(flag.name) {
+            if let Ok(Some(value)) = matches.try_get_one::<String>(flag.name) {
                 given.insert(flag.name.to_owned(), value.clone());
             }
-        } else if matches.get_flag(flag.name) {
+        } else if let Ok(Some(true)) = matches.try_get_one::<bool>(flag.name) {
             given.insert(flag.name.to_owned(), "1".to_owned());
         }
     }
@@ -255,8 +252,12 @@ pub fn runtime(runtime: &Runtime, target: &Target) -> Result<AppRuntime, String>
 }
 
 /// Where the install's database is: a plugin's answer, or the result of the task it answered
-/// with.
-pub fn database(runtime: &Runtime, target: &Target) -> Result<DatabaseConnection, String> {
+/// with. A Kubernetes install's task runs in `remote`, its runner pod.
+pub fn database(
+    runtime: &Runtime,
+    target: &Target,
+    remote: Option<&crate::remote::Remote<'_>>,
+) -> Result<DatabaseConnection, String> {
     let check =
         |value: &Value, reader: &dyn ObjectReader| decode_database_or_task(value, reader).map(drop);
     let answer = ask(runtime, target, HOOK_DATABASE, check)?;
@@ -274,7 +275,17 @@ pub fn database(runtime: &Runtime, target: &Target) -> Result<DatabaseConnection
             } else {
                 AppRuntime::default()
             };
-            let outcome = crate::runner::run(target.root()?, &app, &task).map_err(|e| e.0)?;
+            let outcome = match (&target.cluster, remote) {
+                (None, _) => crate::runner::run(target.root()?, &app, &task),
+                (Some(_), Some(remote)) => remote.run_task(&app, &task),
+                (Some(_), None) => {
+                    return Err(format!(
+                        "{}'s plugin finds its database with a task, which runs in a runner pod on Kubernetes",
+                        target.install.app
+                    ));
+                }
+            }
+            .map_err(|e| e.0)?;
             database_connection_from_json(&outcome.result)
         }
     }
@@ -283,7 +294,8 @@ pub fn database(runtime: &Runtime, target: &Target) -> Result<DatabaseConnection
 /// `self database --install <name>`: the connection a plugin gives, without the password.
 pub fn print_database(runtime: &Runtime, matches: &ArgMatches) -> i32 {
     let name = matches.get_one::<String>("install").expect("required");
-    let found = Target::from_matches(name, matches).and_then(|target| database(runtime, &target));
+    let found =
+        Target::from_matches(name, matches).and_then(|target| database(runtime, &target, None));
     match found {
         Ok(c) => {
             let shown = serde_json::json!({

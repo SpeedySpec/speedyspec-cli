@@ -390,6 +390,8 @@ fn install_clap(install_options: &[InstallOption]) -> Clap {
             });
         }
     }
+    // A Kubernetes install's setup runs in a runner pod.
+    clap = clap.args(crate::remote::runner_args());
     for option in install_options {
         let help = match (&option.default, option.required) {
             (Some(default), _) if !option.secret => {

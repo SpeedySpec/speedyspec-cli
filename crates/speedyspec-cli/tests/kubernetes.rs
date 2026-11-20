@@ -645,6 +645,7 @@ fn uninstall_does_not_wait_for_a_kind_the_cluster_no_longer_has() {
             },
             retained: false,
         }],
+        setup_done: None,
     };
     cluster.put(record.to_secret("shop"));
 

@@ -175,7 +175,7 @@ pub fn backup_to(
         format!("install {name} is not on this machine; backups are for zip installs for now")
     })?;
     let spec = spec(runtime, &target.install)?;
-    let mut settings = app_target::database(runtime, &target)?;
+    let mut settings = app_target::database(runtime, &target, None)?;
     if let Some(prefix) = prefix {
         settings.table_prefix = prefix.to_owned();
     }
@@ -322,7 +322,7 @@ pub fn run_restore(runtime: &Runtime, matches: &ArgMatches) -> i32 {
         Ok(spec) => spec,
         Err(message) => return fail(&message),
     };
-    let settings = match app_target::database(runtime, &target) {
+    let settings = match app_target::database(runtime, &target, None) {
         Ok(settings) => settings,
         Err(message) => return fail(&message),
     };

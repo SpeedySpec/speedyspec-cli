@@ -3,8 +3,11 @@
 declare(strict_types=1);
 
 use SpeedySpec\Cli\Contracts\AppRuntime;
+use SpeedySpec\Cli\Contracts\AppTask;
 use SpeedySpec\Cli\Contracts\DatabaseConnection;
 use SpeedySpec\Cli\Contracts\Install;
+use SpeedySpec\Cli\Contracts\InstallRequest;
+use SpeedySpec\Cli\Contracts\SetupPlan;
 use SpeedySpec\Cli\Contracts\Workload;
 use SpeedySpec\Hooks\Hook;
 
@@ -27,3 +30,16 @@ Hook::add('speedyspec_app_database', static function (mixed $given, Install $ins
 
     return new DatabaseConnection('mysql.shop.svc', 'shop', 'shop', 'hunter2-secret');
 }, 10, 2);
+
+// With K8S_SETUP set: two setup tasks, the first given a secret.
+Hook::add('speedyspec_app_setup', static function (?SetupPlan $plan, Install $install, InstallRequest $request): ?SetupPlan
+{
+    if ($install->app !== 'shop' || getenv('K8S_SETUP') !== '1') {
+        return $plan;
+    }
+
+    return new SetupPlan([
+        new AppTask(__DIR__ . '/tasks/one.php', ['password' => 'hunter2-secret'], loadsApp: false),
+        new AppTask(__DIR__ . '/tasks/two.php', loadsApp: false),
+    ]);
+}, 10, 3);

@@ -142,6 +142,18 @@ pub struct TaskOutcome {
 }
 
 impl TaskOutcome {
+    /// An outcome as `to_json` wrote it (a runner pod sends it back that way).
+    pub fn from_json(json: &Json) -> TaskOutcome {
+        TaskOutcome {
+            result: json["result"].clone(),
+            diagnostics: json["diagnostics"]
+                .as_array()
+                .map(|all| all.iter().map(Diagnostic::from_json).collect())
+                .unwrap_or_default(),
+            output: json["output"].as_str().unwrap_or_default().to_owned(),
+        }
+    }
+
     pub fn to_json(&self) -> Json {
         json!({
             "result": self.result,

@@ -9,6 +9,7 @@ use speedyspec_hooks::Value;
 
 use crate::app_target::{Target, ask_with};
 use crate::boot::{PhpReader, Runtime};
+use crate::remote::{Remote, RunnerOptions};
 
 const HOOK_SETUP: &str = "speedyspec_app_setup";
 
@@ -50,23 +51,19 @@ fn file_name(path: &Path) -> String {
     )
 }
 
-/// Runs the plan's tasks from index `from` on, in the install root, saying on stderr which one runs. A task whose
-/// result is a string has it shown as progress.
+/// Runs the plan's tasks from index `from` on, in the install root (in a runner pod beside the app, for a Kubernetes
+/// install), saying on stderr which one runs. A task whose result is a string has it shown as progress.
 pub fn run(
     runtime: &Runtime,
-    install: &Install,
+    target: &Target,
     plan: &SetupPlan,
     from: usize,
+    options: &RunnerOptions,
 ) -> Result<(), SetupFailure> {
     let total = plan.tasks.len();
-    let root = install.root.as_deref().ok_or_else(|| SetupFailure {
-        done: from,
-        message: format!("install {} is not on this machine", install.name),
-    })?;
-    let target = Target {
-        install: install.clone(),
-        cluster: None,
-    };
+    let install = &target.install;
+    // Started at the first task that needs it, so its line is shown before the pod is waited for.
+    let mut remote: Option<Remote<'_>> = None;
     for (index, task) in plan.tasks.iter().enumerate().skip(from) {
         let name = file_name(&task.file);
         eprintln!("setup: {name} ({}/{total})", index + 1);
@@ -75,11 +72,23 @@ pub fn run(
             message: format!("setup stopped at {name}: {message}"),
         };
         let app = if task.loads_app {
-            crate::app_target::runtime(runtime, &target).map_err(fail)?
+            crate::app_target::runtime(runtime, target).map_err(fail)?
         } else {
             AppRuntime::default()
         };
-        let outcome = crate::runner::run(root, &app, task).map_err(|e| fail(e.0))?;
+        let outcome = if target.cluster.is_some() {
+            if remote.is_none() {
+                remote = Some(crate::remote::open(runtime, target, options).map_err(fail)?);
+            }
+            remote.as_ref().expect("just opened").run_task(&app, task)
+        } else {
+            let root = install
+                .root
+                .as_deref()
+                .ok_or_else(|| fail(format!("install {} is not on this machine", install.name)))?;
+            crate::runner::run(root, &app, task)
+        }
+        .map_err(|e| fail(e.0))?;
         if let Some(text) = outcome.result.as_str() {
             eprintln!("setup: {text}");
         }
