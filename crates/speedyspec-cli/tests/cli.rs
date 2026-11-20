@@ -45,7 +45,7 @@ fn version_prints_three_lines() {
     assert_eq!(lines.len(), 3, "{:?}", out.stdout);
     assert!(lines[0].starts_with("speedyspec "), "{}", lines[0]);
     assert!(lines[1].starts_with("php 8."), "{}", lines[1]);
-    assert_eq!(lines[2], "contracts 1.4.0");
+    assert_eq!(lines[2], "contracts 1.5.0");
     assert_eq!(out.stderr, "");
 }
 
@@ -263,7 +263,7 @@ fn contract_range_mismatch_is_reported() {
     let out = run(&["needs-v2"], &["--version"]);
     assert_eq!(out.code, 0, "{}", out.stderr);
     assert!(out.stderr.contains("^2.0"), "{}", out.stderr);
-    assert!(out.stderr.contains("1.4.0"), "{}", out.stderr);
+    assert!(out.stderr.contains("1.5.0"), "{}", out.stderr);
     assert!(!out.stderr.contains("must never load"), "{}", out.stderr);
     assert_eq!(out.stdout.lines().count(), 3, "{:?}", out.stdout);
 }
