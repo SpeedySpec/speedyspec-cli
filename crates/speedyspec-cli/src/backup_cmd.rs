@@ -418,14 +418,19 @@ pub fn run_restore(runtime: &Runtime, matches: &ArgMatches) -> i32 {
                 "there is no speedyspec home to keep the backup of what is there in; set SPEEDYSPEC_HOME",
             );
         };
-        if let Err(message) = backup_to(
-            runtime,
-            name,
-            cluster.as_ref(),
-            &RunnerOptions::from_matches(matches),
-            &path,
-            Some(&to_prefix),
-        ) {
+        // A Kubernetes install's is made through the runner pod already open.
+        let backed_up = match &remote {
+            Some(remote) => backup_in_pod(runtime, &target, remote, &path, Some(&to_prefix)),
+            None => backup_to(
+                runtime,
+                name,
+                cluster.as_ref(),
+                &RunnerOptions::from_matches(matches),
+                &path,
+                Some(&to_prefix),
+            ),
+        };
+        if let Err(message) = backed_up {
             return fail(&format!(
                 "could not back up what is there first, so nothing was restored: {message}"
             ));
@@ -611,12 +616,22 @@ fn move_from_json(json: &Json) -> Result<Move, String> {
     })
 }
 
-/// Where the archive goes in the runner pod while it is made or read: the runner container's own disk, so a large one
-/// takes no memory there. It is deleted when the step ends, and goes with the pod in any case.
+/// Where the archive goes in the runner pod while it is made or read: the runner's disk-backed work directory, so a
+/// large one takes no memory there. It is deleted when the step ends, and goes with the pod in any case.
 fn archive_in_pod(remote: &Remote<'_>) -> String {
-    remote
-        .private_path("archive")
-        .replace(speedyspec_driver_kubernetes::RUNNER_DIR, "/tmp")
+    remote.private_path("archive").replace(
+        speedyspec_driver_kubernetes::RUNNER_DIR,
+        speedyspec_driver_kubernetes::WORK_DIR,
+    )
+}
+
+/// A restore whose exchange with the runner pod was cut off (Ctrl-C, a broken stream): the import may have begun, so
+/// it is reported as having changed the database, and the way to undo it is shown.
+fn cut_off(message: String) -> speedyspec_backup::flow::RestoreError {
+    speedyspec_backup::flow::RestoreError {
+        message,
+        database_changed: true,
+    }
 }
 
 /// Puts `request` in the pod as a private file, runs the CLI there with `args` and the file's path after
@@ -764,7 +779,7 @@ fn restore_in_pod(
     });
     let reply = pod_request(remote, &request, &["self", "restore-local"]);
     let _ = remote.pod.remove(&there);
-    let reply = reply.map_err(plain)?;
+    let reply = reply.map_err(cut_off)?;
     warnings.extend(strings(&reply["warnings"]));
     if reply["ok"] == Json::Bool(true) {
         return Ok(());
@@ -937,5 +952,12 @@ mod tests {
             (back.prefixed_columns, back.keep_urls),
             (plan.prefixed_columns.clone(), plan.keep_urls.clone())
         );
+    }
+
+    #[test]
+    fn a_restore_cut_off_in_the_pod_may_have_changed_the_database() {
+        let error = cut_off("the stream to blog-x broke while running the command".to_owned());
+        assert!(error.database_changed);
+        assert!(error.message.contains("broke"));
     }
 }

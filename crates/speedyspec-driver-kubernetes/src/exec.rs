@@ -49,6 +49,40 @@ impl Connection {
         stdout: &mut dyn Write,
         stderr: &mut dyn Write,
     ) -> Result<i32, ClusterError> {
+        self.exec_with(
+            namespace, pod, container, command, stdin, stdout, stderr, true,
+        )
+    }
+
+    /// As `exec`, but not given up on Ctrl-C: for the clean-up that has to happen after a stop.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn exec_to_the_end(
+        &self,
+        namespace: &str,
+        pod: &str,
+        container: Option<&str>,
+        command: &[&str],
+        stdin: Option<&mut (dyn Read + Send)>,
+        stdout: &mut dyn Write,
+        stderr: &mut dyn Write,
+    ) -> Result<i32, ClusterError> {
+        self.exec_with(
+            namespace, pod, container, command, stdin, stdout, stderr, false,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn exec_with(
+        &self,
+        namespace: &str,
+        pod: &str,
+        container: Option<&str>,
+        command: &[&str],
+        stdin: Option<&mut (dyn Read + Send)>,
+        stdout: &mut dyn Write,
+        stderr: &mut dyn Write,
+        stoppable: bool,
+    ) -> Result<i32, ClusterError> {
         let broke =
             |what: &str| ClusterError::Other(format!("the stream to {pod} broke while {what}"));
         let api: Api<Pod> = Api::namespaced(self.client.clone(), namespace);
@@ -132,7 +166,7 @@ impl Connection {
                 };
                 // A stopping signal (Ctrl-C) ends the stream, so the runner pod can be deleted before the CLI goes.
                 let stopped = async {
-                    while crate::runner::stopping_signal().is_none() {
+                    while !stoppable || crate::runner::stopping_signal().is_none() {
                         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                     }
                 };

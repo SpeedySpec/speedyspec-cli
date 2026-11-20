@@ -25,6 +25,6 @@ pub use manifest::{
 pub use readiness::{KNOWN_KINDS, Readiness, default_wait, parse_timeout, readiness};
 pub use record::{Record, Recorded, SCHEMA, Status};
 pub use runner::{
-    Placement, RUNNER_DIR, RunnerError, RunnerPod, RunnerSpec, place_runner, runner_job,
+    Placement, RUNNER_DIR, RunnerError, RunnerPod, RunnerSpec, WORK_DIR, place_runner, runner_job,
 };
 pub use uninstall::{Removal, Removed, find_install, remove_install, summarise};

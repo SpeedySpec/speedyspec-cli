@@ -5,7 +5,7 @@
 
 use std::io::{Read, Write};
 use std::path::Path;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicI32, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use k8s_openapi::api::batch::v1::Job;
@@ -19,6 +19,9 @@ use crate::manifest::ResourceId;
 
 /// Where the binary goes in the pod: an in-memory `emptyDir` only the runner sees.
 pub const RUNNER_DIR: &str = "/speedyspec";
+/// Where archives go while they are made or read: a disk-backed `emptyDir` only the runner sees, so they take no
+/// memory and an app with a read-only root filesystem still works.
+pub const WORK_DIR: &str = "/speedyspec-work";
 const BINARY: &str = "/speedyspec/speedyspec";
 const CONTAINER: &str = "runner";
 /// The service account token Kubernetes mounts itself: never copied, the runner needs no API access.
@@ -181,6 +184,7 @@ pub fn place_runner(
         .into_iter()
         .filter(|mount| mount["mountPath"].as_str() != Some(SERVICE_ACCOUNT_DIR))
         .filter(|mount| mount["mountPath"].as_str() != Some(RUNNER_DIR))
+        .filter(|mount| mount["mountPath"].as_str() != Some(WORK_DIR))
         .collect();
     let used: Vec<&str> = mounts.iter().filter_map(|m| m["name"].as_str()).collect();
     let volumes: Vec<Json> = pod["spec"]["volumes"]
@@ -222,8 +226,10 @@ pub fn runner_job(namespace: &str, placement: &Placement, spec: &RunnerSpec, nam
     let labels = json!({"speedyspec.runner": "1", "speedyspec.install": spec.install});
     let mut mounts = placement.mounts.clone();
     mounts.push(json!({"name": "speedyspec-runner", "mountPath": RUNNER_DIR}));
+    mounts.push(json!({"name": "speedyspec-work", "mountPath": WORK_DIR}));
     let mut volumes = placement.volumes.clone();
     volumes.push(json!({"name": "speedyspec-runner", "emptyDir": {"medium": "Memory"}}));
+    volumes.push(json!({"name": "speedyspec-work", "emptyDir": {}}));
     let mut container = json!({
         "name": CONTAINER,
         "image": spec.image,
@@ -292,14 +298,24 @@ pub(crate) fn stopping_signal() -> Option<libc::c_int> {
     }
 }
 
+/// How many guards are alive. A command may hold a runner pod while it opens another (a restore backs up what is
+/// there first); only the outermost guard catches signals and ends the process.
+static GUARDS: AtomicUsize = AtomicUsize::new(0);
+
 /// While it lives, Ctrl-C and the other stopping signals are caught: the command in the pod gives up, the
-/// `RunnerPod` deletes its Job as it goes, and then this guard ends the CLI as the signal would have.
+/// `RunnerPod` deletes its Job as it goes, and then the outermost guard ends the CLI as the signal would have.
 struct SignalGuard {
     previous: Vec<(libc::c_int, libc::sighandler_t)>,
 }
 
 impl SignalGuard {
     fn install() -> SignalGuard {
+        if GUARDS.fetch_add(1, Ordering::SeqCst) > 0 {
+            // An outer guard already catches them.
+            return SignalGuard {
+                previous: Vec::new(),
+            };
+        }
         STOPPED_BY.store(0, Ordering::SeqCst);
         let handler = note_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
         let mut previous = Vec::new();
@@ -319,12 +335,17 @@ impl SignalGuard {
 
 impl Drop for SignalGuard {
     fn drop(&mut self) {
+        if GUARDS.fetch_sub(1, Ordering::SeqCst) > 1 {
+            // Not the outermost: the stop, if there was one, is the outer guard's to finish.
+            return;
+        }
         for &(signal, previous) in &self.previous {
             // SAFETY: puts back the disposition `install` replaced.
             unsafe { libc::signal(signal, previous) };
         }
         if let Some(signal) = stopping_signal() {
-            // The Job is gone by now (the RunnerPod deletes it before this guard drops): end as the signal would.
+            // Every runner Job is gone by now (each RunnerPod deletes its own before its guard drops): end as the
+            // signal would.
             // SAFETY: raises the signal with its earlier disposition back in place.
             unsafe { libc::raise(signal) };
             std::process::exit(128 + signal);
@@ -420,6 +441,11 @@ impl<'c> RunnerPod<'c> {
         let started = Instant::now();
         let mut last = "no pod yet".to_owned();
         loop {
+            if stopping_signal().is_some() {
+                return Err(other(format!(
+                    "stopped while waiting for the runner pod ({last})"
+                )));
+            }
             let pods = self.connection.list(
                 "v1",
                 "Pod",
@@ -555,15 +581,22 @@ impl<'c> RunnerPod<'c> {
         Ok(())
     }
 
-    /// Deletes `path` in the pod; one that is not there is no error.
+    /// Deletes `path` in the pod; one that is not there is no error. It runs to the end even after Ctrl-C: it is how
+    /// a request, an archive or a maintenance file is cleaned up.
     pub fn remove(&self, path: &str) -> Result<(), RunnerError> {
-        self.command(
+        let code = self.connection.exec_to_the_end(
+            &self.namespace,
+            &self.pod,
+            Some(CONTAINER),
             &["rm", "-rf", path],
             None,
             &mut std::io::sink(),
             &mut std::io::sink(),
-        )
-        .map(drop)
+        )?;
+        if code != 0 {
+            return Err(other(format!("could not remove {path} in the runner pod")));
+        }
+        Ok(())
     }
 }
 
@@ -590,5 +623,93 @@ impl Drop for RunnerPod<'_> {
                 self.job, self.namespace
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// The stop flag is the process's own: the tests that set it take turns.
+    static FLAG: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn an_inner_guard_leaves_a_stop_to_the_outer_one() {
+        let _turn = FLAG.lock().unwrap_or_else(|e| e.into_inner());
+        let outer = SignalGuard::install();
+        let inner = SignalGuard::install();
+        STOPPED_BY.store(libc::SIGTERM, Ordering::SeqCst);
+        // Before the fix, this raised SIGTERM and ended the test process here.
+        drop(inner);
+        assert_eq!(
+            stopping_signal(),
+            Some(libc::SIGTERM),
+            "the outer guard must still see the stop"
+        );
+        STOPPED_BY.store(0, Ordering::SeqCst);
+        drop(outer);
+    }
+
+    #[test]
+    fn a_stop_while_the_pod_starts_ends_the_wait() {
+        let _turn = FLAG.lock().unwrap_or_else(|e| e.into_inner());
+        let cluster = speedyspec_testkit::FakeCluster::start();
+        let url = cluster.url();
+        let flags = crate::ConnectFlags {
+            server: Some(&url),
+            token_file: None,
+            ca_cert: None,
+            insecure_skip_tls_verify: false,
+            context: None,
+        };
+        let connection = crate::connect(&flags, Some(cluster.token()), &mut std::io::empty())
+            .unwrap_or_else(|_| panic!("could not connect"));
+        let placement = Placement {
+            pod: "web-1".into(),
+            node: "n1".into(),
+            architecture: "amd64".into(),
+            mounts: Vec::new(),
+            volumes: Vec::new(),
+            pod_security: Json::Null,
+            container_security: Json::Null,
+        };
+        let spec = RunnerSpec {
+            image: "busybox".into(),
+            deadline: Duration::from_secs(60),
+            start_wait: Duration::from_secs(20),
+            install: "shop".into(),
+        };
+        let binary = tempfile::NamedTempFile::new().unwrap();
+        // An outer guard, as the CLI's own command would hold, so the runner's drop leaves the process alone.
+        let outer = SignalGuard::install();
+        let started = Instant::now();
+        let stopper = std::thread::spawn(|| {
+            std::thread::sleep(Duration::from_millis(500));
+            STOPPED_BY.store(libc::SIGINT, Ordering::SeqCst);
+        });
+        let error = match RunnerPod::start(
+            &connection,
+            "default",
+            &placement,
+            binary.path(),
+            "0",
+            &spec,
+        ) {
+            Ok(_) => panic!("a runner pod that never started was used"),
+            Err(error) => error.0,
+        };
+        stopper.join().unwrap();
+        assert!(
+            error.contains("stopped while waiting for the runner pod"),
+            "{error}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the stop was noticed after {:?}",
+            started.elapsed()
+        );
+        STOPPED_BY.store(0, Ordering::SeqCst);
+        drop(outer);
     }
 }

@@ -124,7 +124,15 @@ fn the_runner_goes_beside_a_ready_pod_with_the_app_container_s_volumes() {
         volumes.iter().any(|v| v["emptyDir"]["medium"] == "Memory"),
         "{volumes:?}"
     );
-    assert_eq!(volumes.len(), 2, "{volumes:?}");
+    // Archives go on a disk-backed emptyDir of their own, so an app with a read-only root filesystem still works.
+    let work = volumes
+        .iter()
+        .find(|v| v["name"] == "speedyspec-work")
+        .expect("a work volume");
+    assert_eq!(work["emptyDir"], json!({}), "{work}");
+    assert!(mounts.iter().any(|m| m["name"] == "speedyspec-work"
+        && m["mountPath"] == speedyspec_driver_kubernetes::WORK_DIR));
+    assert_eq!(volumes.len(), 3, "{volumes:?}");
     // Nothing of the app's environment, and no secret anywhere.
     assert!(!job.to_string().contains("hunter2-secret"));
     assert!(!job.to_string().contains("\"env\""));

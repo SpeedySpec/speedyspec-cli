@@ -278,6 +278,26 @@ fn hold_a_runner_pod() {
     )
     .unwrap_or_else(|e| panic!("{}", e.0));
     println!("held {}", runner.pod());
+    if std::env::var("SPEEDYSPEC_E2E_HOLD_MODE").as_deref() == Ok("cleanup") {
+        // As Ctrl-C mid-update would: the work stops, and the clean-up still has to run.
+        runner
+            .put("/speedyspec/marker", &mut &b"x"[..], 0o600)
+            .unwrap();
+        // SAFETY: the runner's guard catches it and only notes it.
+        unsafe { libc::raise(libc::SIGTERM) };
+        let stopped = runner.command(
+            &["sleep", "30"],
+            None,
+            &mut std::io::sink(),
+            &mut std::io::sink(),
+        );
+        println!("work: {}", if stopped.is_err() { "stopped" } else { "ran" });
+        match runner.remove("/speedyspec/marker") {
+            Ok(()) => println!("removed: ok"),
+            Err(error) => println!("removed: {}", error.0),
+        }
+        return;
+    }
     // A long command, as a dump or a restore would be.
     let _ = runner.command(
         &["sleep", "600"],
@@ -337,4 +357,29 @@ fn a_killed_cli_leaves_a_job_that_expires() {
     assert_eq!(left.len(), 1, "{left:?}");
     // Its deadline stops the pod, and its time-to-live then removes the Job.
     wait_until_gone("killed", Duration::from_secs(240));
+}
+
+#[test]
+#[ignore = "needs the cluster from scripts/k3s.sh up"]
+fn clean_up_still_runs_after_ctrl_c() {
+    let child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--ignored",
+            "--exact",
+            "hold_a_runner_pod",
+            "--nocapture",
+            "--test-threads=1",
+        ])
+        .env("SPEEDYSPEC_E2E_HOLD", "cleanup")
+        .env("SPEEDYSPEC_E2E_HOLD_DEADLINE", "300")
+        .env("SPEEDYSPEC_E2E_HOLD_MODE", "cleanup")
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("work: stopped"), "{text}");
+    assert!(text.contains("removed: ok"), "{text}");
+    assert!(!output.status.success(), "the stop did not end the process");
+    wait_until_gone("cleanup", Duration::from_secs(30));
 }

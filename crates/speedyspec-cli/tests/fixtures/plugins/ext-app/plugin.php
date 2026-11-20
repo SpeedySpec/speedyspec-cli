@@ -52,6 +52,11 @@ Hook::add('speedyspec_app_extensions', static function (?ExtensionLayout $layout
             $maintenance = is_file(dirname($path, 3) . '/.maintenance') ? 'maintenance: on' : 'maintenance: off';
             file_put_contents(getenv('EXT_MAINT_LOG'), "$maintenance\n", FILE_APPEND);
         }
+        // With EXT_FAIL_IN_MAINTENANCE: reading an entry fails while the site is in maintenance.
+        if (getenv('EXT_FAIL_IN_MAINTENANCE') === '1' && is_file(dirname($path, 3) . '/.maintenance'))
+        {
+            throw new RuntimeException('failed while in maintenance');
+        }
         $file = is_dir($path) ? $path . '/info.txt' : $path;
         if (!is_file($file) || (!is_dir($path) && !str_ends_with($path, '.php')))
         {

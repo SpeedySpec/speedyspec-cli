@@ -257,8 +257,9 @@ These find the install by name (`app installs`) and ask its app's plugin where t
 (`speedyspec_app_database`); speedyspec then does the work itself, so no `mysql` or `mysqldump`
 is needed on the machine. MySQL and MariaDB are supported. The password is never printed.
 The connection is encrypted when the app's plugin asks for it (`DatabaseConnection`'s `tls`):
-`required` encrypts without checking the server's certificate, and `verify` checks it against the
-plugin's `caFile` and the host name. With `tls` off, speedyspec warns before connecting to any host
+`required` encrypts without checking the server's certificate, and `verify` checks that it names the
+host and is signed by the plugin's `caFile` or by one of the public certificate authorities (the MySQL
+client always trusts those as well). With `tls` off, speedyspec warns before connecting to any host
 but a socket or a loopback address.
 
 - `export` writes a dump: each of the app's tables (those starting with its table prefix) is

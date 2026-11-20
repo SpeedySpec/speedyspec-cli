@@ -478,26 +478,29 @@ impl<'a> Shelf<'a> {
 
     /// Updates `slug` to `archive`, which a source already gave. Never goes back to an older version.
     pub fn update_to(&self, slug: &str, archive: ExtensionArchive) -> Result<Updated, String> {
-        self.in_maintenance(|| {
-            let (_, found) = self.recognized(slug)?;
-            let current = found.version;
-            if let Some(current) = &current {
-                if same(current, &archive.version) {
-                    return Ok(Updated::AlreadyAt(current.clone()));
-                }
-                if older(&archive.version, current) {
-                    return Ok(Updated::Newer {
-                        installed: current.clone(),
-                        latest: archive.version.clone(),
-                    });
-                }
+        let (_, found) = self.recognized(slug)?;
+        let current = found.version;
+        if let Some(current) = &current {
+            if same(current, &archive.version) {
+                return Ok(Updated::AlreadyAt(current.clone()));
             }
-            let (_work, top) = self.unpack(&archive)?;
-            self.swap(slug, SwapMode::Update, Some(&top))?;
-            Ok(Updated::From {
-                old: current,
-                new: archive.version.clone(),
-            })
+            if older(&archive.version, current) {
+                return Ok(Updated::Newer {
+                    installed: current.clone(),
+                    latest: archive.version,
+                });
+            }
+        }
+        // Downloaded and unpacked first: the site is in maintenance only while files are swapped.
+        let (_work, top) = self.unpack(&archive)?;
+        self.in_maintenance(|| {
+            // Still the one that was read: nothing replaced it while the new one downloaded.
+            self.recognized(slug)?;
+            self.swap(slug, SwapMode::Update, Some(&top))
+        })?;
+        Ok(Updated::From {
+            old: current,
+            new: archive.version,
         })
     }
 

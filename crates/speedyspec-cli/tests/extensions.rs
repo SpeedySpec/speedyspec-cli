@@ -695,15 +695,27 @@ fn it_is_removed_after_a_failed_update() {
         ext_zip("akismet", "Akismet", "1.0"),
     );
     assert_eq!(site.run(&["plugin", "install", "akismet@1.0"]).code, 0);
-    // Two top-level directories: refused after it was downloaded, while in maintenance.
     site.serve(
         "plugin",
         "akismet",
         "2.0",
-        build_zip(&[("a/", Entry::Dir), ("b/", Entry::Dir)]),
+        ext_zip("akismet", "Akismet", "2.0"),
     );
+    // The app's plugin fails while the site is in maintenance, just before the swap.
     let log = site.home.path().join("maintenance.log");
-    let out = in_maintenance(&site, &log, &["plugin", "update", "akismet"]);
+    let out = site
+        .cli()
+        .env("EXT_MAINTENANCE", "1")
+        .env("EXT_MAINT_LOG", &log)
+        .env("EXT_FAIL_IN_MAINTENANCE", "1")
+        .run(&[
+            "--no-interaction",
+            "plugin",
+            "update",
+            "akismet",
+            "--install",
+            "site",
+        ]);
     assert_eq!(out.code, 1, "{}", out.stderr);
     assert!(
         fs::read_to_string(&log)
@@ -735,6 +747,48 @@ fn install_and_delete_do_not_put_the_site_in_maintenance() {
         in_maintenance(&site, &log, &["plugin", "delete", "akismet", "--yes"]).code,
         0
     );
+    assert!(
+        !fs::read_to_string(&log)
+            .unwrap_or_default()
+            .contains("maintenance: on\n")
+    );
+}
+
+#[test]
+fn a_failed_download_never_puts_the_site_in_maintenance() {
+    let site = Site::new();
+    site.serve(
+        "plugin",
+        "akismet",
+        "1.0",
+        ext_zip("akismet", "Akismet", "1.0"),
+    );
+    assert_eq!(site.run(&["plugin", "install", "akismet@1.0"]).code, 0);
+    // 2.0 is not served: the download fails before anything is swapped.
+    let log = site.home.path().join("maintenance.log");
+    let out = in_maintenance(&site, &log, &["plugin", "update", "akismet"]);
+    assert_eq!(out.code, 1, "{}", out.stderr);
+    assert!(
+        !fs::read_to_string(&log)
+            .unwrap_or_default()
+            .contains("maintenance: on\n")
+    );
+}
+
+#[test]
+fn an_update_to_the_version_installed_never_puts_the_site_in_maintenance() {
+    let site = Site::new();
+    site.serve(
+        "plugin",
+        "akismet",
+        "2.0",
+        ext_zip("akismet", "Akismet", "2.0"),
+    );
+    assert_eq!(site.run(&["plugin", "install", "akismet"]).code, 0);
+    let log = site.home.path().join("maintenance.log");
+    let out = in_maintenance(&site, &log, &["plugin", "update", "--all"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(out.stdout.contains("already at"), "{}", out.stdout);
     assert!(
         !fs::read_to_string(&log)
             .unwrap_or_default()
