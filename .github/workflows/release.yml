@@ -5,8 +5,10 @@ name: Release
 # binaries at that commit first, and only when every build passes lets
 # release-please tag and publish the release, uploading the binaries and
 # SHA256SUMS straight after. A failed build publishes nothing; the next push to
-# main tries again. Run it by hand with a tag to rebuild and re-upload the
-# binaries of a release that already exists.
+# main tries again, and builds the same release commit (the one release-please
+# tags), never the newer code on main, so the binaries always match the tag.
+# Run it by hand with a tag to rebuild and re-upload the binaries of a release
+# that already exists.
 on:
   push:
     branches: [main]
@@ -33,8 +35,12 @@ jobs:
     outputs:
       pending: ${{ steps.check.outputs.pending }}
       tag: ${{ steps.check.outputs.tag }}
+      commit: ${{ steps.check.outputs.commit }}
     steps:
+      # The whole history: the release commit is the last one to change version.txt.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Fetch tags
         run: git fetch --tags --quiet origin
@@ -51,7 +57,8 @@ jobs:
       (needs.pending.outputs.pending == 'true' || github.event_name == 'workflow_dispatch')
     uses: ./.github/workflows/build.yml
     with:
-      ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.sha }}
+      # The commit release-please will tag, which on a retry is older than this push.
+      ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || needs.pending.outputs.commit }}
     permissions:
       contents: read
 
