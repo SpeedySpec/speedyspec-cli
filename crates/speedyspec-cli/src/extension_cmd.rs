@@ -111,12 +111,23 @@ pub fn run(runtime: &Runtime, kind: Kind, matches: &ArgMatches) -> i32 {
     if sub != "install" && spec.as_ref().is_some_and(|(_, v)| v.is_some()) {
         return usage("a version can be given only to install");
     }
-    let shelf = match Shelf::open(
-        runtime,
-        name,
-        crate::app_target::given_cluster_flags(args).as_ref(),
-        kind,
-    ) {
+    let target = match crate::app_target::Target::from_matches(name, args) {
+        Ok(target) => target,
+        Err(message) => return failure(&message),
+    };
+    // A Kubernetes install's files are reached through a runner pod beside its app.
+    let remote = match &target.cluster {
+        None => None,
+        Some(_) => match crate::remote::open(
+            runtime,
+            &target,
+            &crate::remote::RunnerOptions::from_matches(args),
+        ) {
+            Ok(remote) => Some(remote),
+            Err(message) => return failure(&message),
+        },
+    };
+    let shelf = match Shelf::open(runtime, &target, remote.as_ref(), kind) {
         Ok(shelf) => shelf,
         Err(message) => return failure(&message),
     };

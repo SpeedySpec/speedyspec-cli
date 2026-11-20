@@ -643,3 +643,101 @@ fn the_same_version_written_differently_is_already_installed() {
     assert_eq!(out.code, 0, "{}", out.stderr);
     assert!(out.stdout.contains("already at"), "{}", out.stdout);
 }
+
+/// `args` on the site in maintenance mode, with the log of what each read of an entry saw.
+fn in_maintenance(site: &Site, log: &Path, args: &[&str]) -> Run {
+    let mut all = vec!["--no-interaction"];
+    all.extend_from_slice(args);
+    all.extend_from_slice(&["--install", "site"]);
+    site.cli()
+        .env("EXT_MAINTENANCE", "1")
+        .env("EXT_MAINT_LOG", log)
+        .run(&all)
+}
+
+#[test]
+fn the_maintenance_file_is_there_during_an_update_and_gone_after() {
+    let site = Site::new();
+    site.serve(
+        "plugin",
+        "akismet",
+        "1.0",
+        ext_zip("akismet", "Akismet", "1.0"),
+    );
+    site.serve(
+        "plugin",
+        "akismet",
+        "2.0",
+        ext_zip("akismet", "Akismet", "2.0"),
+    );
+    assert_eq!(site.run(&["plugin", "install", "akismet@1.0"]).code, 0);
+    let log = site.home.path().join("maintenance.log");
+    let out = in_maintenance(&site, &log, &["plugin", "update", "akismet"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(
+        fs::read_to_string(&log)
+            .unwrap()
+            .contains("maintenance: on\n"),
+        "{:?}",
+        fs::read_to_string(&log)
+    );
+    assert!(!site.base.path().join(".maintenance").exists());
+    assert!(site.info("plugin", "akismet").contains("Version: 2.0"));
+}
+
+#[test]
+fn it_is_removed_after_a_failed_update() {
+    let site = Site::new();
+    site.serve(
+        "plugin",
+        "akismet",
+        "1.0",
+        ext_zip("akismet", "Akismet", "1.0"),
+    );
+    assert_eq!(site.run(&["plugin", "install", "akismet@1.0"]).code, 0);
+    // Two top-level directories: refused after it was downloaded, while in maintenance.
+    site.serve(
+        "plugin",
+        "akismet",
+        "2.0",
+        build_zip(&[("a/", Entry::Dir), ("b/", Entry::Dir)]),
+    );
+    let log = site.home.path().join("maintenance.log");
+    let out = in_maintenance(&site, &log, &["plugin", "update", "akismet"]);
+    assert_eq!(out.code, 1, "{}", out.stderr);
+    assert!(
+        fs::read_to_string(&log)
+            .unwrap()
+            .contains("maintenance: on\n")
+    );
+    assert!(
+        !site.base.path().join(".maintenance").exists(),
+        "the site was left in maintenance"
+    );
+    assert!(site.info("plugin", "akismet").contains("Version: 1.0"));
+}
+
+#[test]
+fn install_and_delete_do_not_put_the_site_in_maintenance() {
+    let site = Site::new();
+    site.serve(
+        "plugin",
+        "akismet",
+        "1.0",
+        ext_zip("akismet", "Akismet", "1.0"),
+    );
+    let log = site.home.path().join("maintenance.log");
+    assert_eq!(
+        in_maintenance(&site, &log, &["plugin", "install", "akismet@1.0"]).code,
+        0
+    );
+    assert_eq!(
+        in_maintenance(&site, &log, &["plugin", "delete", "akismet", "--yes"]).code,
+        0
+    );
+    assert!(
+        !fs::read_to_string(&log)
+            .unwrap_or_default()
+            .contains("maintenance: on\n")
+    );
+}

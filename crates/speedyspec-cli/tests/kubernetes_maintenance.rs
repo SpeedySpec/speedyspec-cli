@@ -321,6 +321,8 @@ fn install_site(name: &str, speedyspec: Speedyspec) -> Run {
         "app",
         "install",
         "site",
+        "--driver",
+        "kubernetes",
         "--name",
         name,
         "--namespace",
@@ -465,4 +467,658 @@ fn the_request_file_never_stays() {
         "the secret is in the runner's spec or logs"
     );
     assert!(out.stderr.contains("requests left: 0"), "{}", out.stderr);
+}
+
+/// A MySQL 8.4 Service `mysql` in the test namespace, with database `site`; gives its root password.
+fn mysql_in_cluster() -> String {
+    let password = "e2e-db-pass-7c1f";
+    kubectl(&["create", "namespace", E2E_NAMESPACE]);
+    kubectl(&[
+        "delete",
+        "secret",
+        "-n",
+        E2E_NAMESPACE,
+        "mysql",
+        "--ignore-not-found",
+    ]);
+    kubectl(&[
+        "create",
+        "secret",
+        "generic",
+        "-n",
+        E2E_NAMESPACE,
+        "mysql",
+        &format!("--from-literal=password={password}"),
+    ]);
+    let manifest = r#"
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: mysql, namespace: speedyspec-cli-e2e}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: mysql}}
+  template:
+    metadata: {labels: {app: mysql}}
+    spec:
+      containers:
+        - name: mysql
+          image: mysql:8.4
+          env:
+            - {name: MYSQL_DATABASE, value: site}
+            - name: MYSQL_ROOT_PASSWORD
+              valueFrom: {secretKeyRef: {name: mysql, key: password}}
+          readinessProbe:
+            exec: {command: [sh, -c, 'mysql -uroot -p"$MYSQL_ROOT_PASSWORD" -h127.0.0.1 -e "SELECT 1"']}
+            periodSeconds: 2
+---
+apiVersion: v1
+kind: Service
+metadata: {name: mysql, namespace: speedyspec-cli-e2e}
+spec: {selector: {app: mysql}, ports: [{port: 3306}]}
+"#;
+    let mut apply = std::process::Command::new("docker")
+        .args([
+            "exec",
+            "-i",
+            "speedyspec-k3s",
+            "kubectl",
+            "apply",
+            "-f",
+            "-",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    use std::io::Write;
+    apply
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(manifest.as_bytes())
+        .unwrap();
+    assert!(apply.wait().unwrap().success());
+    kubectl(&[
+        "rollout",
+        "status",
+        "-n",
+        E2E_NAMESPACE,
+        "deploy/mysql",
+        "--timeout=300s",
+    ]);
+    password.to_owned()
+}
+
+/// The site installed (its setup done), and its database's password.
+fn site_with_database(name: &str) -> String {
+    let password = mysql_in_cluster();
+    if e2e_record(name)["status"] != "installed" {
+        fresh_site(name);
+        let out = install_site(name, on_k3s(&["k8s-site"]));
+        assert_eq!(out.code, 0, "{}", out.stderr);
+    }
+    password
+}
+
+fn db(name: &str, password: &str, args: &[&str]) -> Run {
+    let binary = needed("SPEEDYSPEC_E2E_RUNNER_BINARY");
+    let mut all = vec!["--no-interaction", "app", "db"];
+    all.extend_from_slice(args);
+    all.extend_from_slice(&[
+        "--install",
+        name,
+        "--namespace",
+        E2E_NAMESPACE,
+        "--runner-binary",
+        &binary,
+    ]);
+    on_k3s(&["k8s-site"])
+        .env("K8S_SITE_DB_PASSWORD", password)
+        .run(&all)
+}
+
+#[test]
+#[ignore = "needs the cluster from scripts/k3s.sh up and SPEEDYSPEC_E2E_RUNNER_BINARY"]
+fn query_prints_rows() {
+    let password = site_with_database("db-site");
+    let out = db("db-site", &password, &["query", "SELECT 6 * 7 AS answer"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.stdout, "answer\n42\n");
+}
+
+#[test]
+#[ignore = "needs the cluster from scripts/k3s.sh up and SPEEDYSPEC_E2E_RUNNER_BINARY"]
+fn export_and_import_round_trip_through_the_cluster() {
+    let password = site_with_database("db-site");
+    for sql in [
+        "DROP TABLE IF EXISTS wp_round",
+        "CREATE TABLE wp_round (id INT PRIMARY KEY, body TEXT, raw BLOB)",
+        "INSERT INTO wp_round VALUES (1, 'héllo ☃', X'00FF10'), (2, 'it''s', NULL)",
+    ] {
+        assert_eq!(db("db-site", &password, &["query", sql]).code, 0);
+    }
+    let checksum = || db("db-site", &password, &["query", "CHECKSUM TABLE wp_round"]).stdout;
+    let before = checksum();
+    let dir = tempfile::tempdir().unwrap();
+    let dump = dir.path().join("dump.sql");
+    let out = db(
+        "db-site",
+        &password,
+        &["export", "--to", dump.to_str().unwrap()],
+    );
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(std::fs::read_to_string(&dump).unwrap().contains("wp_round"));
+    assert_eq!(
+        db("db-site", &password, &["query", "DROP TABLE wp_round"]).code,
+        0
+    );
+    let out = db(
+        "db-site",
+        &password,
+        &["import", dump.to_str().unwrap(), "--yes"],
+    );
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(out.stderr.contains("imported"), "{}", out.stderr);
+    assert_eq!(checksum(), before);
+}
+
+/// The largest resident size of any child this test process has waited for, in bytes.
+fn peak_child_memory() -> u64 {
+    // SAFETY: getrusage only writes into the struct it is given.
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    unsafe { libc::getrusage(libc::RUSAGE_CHILDREN, &mut usage) };
+    let peak = usage.ru_maxrss as u64;
+    if cfg!(target_os = "macos") {
+        peak
+    } else {
+        peak * 1024
+    }
+}
+
+#[test]
+#[ignore = "needs the cluster from scripts/k3s.sh up and SPEEDYSPEC_E2E_RUNNER_BINARY"]
+fn a_50000_row_export_streams() {
+    let password = site_with_database("db-site");
+    for sql in [
+        "DROP TABLE IF EXISTS wp_big",
+        "CREATE TABLE wp_big (id INT PRIMARY KEY, body TEXT)",
+    ] {
+        assert_eq!(db("db-site", &password, &["query", sql]).code, 0);
+    }
+    // 50 000 rows of 2 000 bytes, from five tables of the digits 0 to 9 (each query is a session of its own, so no
+    // recursion setting would carry over).
+    let digits = "(SELECT 0 i UNION ALL SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 UNION ALL SELECT 4 UNION ALL \
+                  SELECT 5 UNION ALL SELECT 6 UNION ALL SELECT 7 UNION ALL SELECT 8 UNION ALL SELECT 9)";
+    let fill = format!(
+        "INSERT INTO wp_big SELECT a.i * 10000 + b.i * 1000 + c.i * 100 + d.i * 10 + e.i, REPEAT('x', 2000) \
+         FROM {digits} a, {digits} b, {digits} c, {digits} d, {digits} e WHERE a.i < 5"
+    );
+    let dir = tempfile::tempdir().unwrap();
+    // The same export while the table is empty first: the most any child (this CLI among them) needs without the data.
+    let small = dir.path().join("small.sql");
+    let out = db(
+        "db-site",
+        &password,
+        &["export", "--to", small.to_str().unwrap()],
+    );
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let baseline = peak_child_memory();
+    let out = db("db-site", &password, &["query", &fill]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let dump = dir.path().join("big.sql");
+    let out = db(
+        "db-site",
+        &password,
+        &["export", "--to", dump.to_str().unwrap(), "--force"],
+    );
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let size = std::fs::metadata(&dump).unwrap().len();
+    assert!(size > 100 * 1000 * 1000, "the dump is only {size} bytes");
+    let peak = peak_child_memory();
+    assert!(
+        peak < baseline + 32 * 1024 * 1024,
+        "a {size}-byte dump took a child from {baseline} to {peak} bytes"
+    );
+    assert_eq!(
+        db("db-site", &password, &["query", "DROP TABLE wp_big"]).code,
+        0
+    );
+}
+
+#[test]
+#[ignore = "needs the cluster from scripts/k3s.sh up and SPEEDYSPEC_E2E_RUNNER_BINARY"]
+fn the_database_password_is_nowhere_in_the_cluster() {
+    let password = site_with_database("db-site");
+    let done = std::sync::atomic::AtomicBool::new(false);
+    let seen = std::sync::Mutex::new(String::new());
+    let out = std::thread::scope(|scope| {
+        scope.spawn(|| {
+            while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                let selector = "speedyspec.install=db-site";
+                let mut text = kubectl(&[
+                    "get",
+                    "jobs,pods",
+                    "-n",
+                    E2E_NAMESPACE,
+                    "-l",
+                    selector,
+                    "-o",
+                    "json",
+                ]);
+                text.push_str(&kubectl(&[
+                    "logs",
+                    "-n",
+                    E2E_NAMESPACE,
+                    "-l",
+                    selector,
+                    "--all-containers",
+                ]));
+                seen.lock().unwrap().push_str(&text);
+                std::thread::sleep(Duration::from_millis(300));
+            }
+        });
+        let out = db("db-site", &password, &["query", "SELECT SLEEP(3) AS slept"]);
+        done.store(true, std::sync::atomic::Ordering::SeqCst);
+        out
+    });
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let seen = seen.into_inner().unwrap();
+    assert!(
+        seen.contains("speedyspec-run-db-site"),
+        "the runner Job was never seen"
+    );
+    assert!(
+        !seen.contains(&password),
+        "the password is in the runner's spec or logs"
+    );
+    assert!(!out.stdout.contains(&password) && !out.stderr.contains(&password));
+}
+
+fn plugin_zip(name: &str, version: &str) -> Vec<u8> {
+    use speedyspec_testkit::{Entry, build_zip};
+    build_zip(&[
+        ("akismet/", Entry::Dir),
+        (
+            "akismet/info.txt",
+            Entry::file(&format!("Name: {name}\nVersion: {version}\n")),
+        ),
+        ("akismet/main.php", Entry::file("<?php\n")),
+    ])
+}
+
+#[test]
+#[ignore = "needs the cluster from scripts/k3s.sh up and SPEEDYSPEC_E2E_RUNNER_BINARY"]
+fn plugins_are_installed_listed_updated_and_deleted_on_kubernetes() {
+    use speedyspec_testkit::{Route, Server};
+    fresh_site("ext-site");
+    let out = install_site("ext-site", on_k3s(&["k8s-site"]));
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let server = Server::start(vec![
+        (
+            "/plugin/akismet.1.0.zip",
+            Route::ok(plugin_zip("Akismet", "1.0")),
+        ),
+        (
+            "/plugin/akismet.2.0.zip",
+            Route::ok(plugin_zip("Akismet", "2.0")),
+        ),
+    ]);
+    let binary = needed("SPEEDYSPEC_E2E_RUNNER_BINARY");
+    let plugin = |args: &[&str]| {
+        let mut all = vec!["--no-interaction", "plugin"];
+        all.extend_from_slice(args);
+        all.extend_from_slice(&[
+            "--install",
+            "ext-site",
+            "--namespace",
+            E2E_NAMESPACE,
+            "--runner-binary",
+            &binary,
+        ]);
+        on_k3s(&["k8s-site", "ext-source"])
+            .env("EXT_SOURCE_URL", server.url())
+            .run(&all)
+    };
+    let info = || {
+        in_site(
+            "ext-site",
+            &["cat", "/srv/app/ext/plugins/akismet/info.txt"],
+        )
+    };
+
+    let out = plugin(&["install", "akismet@1.0"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(info().contains("Version: 1.0"), "{}", info());
+    let out = plugin(&["list"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(out.stdout, "akismet\tAkismet\t1.0\n");
+    let out = plugin(&["update", "akismet"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(out.stdout.contains("1.0 -> 2.0"), "{}", out.stdout);
+    assert!(info().contains("Version: 2.0"), "{}", info());
+    assert!(
+        !in_site("ext-site", &["ls", "-a", "/srv/app"]).contains(".maintenance"),
+        "left in maintenance"
+    );
+    let entries = in_site("ext-site", &["ls", "-a", "/srv/app/ext/plugins"]);
+    assert!(
+        !entries.contains(".speedyspec-"),
+        "work left behind: {entries}"
+    );
+    let out = plugin(&["delete", "akismet", "--yes"]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(info().is_empty());
+    assert!(
+        kubectl(&[
+            "get",
+            "jobs",
+            "-n",
+            E2E_NAMESPACE,
+            "-l",
+            "speedyspec.install=ext-site",
+            "-o",
+            "name"
+        ])
+        .is_empty()
+    );
+}
+
+/// The site's tables, as an app would have them: options with its URL, and a row that holds the URL as well.
+fn site_tables(run: &dyn Fn(&str) -> Run, url: &str) {
+    for sql in [
+        "DROP TABLE IF EXISTS wp_options".to_owned(),
+        "CREATE TABLE wp_options (option_name VARCHAR(191) PRIMARY KEY, option_value LONGTEXT)"
+            .to_owned(),
+        format!("INSERT INTO wp_options VALUES ('siteurl', '{url}'), ('home_link', '{url}/home')"),
+    ] {
+        let out = run(&sql);
+        assert_eq!(out.code, 0, "{sql}: {}", out.stderr);
+    }
+}
+
+fn option(run: &dyn Fn(&str) -> Run, name: &str) -> String {
+    let out = run(&format!(
+        "SELECT option_value FROM wp_options WHERE option_name = '{name}'"
+    ));
+    out.stdout.lines().nth(1).unwrap_or_default().to_owned()
+}
+
+fn on_kubernetes(name: &str, password: &str, args: &[&str]) -> Run {
+    let binary = needed("SPEEDYSPEC_E2E_RUNNER_BINARY");
+    let mut all = vec!["--no-interaction", "app"];
+    all.extend_from_slice(args);
+    all.extend_from_slice(&[
+        "--install",
+        name,
+        "--namespace",
+        E2E_NAMESPACE,
+        "--runner-binary",
+        &binary,
+    ]);
+    on_k3s(&["k8s-site"])
+        .env("K8S_SITE_DB_PASSWORD", password)
+        .run(&all)
+}
+
+#[test]
+#[ignore = "needs the cluster from scripts/k3s.sh up and SPEEDYSPEC_E2E_RUNNER_BINARY"]
+fn backup_streams_out_and_restores_in() {
+    let password = site_with_database("db-site");
+    let query = |sql: &str| on_kubernetes("db-site", &password, &["db", "query", sql]);
+    site_tables(&query, "https://k8s.example");
+    in_site("db-site", &["sh", "-c", "echo kept > /srv/app/page.txt"]);
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dir.path().join("site.tar.gz");
+    let out = on_kubernetes(
+        "db-site",
+        &password,
+        &["backup", "--to", archive.to_str().unwrap()],
+    );
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        std::fs::metadata(&archive).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+
+    assert_eq!(
+        query("DELETE FROM wp_options WHERE option_name = 'home_link'").code,
+        0
+    );
+    in_site("db-site", &["rm", "/srv/app/page.txt"]);
+    let out = on_kubernetes(
+        "db-site",
+        &password,
+        &["restore", archive.to_str().unwrap(), "--yes"],
+    );
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(option(&query, "home_link"), "https://k8s.example/home");
+    assert_eq!(in_site("db-site", &["cat", "/srv/app/page.txt"]), "kept\n");
+    assert!(!in_site("db-site", &["ls", "-a", "/srv/app"]).contains(".maintenance"));
+    assert!(
+        kubectl(&[
+            "get",
+            "jobs",
+            "-n",
+            E2E_NAMESPACE,
+            "-l",
+            "speedyspec.install=db-site",
+            "-o",
+            "name"
+        ])
+        .is_empty()
+    );
+}
+
+/// A zip install of the site on this machine, with its database in the throwaway MySQL from `scripts/mysql.sh`
+/// (`SPEEDYSPEC_E2E_MYSQL`); the home that keeps its record, and the URL of its database.
+fn zip_site() -> (
+    tempfile::TempDir,
+    tempfile::TempDir,
+    String,
+    speedyspec_testkit::Server,
+) {
+    use speedyspec_testkit::{Entry, Route, Server, build_zip};
+    let mysql = needed("SPEEDYSPEC_E2E_MYSQL");
+    let admin = std::process::Command::new("docker")
+        .args(["exec", "speedyspec-mysql", "sh", "-c",
+               "mysql -uroot -p\"$MYSQL_ROOT_PASSWORD\" -e 'DROP DATABASE IF EXISTS site_zip; CREATE DATABASE site_zip'"])
+        .output()
+        .unwrap();
+    assert!(
+        admin.status.success(),
+        "{}",
+        String::from_utf8_lossy(&admin.stderr)
+    );
+    let server = Server::start(vec![(
+        "/site.zip",
+        Route::ok(build_zip(&[
+            ("site/", Entry::Dir),
+            ("site/index.html", Entry::file("<html>zip</html>")),
+        ])),
+    )]);
+    let (home, base) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let out = zip_cli(&home, &server, &mysql).run(&[
+        "--no-interaction",
+        "app",
+        "install",
+        "site",
+        "--driver",
+        "zip",
+        "--name",
+        "zip-site",
+        "--base",
+        base.path().to_str().unwrap(),
+    ]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    (home, base, mysql, server)
+}
+
+fn zip_cli(
+    home: &tempfile::TempDir,
+    server: &speedyspec_testkit::Server,
+    mysql: &str,
+) -> Speedyspec {
+    Speedyspec::with_home(&["k8s-site"], home.path())
+        .env("K8S_SITE_ZIP_URL", server.url())
+        .env("K8S_SITE_ZIP_DB", mysql)
+}
+
+#[test]
+#[ignore = "needs scripts/k3s.sh up, scripts/mysql.sh up and SPEEDYSPEC_E2E_RUNNER_BINARY"]
+fn a_zip_backup_restores_onto_kubernetes_with_a_move() {
+    let password = site_with_database("db-site");
+    let (home, base, mysql, server) = zip_site();
+    let zip_query = |sql: &str| {
+        zip_cli(&home, &server, &mysql).run(&[
+            "--no-interaction",
+            "app",
+            "db",
+            "query",
+            sql,
+            "--install",
+            "zip-site",
+        ])
+    };
+    site_tables(&zip_query, "https://zip.example");
+    std::fs::write(base.path().join("from-zip.txt"), "zip file\n").unwrap();
+    let archive = home.path().join("zip.tar.gz");
+    let out = zip_cli(&home, &server, &mysql).run(&[
+        "--no-interaction",
+        "app",
+        "backup",
+        "--install",
+        "zip-site",
+        "--to",
+        archive.to_str().unwrap(),
+    ]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+
+    let out = on_kubernetes(
+        "db-site",
+        &password,
+        &[
+            "restore",
+            archive.to_str().unwrap(),
+            "--url",
+            "https://k8s.example",
+            "--yes",
+        ],
+    );
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let query = |sql: &str| on_kubernetes("db-site", &password, &["db", "query", sql]);
+    assert_eq!(option(&query, "siteurl"), "https://k8s.example");
+    assert_eq!(option(&query, "home_link"), "https://k8s.example/home");
+    assert_eq!(
+        in_site("db-site", &["cat", "/srv/app/from-zip.txt"]),
+        "zip file\n"
+    );
+    assert_eq!(
+        in_site("db-site", &["cat", "/srv/app/index.html"]),
+        "<html>zip</html>"
+    );
+}
+
+#[test]
+#[ignore = "needs scripts/k3s.sh up, scripts/mysql.sh up and SPEEDYSPEC_E2E_RUNNER_BINARY"]
+fn a_kubernetes_backup_restores_onto_a_zip_install() {
+    let password = site_with_database("db-site");
+    let query = |sql: &str| on_kubernetes("db-site", &password, &["db", "query", sql]);
+    site_tables(&query, "https://k8s.example");
+    in_site(
+        "db-site",
+        &["sh", "-c", "echo from k8s > /srv/app/from-k8s.txt"],
+    );
+    let (home, base, mysql, server) = zip_site();
+    let archive = home.path().join("k8s.tar.gz");
+    let out = on_kubernetes(
+        "db-site",
+        &password,
+        &["backup", "--to", archive.to_str().unwrap()],
+    );
+    assert_eq!(out.code, 0, "{}", out.stderr);
+
+    let out = zip_cli(&home, &server, &mysql).run(&[
+        "--no-interaction",
+        "app",
+        "restore",
+        archive.to_str().unwrap(),
+        "--install",
+        "zip-site",
+        "--url",
+        "https://zip.example",
+        "--yes",
+    ]);
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert_eq!(
+        std::fs::read_to_string(base.path().join("from-k8s.txt")).unwrap(),
+        "from k8s\n"
+    );
+    let zip_query = |sql: &str| {
+        zip_cli(&home, &server, &mysql).run(&[
+            "--no-interaction",
+            "app",
+            "db",
+            "query",
+            sql,
+            "--install",
+            "zip-site",
+        ])
+    };
+    assert_eq!(option(&zip_query, "home_link"), "https://zip.example/home");
+}
+
+#[test]
+#[ignore = "needs the cluster from scripts/k3s.sh up and SPEEDYSPEC_E2E_RUNNER_BINARY"]
+fn a_big_site_goes_out_and_in_in_flat_memory() {
+    let password = site_with_database("db-site");
+    let query = |sql: &str| on_kubernetes("db-site", &password, &["db", "query", sql]);
+    site_tables(&query, "https://k8s.example");
+    let dir = tempfile::tempdir().unwrap();
+    // The same backup and restore of the small site first: the most any child needs without the data.
+    let small = dir.path().join("small.tar.gz");
+    let out = on_kubernetes(
+        "db-site",
+        &password,
+        &["backup", "--to", small.to_str().unwrap()],
+    );
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let out = on_kubernetes(
+        "db-site",
+        &password,
+        &["restore", small.to_str().unwrap(), "--yes"],
+    );
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let baseline = peak_child_memory();
+    // 20 MB of files that do not compress.
+    in_site(
+        "db-site",
+        &[
+            "sh",
+            "-c",
+            "head -c 20000000 /dev/urandom > /srv/app/big.bin",
+        ],
+    );
+    let archive = dir.path().join("big.tar.gz");
+    let out = on_kubernetes(
+        "db-site",
+        &password,
+        &["backup", "--to", archive.to_str().unwrap()],
+    );
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(std::fs::metadata(&archive).unwrap().len() > 20_000_000);
+    in_site("db-site", &["rm", "/srv/app/big.bin"]);
+    let out = on_kubernetes(
+        "db-site",
+        &password,
+        &["restore", archive.to_str().unwrap(), "--yes"],
+    );
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    assert!(in_site("db-site", &["ls", "-l", "/srv/app/big.bin"]).contains("20000000"));
+    let peak = peak_child_memory();
+    assert!(
+        peak < baseline + 16 * 1024 * 1024,
+        "20 MB of files took a child from {baseline} to {peak} bytes"
+    );
+    in_site("db-site", &["rm", "/srv/app/big.bin"]);
 }

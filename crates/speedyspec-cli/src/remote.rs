@@ -198,6 +198,38 @@ impl Remote<'_> {
         Ok(there)
     }
 
+    /// The request a runner pod's `self db` reads the connection from: the connection as `DatabaseConnection` has it,
+    /// password included (the request goes in as a private file the pod deletes on reading). A CA file to verify the
+    /// server with is copied into the pod and named there.
+    pub fn connection_request(
+        &self,
+        settings: &speedyspec_driver::DatabaseConnection,
+    ) -> Result<serde_json::Value, String> {
+        let (tls, ca_file) = match &settings.tls {
+            speedyspec_driver::Tls::Off => ("off", None),
+            speedyspec_driver::Tls::Required => ("required", None),
+            speedyspec_driver::Tls::Verify(ca) => {
+                let there = self.private_path("ca.pem");
+                let mut file = std::fs::File::open(ca)
+                    .map_err(|e| format!("the CA certificate {}: {e}", ca.display()))?;
+                self.pod.put(&there, &mut file, 0o600).map_err(|e| e.0)?;
+                ("verify", Some(there))
+            }
+        };
+        Ok(json!({
+            "host": settings.host,
+            "database": settings.database,
+            "user": settings.user,
+            "password": settings.password,
+            "port": settings.port,
+            "socket": settings.socket,
+            "tablePrefix": settings.table_prefix,
+            "charset": settings.charset,
+            "tls": tls,
+            "caFile": ca_file,
+        }))
+    }
+
     /// Runs `task` in the app at the workload's root, in the runner pod, as `runner::run` does on this machine. The
     /// request (with the task's input) goes in as a private file the pod deletes on reading.
     pub fn run_task(&self, app: &AppRuntime, task: &AppTask) -> Result<TaskOutcome, RunnerError> {
