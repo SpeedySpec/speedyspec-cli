@@ -90,8 +90,13 @@ Merging it leaves `version.txt` naming a version with no tag yet (`scripts/relea
 says so). The Release workflow then builds, tests and smoke-runs the four binaries at that
 commit first, about half an hour, and only when all four pass lets release-please tag the
 version and publish the GitHub release, uploading `SHA256SUMS` and then the binaries straight
-after. A failed build publishes nothing: fix it, and the next push to `main` tries again. To
-rebuild and re-upload the binaries of a release that already exists, run the Release workflow by
+after. A failed build publishes nothing, and the next push to `main` tries again. Every retry
+builds that same release commit (`scripts/release-pending.sh` names it: the last commit that
+changed `version.txt`, which is the one release-please tags), never the newer code on `main`, so a
+release's binaries always match its tag and changelog. A retry therefore clears a failure in the
+build itself (a runner, a download), but not a fault in the code at the release commit: fixing
+`main` does not rescue that release, which then has to be tagged and published by hand from a
+commit that builds. To rebuild and re-upload the binaries of a release that already exists, run the Release workflow by
 hand (*Run workflow*) with its tag.
 
 ## Plugins
