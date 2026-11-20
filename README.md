@@ -256,9 +256,11 @@ speedyspec app db tables | size | check             --install <name>
 These find the install by name (`app installs`) and ask its app's plugin where the database is
 (`speedyspec_app_database`); speedyspec then does the work itself, so no `mysql` or `mysqldump`
 is needed on the machine. MySQL and MariaDB are supported. The password is never printed.
-The connection is not encrypted yet (no TLS): over a socket or a loopback address that does
-not matter, and for any other host speedyspec warns before connecting. A server that requires
-secure transport refuses it.
+The connection is encrypted when the app's plugin asks for it (`DatabaseConnection`'s `tls`):
+`required` encrypts without checking the server's certificate, and `verify` checks that it names the
+host and is signed by the plugin's `caFile` or by one of the public certificate authorities (the MySQL
+client always trusts those as well). With `tls` off, speedyspec warns before connecting to any host
+but a socket or a loopback address.
 
 - `export` writes a dump: each of the app's tables (those starting with its table prefix) is
   dropped, created and filled, binary columns as hex. It goes to stdout, or to `--to <file>`,
@@ -434,6 +436,51 @@ to add returns what it was given; one that adds to another plugin's answer build
 for Deployment, StatefulSet, DaemonSet, Job and Pod; a `WaitFor` for any other kind must name
 a status condition that has to be `True` (`new WaitFor('Widget', 'w', condition: 'Available')`).
 The example plugin is `examples/install-demo-kubernetes`.
+
+### Maintaining a Kubernetes install
+
+`app db`, `plugin`, `theme`, `app backup` and `app restore` work on a Kubernetes install as on a zip one, given the
+driver's flags for its cluster and the namespace of its record:
+
+```
+speedyspec app db tables --install blog --namespace web
+speedyspec plugin update --all --install blog --namespace web --context prod
+speedyspec app backup --install blog --namespace web --to blog.tar.gz
+```
+
+The app's plugin says which workload serves the install, and where the app's files are in its container, with a
+`Workload` on its `AppRuntime` (`new Workload('Deployment', $install->name, '/var/www/html', 'wordpress')`). The
+work is done by a *runner pod*: a Job in the install's namespace, on the node of a ready pod of that workload, with
+the app container's volumes mounted where the app has them (a ReadWriteOnce claim works, since it is the same node).
+Its one container is a small image that only sleeps (a pinned busybox; `--runner-image` picks another), with no
+environment and no service account token. speedyspec streams its own static Linux binary into the pod through the
+API's exec and runs it there:
+
+- the binary is this release's asset for the node's architecture (amd64 or arm64), checked against the release's
+  `SHA256SUMS`, then checked again with `sha256sum` in the pod; `--runner-binary <file>` gives a build of your own
+  (a development build has no release);
+- the app's setup tasks, `speedyspec_app_database` tasks, database work, plugin and theme files, and backups and
+  restores run in the pod, which reaches the database from inside the cluster (so `mysql.<namespace>.svc` works);
+- dumps and archives stream through exec in both directions, in flat memory; an archive is kept on the runner
+  container's own disk while it is made or read, never in memory;
+- the database password and the cluster token are never in the Job, its pod, an argument, the environment or a log:
+  a secret reaches the pod only in a request file streamed into its private in-memory directory, created 0600 and
+  deleted as soon as it is read.
+
+The Job never outlives the command: it is deleted when the command ends, when a step fails and on Ctrl-C, and has a
+deadline of an hour and a time-to-live of a minute, so even a CLI killed outright leaves nothing for long. A workload
+with no ready pod is refused before any Job is made.
+
+After `app install` on Kubernetes, the app's setup runs in a runner pod as soon as the resources are ready. Its
+progress is kept in the install's record in the cluster, so running the same command again finishes a setup that
+stopped.
+
+An app whose `AppRuntime` names a `MaintenanceFile` (WordPress's `.maintenance`) is in maintenance while
+`plugin update`, `theme update` and `app restore` swap files, on both drivers: the file is written before the swap
+and removed after it, whether it worked or not.
+
+A backup is the same whichever driver made it: a zip install's backup restores onto a Kubernetes install, and the
+other way round, with `--url` and `--table-prefix` as usual.
 
 ## Installing and removing plugins
 

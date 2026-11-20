@@ -12,14 +12,7 @@ use speedyspec_db::{Connection, ExportOptions, QueryOutcome};
 use crate::app_target::{self, Target};
 use crate::boot::Runtime;
 use crate::prompt::confirm;
-
-fn install_arg() -> Arg {
-    Arg::new("install")
-        .long("install")
-        .required(true)
-        .value_name("NAME")
-        .help("The install, as app installs lists it")
-}
+use crate::remote::RunnerOptions;
 
 pub fn clap() -> Clap {
     let yes = Arg::new("yes")
@@ -33,7 +26,7 @@ pub fn clap() -> Clap {
         .subcommand(
             Clap::new("export")
                 .about("Write a dump of the install's tables")
-                .arg(install_arg())
+                .args(crate::app_target::install_args())
                 .arg(
                     Arg::new("to")
                         .long("to")
@@ -50,7 +43,7 @@ pub fn clap() -> Clap {
         .subcommand(
             Clap::new("import")
                 .about("Run a dump's statements against the install's database")
-                .arg(install_arg())
+                .args(crate::app_target::install_args())
                 .arg(
                     Arg::new("file")
                         .required(true)
@@ -62,23 +55,23 @@ pub fn clap() -> Clap {
         .subcommand(
             Clap::new("query")
                 .about("Run one SQL statement and print what it returns")
-                .arg(install_arg())
+                .args(crate::app_target::install_args())
                 .arg(Arg::new("sql").required(true).value_name("SQL")),
         )
         .subcommand(
             Clap::new("tables")
                 .about("List the tables: name, rows, data bytes, index bytes")
-                .arg(install_arg()),
+                .args(crate::app_target::install_args()),
         )
         .subcommand(
             Clap::new("size")
                 .about("Print the data and index bytes")
-                .arg(install_arg()),
+                .args(crate::app_target::install_args()),
         )
         .subcommand(
             Clap::new("check")
                 .about("Check each table: name, status, message")
-                .arg(install_arg()),
+                .args(crate::app_target::install_args()),
         )
 }
 
@@ -90,11 +83,22 @@ fn fail(message: impl std::fmt::Display) -> i32 {
 pub fn run(runtime: &Runtime, matches: &ArgMatches) -> i32 {
     let (command, sub) = matches.subcommand().expect("clap requires a db subcommand");
     let name = sub.get_one::<String>("install").expect("required");
-    let settings =
-        match Target::find(name).and_then(|target| app_target::database(runtime, &target)) {
-            Ok(settings) => settings,
+    let target = match Target::from_matches(name, sub) {
+        Ok(target) => target,
+        Err(message) => return fail(message),
+    };
+    // A Kubernetes install's database is reached from inside its cluster, through a runner pod beside the app.
+    let remote = match &target.cluster {
+        None => None,
+        Some(_) => match crate::remote::open(runtime, &target, &RunnerOptions::from_matches(sub)) {
+            Ok(remote) => Some(remote),
             Err(message) => return fail(message),
-        };
+        },
+    };
+    let settings = match app_target::database(runtime, &target, remote.as_ref()) {
+        Ok(settings) => settings,
+        Err(message) => return fail(message),
+    };
     if command == "import" {
         let question = format!(
             "This replaces tables in database {} on {}. Continue? [y/N]",
@@ -104,32 +108,142 @@ pub fn run(runtime: &Runtime, matches: &ArgMatches) -> i32 {
             return code;
         }
     }
-    if !speedyspec_db::stays_on_this_machine(&settings) {
-        eprintln!(
-            "speedyspec: warning: the connection to {}:{} is not encrypted (speedyspec does not use TLS yet); \
-             the login and the data cross the network as they are",
-            settings.host, settings.port
-        );
+    if let Some(remote) = &remote {
+        return in_pod(remote, command, sub, &settings);
+    }
+    if let Some(warning) = speedyspec_db::unencrypted_warning(&settings) {
+        eprintln!("speedyspec: warning: {warning}");
     }
     let mut connection = match Connection::open(&settings) {
         Ok(connection) => connection,
         Err(error) => return fail(error),
     };
     match command {
-        "export" => export(&mut connection, sub, &settings.database),
-        "import" => import(&mut connection, sub, &settings.database),
-        "query" => query(&mut connection, sub),
-        "tables" => tables(&mut connection),
-        "size" => size(&mut connection),
-        "check" => check(&mut connection),
-        _ => unreachable!("clap knows the db subcommands"),
+        "export" => export_to_file_or_stdout(sub, &settings.database, |out| {
+            connection
+                .export(out, &ExportOptions::default())
+                .map_err(|e| e.to_string())
+        }),
+        "import" => {
+            let source = sub.get_one::<String>("file").expect("required");
+            match open_dump(source) {
+                Ok(mut input) => import(&mut connection, &mut input, source, &settings.database),
+                Err(message) => fail(message),
+            }
+        }
+        command => {
+            let sql = sub
+                .try_get_one::<String>("sql")
+                .ok()
+                .flatten()
+                .map(String::as_str);
+            let mut out = BufWriter::new(std::io::stdout().lock());
+            operate(&mut connection, command, sql, &mut out)
+        }
     }
 }
 
-fn export(connection: &mut Connection, matches: &ArgMatches, database: &str) -> i32 {
+/// The dump to import: a file, or stdin for `-`.
+fn open_dump(source: &str) -> Result<Box<dyn std::io::BufRead + Send>, String> {
+    if source == "-" {
+        if std::io::stdin().is_terminal() {
+            return Err("give a dump file, or pipe one to stdin with -".to_owned());
+        }
+        return Ok(Box::new(BufReader::new(std::io::stdin())));
+    }
+    File::open(source)
+        .map(|file| Box::new(BufReader::new(file)) as Box<dyn std::io::BufRead + Send>)
+        .map_err(|e| format!("cannot read {source}: {e}"))
+}
+
+/// The read-only operations (`query`, `tables`, `size`, `check`), their output written to `out`. Shared with the
+/// runner pod's `self db`.
+pub fn operate(
+    connection: &mut Connection,
+    command: &str,
+    sql: Option<&str>,
+    out: &mut dyn Write,
+) -> i32 {
+    match command {
+        "query" => query(connection, sql.unwrap_or_default(), out),
+        "tables" => tables(connection, out),
+        "size" => size(connection, out),
+        "check" => check(connection, out),
+        _ => fail(format!("app db has no operation {command}")),
+    }
+}
+
+/// `app db` on a Kubernetes install: the operation runs in the runner pod, which reads the connection (and the SQL)
+/// from a private request file it deletes at once. A dump streams in and out through exec.
+fn in_pod(
+    remote: &crate::remote::Remote<'_>,
+    command: &str,
+    matches: &ArgMatches,
+    settings: &speedyspec_driver::DatabaseConnection,
+) -> i32 {
+    let sql = matches.try_get_one::<String>("sql").ok().flatten().cloned();
+    let request = match remote.connection_request(settings) {
+        Ok(mut request) => {
+            request["sql"] = serde_json::json!(sql);
+            request
+        }
+        Err(message) => return fail(message),
+    };
+    let path = remote.private_path("db.json");
+    if let Err(error) = remote
+        .pod
+        .put(&path, &mut request.to_string().as_bytes(), 0o600)
+    {
+        return fail(error.0);
+    }
+    let args = ["self", "db", "--request", path.as_str(), command];
+    let mut stderr = std::io::stderr();
+    let code = match command {
+        "export" => export_to_file_or_stdout(matches, &settings.database, |out| {
+            match remote.pod.run(&args, None, out, &mut stderr) {
+                Ok(0) => Ok(()),
+                Ok(code) => Err(format!("the export in the runner pod failed (exit {code})")),
+                Err(error) => Err(error.0),
+            }
+        }),
+        "import" => {
+            let source = matches.get_one::<String>("file").expect("required");
+            match open_dump(source) {
+                Ok(mut input) => {
+                    let mut out = std::io::stdout();
+                    match remote
+                        .pod
+                        .run(&args, Some(&mut input), &mut out, &mut stderr)
+                    {
+                        Ok(code) => code,
+                        Err(error) => fail(format!("{source}: {}", error.0)),
+                    }
+                }
+                Err(message) => fail(message),
+            }
+        }
+        _ => {
+            let mut out = BufWriter::new(std::io::stdout().lock());
+            match remote.pod.run(&args, None, &mut out, &mut stderr) {
+                Ok(code) => code,
+                Err(error) => fail(error.0),
+            }
+        }
+    };
+    // `self db` deletes it on reading; this is for when it never ran.
+    let _ = remote.pod.remove(&path);
+    code
+}
+
+/// Writes a dump with `write` to the command's `--to` file (private, put in place only when complete) or to stdout.
+fn export_to_file_or_stdout(
+    matches: &ArgMatches,
+    database: &str,
+    write: impl FnOnce(&mut dyn Write) -> Result<(), String>,
+) -> i32 {
     let Some(to) = matches.get_one::<String>("to") else {
         let mut out = BufWriter::new(std::io::stdout().lock());
-        return match connection.export(&mut out, &ExportOptions::default()) {
+        return match write(&mut out).and_then(|()| out.flush().map_err(|e| e.to_string())) {
             Ok(()) => 0,
             Err(error) => fail(error),
         };
@@ -153,7 +267,7 @@ fn export(connection: &mut Connection, matches: &ArgMatches, database: &str) -> 
         Err(e) => return fail(format!("cannot write in {}: {e}", dir.display())),
     };
     let mut out = BufWriter::new(file);
-    if let Err(error) = connection.export(&mut out, &ExportOptions::default()) {
+    if let Err(error) = write(&mut out) {
         return fail(error);
     }
     let file = match out.into_inner() {
@@ -167,20 +281,14 @@ fn export(connection: &mut Connection, matches: &ArgMatches, database: &str) -> 
     0
 }
 
-fn import(connection: &mut Connection, matches: &ArgMatches, database: &str) -> i32 {
-    let source = matches.get_one::<String>("file").expect("required");
-    let result = if source == "-" {
-        if std::io::stdin().is_terminal() {
-            return fail("give a dump file, or pipe one to stdin with -");
-        }
-        connection.import(std::io::stdin().lock())
-    } else {
-        match File::open(source) {
-            Ok(file) => connection.import(BufReader::new(file)),
-            Err(e) => return fail(format!("cannot read {source}: {e}")),
-        }
-    };
-    match result {
+/// Runs a dump's statements; shared with the runner pod's `self db`.
+pub fn import(
+    connection: &mut Connection,
+    input: &mut dyn std::io::BufRead,
+    source: &str,
+    database: &str,
+) -> i32 {
+    match connection.import(input) {
         Ok(applied) => {
             eprintln!("speedyspec: imported {applied} statement(s) into database {database}");
             0
@@ -189,23 +297,22 @@ fn import(connection: &mut Connection, matches: &ArgMatches, database: &str) -> 
     }
 }
 
-fn query(connection: &mut Connection, matches: &ArgMatches) -> i32 {
-    let sql = matches.get_one::<String>("sql").expect("required");
-    let mut out = BufWriter::new(std::io::stdout().lock());
-    match connection.query(sql, &mut out) {
+fn query(connection: &mut Connection, sql: &str, out: &mut dyn Write) -> i32 {
+    let code = match connection.query(sql, out) {
         Ok(QueryOutcome::Rows(_)) => 0,
         Ok(QueryOutcome::Affected(n)) => {
             let _ = writeln!(out, "{n} rows affected");
             0
         }
         Err(error) => fail(error),
-    }
+    };
+    let _ = out.flush();
+    code
 }
 
-fn tables(connection: &mut Connection) -> i32 {
+fn tables(connection: &mut Connection, out: &mut dyn Write) -> i32 {
     match connection.tables() {
         Ok(tables) => {
-            let mut out = std::io::stdout().lock();
             for t in tables {
                 let _ = writeln!(
                     out,
@@ -213,30 +320,27 @@ fn tables(connection: &mut Connection) -> i32 {
                     t.name, t.rows_estimate, t.data_bytes, t.index_bytes
                 );
             }
+            let _ = out.flush();
             0
         }
         Err(error) => fail(error),
     }
 }
 
-fn size(connection: &mut Connection) -> i32 {
+fn size(connection: &mut Connection, out: &mut dyn Write) -> i32 {
     match connection.size() {
         Ok((data, index)) => {
-            let _ = writeln!(
-                std::io::stdout().lock(),
-                "data\t{data}\nindex\t{index}\ntotal\t{}",
-                data + index
-            );
+            let _ = writeln!(out, "data\t{data}\nindex\t{index}\ntotal\t{}", data + index);
+            let _ = out.flush();
             0
         }
         Err(error) => fail(error),
     }
 }
 
-fn check(connection: &mut Connection) -> i32 {
+fn check(connection: &mut Connection, out: &mut dyn Write) -> i32 {
     match connection.check() {
         Ok(rows) => {
-            let mut out = std::io::stdout().lock();
             let mut code = 0;
             for (table, status, message) in rows {
                 if status != "OK" {
@@ -244,6 +348,7 @@ fn check(connection: &mut Connection) -> i32 {
                 }
                 let _ = writeln!(out, "{table}\t{status}\t{message}");
             }
+            let _ = out.flush();
             code
         }
         Err(error) => fail(error),

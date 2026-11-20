@@ -121,6 +121,24 @@ pub(crate) fn open(flags: &BTreeMap<String, String>) -> Result<Connection, Drive
     })
 }
 
+/// The flags that find an install in its cluster: which cluster, as whom, and the namespace its record is in. The
+/// maintenance commands take these.
+pub fn cluster_flags() -> Vec<DriverFlag> {
+    let mut flags = connection_flags();
+    flags.push(value_flag(
+        "namespace",
+        "Namespace the install's record is in [kubernetes]",
+    ));
+    flags
+}
+
+/// The connection and the namespace `cluster_flags` give.
+pub fn open_cluster(flags: &BTreeMap<String, String>) -> Result<(Connection, String), String> {
+    let namespace = namespace_of(flags).map_err(|e| e.0)?;
+    let connection = open(flags).map_err(|e| e.0)?;
+    Ok((connection, namespace))
+}
+
 /// The `--namespace` value, checked.
 pub(crate) fn namespace_of(flags: &BTreeMap<String, String>) -> Result<String, DriverError> {
     let namespace = flags.get("namespace").ok_or_else(|| {
@@ -140,6 +158,37 @@ pub(crate) fn namespace_of(flags: &BTreeMap<String, String>) -> Result<String, D
 pub(crate) fn timeout_of(flags: &BTreeMap<String, String>) -> Result<Duration, DriverError> {
     parse_timeout(flags.get("timeout").map_or("10m", String::as_str))
         .map_err(|problem| DriverError(format!("--timeout {problem}")))
+}
+
+/// The cluster a prepared Kubernetes install goes to: its connection, the install's name and namespace. The CLI takes
+/// it over once the resources are in place, to run the app's setup there; `None` for another driver's install.
+pub fn into_cluster(prepared: Prepared) -> Option<(Connection, String, String)> {
+    let settings = prepared.state.downcast::<Settings>().ok()?;
+    let Settings {
+        connection,
+        name,
+        namespace,
+        ..
+    } = *settings;
+    Some((connection, name, namespace))
+}
+
+/// How many setup tasks an earlier run of a prepared Kubernetes install finished, when its record says its setup did
+/// not finish; `None` when there is no such record (or it is another driver's install).
+pub fn unfinished_setup(prepared: &Prepared) -> Result<Option<u64>, String> {
+    let Some(settings) = prepared.state.downcast_ref::<Settings>() else {
+        return Ok(None);
+    };
+    let identity = InstallIdentity {
+        app: &settings.app,
+        name: &settings.name,
+        namespace: &settings.namespace,
+    };
+    Ok(
+        crate::install::read_record(&settings.connection, &identity)?
+            .filter(|record| record.status == crate::record::Status::Files)
+            .map(|record| record.setup_done.unwrap_or(0)),
+    )
 }
 
 fn settings_of(prepared: &Prepared) -> Result<&Settings, DriverError> {

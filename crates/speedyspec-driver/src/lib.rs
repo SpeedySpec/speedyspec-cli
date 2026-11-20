@@ -12,9 +12,9 @@ mod kubernetes;
 mod names;
 
 pub use app::{
-    AppRuntime, AppTask, DatabaseConnection, DatabaseOrTask, Install,
-    database_connection_from_json, decode_app_runtime, decode_app_task, decode_database_connection,
-    decode_database_or_task,
+    AppRuntime, AppTask, DatabaseConnection, DatabaseOrTask, Install, MaintenanceFile, Tls,
+    Workload, WorkloadKind, database_connection_from_json, decode_app_runtime, decode_app_task,
+    decode_database_connection, decode_database_or_task,
 };
 pub use backup::{BackupSpec, PrefixedColumn, SiteUrl, decode_backup_spec, is_sql_name};
 pub use contracts::{
@@ -32,4 +32,4 @@ pub use extensions::{
     decode_setup_plan, slug_problem,
 };
 pub use kubernetes::{KubernetesResources, WaitFor, decode_kubernetes_resources, value_to_json};
-pub use names::{install_name_problem, namespace_problem};
+pub use names::{install_name_problem, label_problem, namespace_problem};

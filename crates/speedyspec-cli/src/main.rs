@@ -18,6 +18,7 @@ mod install;
 mod installs;
 mod plugin_cmd;
 mod prompt;
+mod remote;
 mod runner;
 mod runner_child;
 mod self_cmd;

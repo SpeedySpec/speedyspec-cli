@@ -16,6 +16,8 @@ const KEY: &str = "record";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
     Installing,
+    /// The resources are ready and the app's setup has not finished: `setup_done` of its tasks have.
+    Files,
     Installed,
     Failed,
 }
@@ -43,6 +45,8 @@ pub struct Record {
     /// Namespaces this install created, and so may delete.
     pub created_namespaces: Vec<String>,
     pub resources: Vec<Recorded>,
+    /// How many of the app's setup tasks finished; `None` before setup ran.
+    pub setup_done: Option<u64>,
 }
 
 impl Record {
@@ -73,6 +77,7 @@ impl Record {
             "parts": self.parts,
             "status": match self.status {
                 Status::Installing => "installing",
+                Status::Files => "files",
                 Status::Installed => "installed",
                 Status::Failed => "failed",
             },
@@ -81,6 +86,7 @@ impl Record {
             "plugins": plugins,
             "createdNamespaces": self.created_namespaces,
             "resources": resources,
+            "setupDone": self.setup_done,
         });
         json!({
             "apiVersion": "v1",
@@ -150,6 +156,7 @@ impl Record {
         };
         let status = match record["status"].as_str() {
             Some("installing") => Status::Installing,
+            Some("files") => Status::Files,
             Some("installed") => Status::Installed,
             Some("failed") => Status::Failed,
             _ => return Err("the install record has no status".to_owned()),
@@ -184,6 +191,7 @@ impl Record {
             plugins,
             created_namespaces: strings(&record["createdNamespaces"]),
             resources,
+            setup_done: record["setupDone"].as_u64(),
         })
     }
 
@@ -256,6 +264,7 @@ mod tests {
                     retained: false,
                 })
                 .collect(),
+            setup_done: None,
         }
     }
 

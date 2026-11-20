@@ -17,6 +17,7 @@ use crate::boot::{PhpReader, Runtime, at_index, check_list, report_hook_error};
 use crate::drivers;
 use crate::install::{Given, ResolveError, resolve_choices, resolve_options};
 use crate::prompt::{Prompter, TerminalPrompter, confirm, interactive};
+use crate::remote::RunnerOptions;
 
 const HOOK_INSTALL_OPTIONS: &str = "speedyspec_install_options";
 const HOOK_INSTALL_BEFORE: &str = "speedyspec_install_before";
@@ -415,6 +416,16 @@ pub fn install(runtime: &Runtime, matches: &ArgMatches, prepass: Option<Prepass>
         (same && record.status == crate::installs::Status::Files).then_some(record.setup_done)
     });
 
+    // A Kubernetes install whose setup did not finish: its resources are applied again, and its setup goes on from the
+    // first task that did not finish.
+    let cluster_resume = match speedyspec_driver_kubernetes::unfinished_setup(&prepared) {
+        Ok(resume) => resume,
+        Err(problem) => {
+            eprintln!("speedyspec: {problem}");
+            return 1;
+        }
+    };
+
     let request = match runtime.php.construct(
         INSTALL_REQUEST,
         &[
@@ -551,7 +562,11 @@ pub fn install(runtime: &Runtime, matches: &ArgMatches, prepass: Option<Prepass>
             Ok(None) => {}
             Ok(Some(plan)) => {
                 let from = usize::try_from(record.setup_done).unwrap_or(usize::MAX);
-                match crate::setup::run(runtime, &install, &plan, from) {
+                let target = crate::app_target::Target {
+                    install: install.clone(),
+                    cluster: None,
+                };
+                match crate::setup::run(runtime, &target, &plan, from, &RunnerOptions::default()) {
                     Ok(()) => record.setup_done = plan.tasks.len() as u64,
                     Err(failure) => {
                         record.setup_done = failure.done as u64;
@@ -565,6 +580,24 @@ pub fn install(runtime: &Runtime, matches: &ArgMatches, prepass: Option<Prepass>
                 }
             }
         }
+    }
+    if local.is_none()
+        && let Some((connection, name, namespace)) =
+            speedyspec_driver_kubernetes::into_cluster(prepared)
+        && let Err(code) = kubernetes_setup(
+            runtime,
+            matches,
+            &choices,
+            &request,
+            crate::app_target::Cluster {
+                connection,
+                namespace,
+            },
+            &name,
+            cluster_resume,
+        )
+    {
+        return code;
     }
     if let Err(error) = runtime
         .hooks
@@ -589,6 +622,74 @@ pub fn install(runtime: &Runtime, matches: &ArgMatches, prepass: Option<Prepass>
         let _ = writeln!(out, "{line}");
     }
     code
+}
+
+/// The app's setup for a Kubernetes install whose resources are in place, run in a runner pod beside the app. Its
+/// progress is kept in the install's record in the cluster, so running the same command again finishes it.
+#[allow(clippy::too_many_arguments)]
+fn kubernetes_setup(
+    runtime: &Runtime,
+    matches: &ArgMatches,
+    choices: &crate::install::Choices,
+    request: &Value,
+    cluster: crate::app_target::Cluster,
+    name: &str,
+    resume: Option<u64>,
+) -> Result<(), i32> {
+    use speedyspec_driver_kubernetes::{Status, record_setup};
+    let target = crate::app_target::Target {
+        install: Install {
+            name: name.to_owned(),
+            app: choices.app.clone(),
+            parts: choices.parts.clone(),
+            driver: choices.driver.clone(),
+            root: None,
+        },
+        cluster: Some(cluster),
+    };
+    let plan = match crate::setup::plan(runtime, &target.install, request) {
+        Ok(Some(plan)) => plan,
+        Ok(None) => return Ok(()),
+        Err(problem) => {
+            eprintln!("speedyspec: the resources are in place, but {problem}");
+            return Err(1);
+        }
+    };
+    let cluster = target.cluster.as_ref().expect("made with one");
+    let record = |status: Status, done: usize| {
+        record_setup(
+            &cluster.connection,
+            name,
+            &cluster.namespace,
+            status,
+            done as u64,
+        )
+    };
+    let from = resume.map_or(0, |done| usize::try_from(done).unwrap_or(usize::MAX));
+    if let Err(problem) = record(Status::Files, from) {
+        eprintln!("speedyspec: the resources are in place, but {problem}");
+        return Err(1);
+    }
+    match crate::setup::run(
+        runtime,
+        &target,
+        &plan,
+        from,
+        &RunnerOptions::from_matches(matches),
+    ) {
+        Ok(()) => record(Status::Installed, plan.tasks.len()).map_err(|problem| {
+            eprintln!("speedyspec: set up, but {problem}");
+            1
+        }),
+        Err(failure) => {
+            let _ = record(Status::Files, failure.done);
+            eprintln!(
+                "speedyspec: {}; run the same command again to finish it",
+                failure.message
+            );
+            Err(1)
+        }
+    }
 }
 
 /// `app uninstall`: find the install, say what will go, confirm, remove it. Runs no plugin code.

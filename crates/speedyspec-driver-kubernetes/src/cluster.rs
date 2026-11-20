@@ -159,6 +159,24 @@ impl Connection {
         })
     }
 
+    /// The objects `id` names the kind and namespace of (its name is ignored) whose labels match `selector`.
+    pub(crate) fn list_of(
+        &self,
+        id: &ResourceId,
+        selector: &str,
+    ) -> Result<Vec<Json>, ClusterError> {
+        let api = self.api(id)?;
+        let params = kube::api::ListParams::default().labels(selector);
+        let list = self
+            .call(api.list(&params))?
+            .map_err(|e| convert(e, &id.kind))?;
+        Ok(list
+            .items
+            .into_iter()
+            .map(|item| serde_json::to_value(item).unwrap_or(Json::Null))
+            .collect())
+    }
+
     /// The object as the cluster has it.
     pub fn get(&self, id: &ResourceId) -> Result<Json, ClusterError> {
         let api = self.api(id)?;

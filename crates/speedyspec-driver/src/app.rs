@@ -1,8 +1,8 @@
-//! Rust mirrors of the contracts for maintaining an installed app: `Install`, `AppRuntime`,
-//! `DatabaseConnection` and `AppTask`.
+//! Rust mirrors of the contracts for maintaining an installed app: `Install`, `AppRuntime` (with its `Workload` and
+//! `MaintenanceFile`), `DatabaseConnection` and `AppTask`.
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use serde_json::Value as Json;
@@ -10,6 +10,7 @@ use speedyspec_hooks::{Key, Value};
 
 use crate::contracts::{ContractError, Decoder, NS, ObjectReader, Props, destination_problem};
 use crate::kubernetes::value_to_json;
+use crate::names::label_problem;
 
 /// The longest a task may be given to run: a day.
 const LONGEST_TASK: i64 = 86_400;
@@ -32,6 +33,74 @@ pub struct AppRuntime {
     pub entry: Option<String>,
     pub ini: Vec<(String, String)>,
     pub server: Vec<(String, String)>,
+    /// The workload that serves a Kubernetes install.
+    pub workload: Option<Workload>,
+    /// Written while files are swapped.
+    pub maintenance: Option<MaintenanceFile>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WorkloadKind {
+    Deployment,
+    StatefulSet,
+}
+
+impl WorkloadKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            WorkloadKind::Deployment => "Deployment",
+            WorkloadKind::StatefulSet => "StatefulSet",
+        }
+    }
+}
+
+/// The Kubernetes workload that serves an install, and where the app's files are in its container.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Workload {
+    pub kind: WorkloadKind,
+    /// A DNS label.
+    pub name: String,
+    /// Absolute, with no `..`.
+    pub root: String,
+    /// A DNS label; `None` for the pod's only container.
+    pub container: Option<String>,
+}
+
+/// The file that puts an app in maintenance while its files are swapped.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MaintenanceFile {
+    /// Relative to the install root; inside it.
+    pub path: String,
+    pub contents: String,
+}
+
+/// Whether and how a database connection is encrypted.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Tls {
+    #[default]
+    Off,
+    /// Encrypted; the certificate is not checked.
+    Required,
+    /// Encrypted, and the certificate is checked against this CA (an absolute path) and the host name.
+    Verify(PathBuf),
+}
+
+impl Tls {
+    /// `tls` and `caFile` as the contract has them.
+    pub fn parse(tls: &str, ca_file: Option<&str>) -> Result<Tls, (&'static str, &'static str)> {
+        match (tls, ca_file) {
+            ("off", _) => Ok(Tls::Off),
+            ("required", _) => Ok(Tls::Required),
+            ("verify", Some(ca)) if Path::new(ca).is_absolute() => {
+                Ok(Tls::Verify(PathBuf::from(ca)))
+            }
+            ("verify", _) => Err((
+                "caFile",
+                "must be an absolute path to the CA certificate when tls is \"verify\"",
+            )),
+            _ => Err(("tls", "must be \"off\", \"required\" or \"verify\"")),
+        }
+    }
 }
 
 /// Where an app's database is. `Debug` never shows the password.
@@ -47,6 +116,7 @@ pub struct DatabaseConnection {
     pub charset: String,
     /// `mysql` (MySQL and MariaDB).
     pub engine: String,
+    pub tls: Tls,
 }
 
 impl fmt::Debug for DatabaseConnection {
@@ -61,6 +131,7 @@ impl fmt::Debug for DatabaseConnection {
             .field("table_prefix", &self.table_prefix)
             .field("charset", &self.charset)
             .field("engine", &self.engine)
+            .field("tls", &self.tls)
             .finish()
     }
 }
@@ -130,6 +201,68 @@ pub fn decode_app_runtime(
         entry,
         ini: string_map(&d, &props, "ini")?,
         server: string_map(&d, &props, "server")?,
+        workload: match since_1_5(&props, "workload") {
+            Some(value) => Some(decode_workload(&d, value)?),
+            None => None,
+        },
+        maintenance: match since_1_5(&props, "maintenance") {
+            Some(value) => Some(decode_maintenance(&d, value)?),
+            None => None,
+        },
+    })
+}
+
+/// A property added in contracts 1.5: an object from 1.4 has none, which is the same as null.
+fn since_1_5<'p>(props: &'p Props, name: &str) -> Option<&'p Value> {
+    props
+        .iter()
+        .find(|(k, _)| k == name)
+        .map(|(_, v)| v)
+        .filter(|v| !matches!(v, Value::Null))
+}
+
+fn decode_workload(d: &Decoder<'_>, value: &Value) -> Result<Workload, ContractError> {
+    let path = "workload";
+    let props = d.object(value, "Workload", path)?;
+    let kind = match d.string(&props, "kind", path)?.as_str() {
+        "Deployment" => WorkloadKind::Deployment,
+        "StatefulSet" => WorkloadKind::StatefulSet,
+        _ => return Err(d.err("workload.kind", "must be \"Deployment\" or \"StatefulSet\"")),
+    };
+    let name = d.string(&props, "name", path)?;
+    if let Some(problem) = label_problem(&name) {
+        return Err(d.err("workload.name", &problem));
+    }
+    let root = d.string(&props, "root", path)?;
+    let root_path = Path::new(&root);
+    if !root_path.is_absolute()
+        || root.contains('\0')
+        || root_path.components().any(|c| c == Component::ParentDir)
+    {
+        return Err(d.err("workload.root", "must be an absolute path with no .."));
+    }
+    let container = d.optional_string(&props, "container", path)?;
+    if let Some(problem) = container.as_deref().and_then(label_problem) {
+        return Err(d.err("workload.container", &problem));
+    }
+    Ok(Workload {
+        kind,
+        name,
+        root,
+        container,
+    })
+}
+
+fn decode_maintenance(d: &Decoder<'_>, value: &Value) -> Result<MaintenanceFile, ContractError> {
+    let path = "maintenance";
+    let props = d.object(value, "MaintenanceFile", path)?;
+    let file = d.string(&props, "path", path)?;
+    if let Some(problem) = destination_problem(&file) {
+        return Err(d.err("maintenance.path", problem));
+    }
+    Ok(MaintenanceFile {
+        path: file,
+        contents: d.string(&props, "contents", path)?,
     })
 }
 
@@ -174,6 +307,14 @@ pub fn decode_database_connection(
             "must be \"mysql\" (MySQL and MariaDB are the databases supported)",
         ));
     }
+    let tls = match since_1_5(&props, "tls") {
+        None => Tls::Off,
+        Some(Value::Str(tls)) => {
+            let ca_file = d.optional_string(&props, "caFile", "")?;
+            Tls::parse(tls, ca_file.as_deref()).map_err(|(field, problem)| d.err(field, problem))?
+        }
+        Some(_) => return Err(d.err("tls", "expected a string")),
+    };
     Ok(DatabaseConnection {
         host,
         database,
@@ -184,6 +325,7 @@ pub fn decode_database_connection(
         table_prefix,
         charset,
         engine,
+        tls,
     })
 }
 
@@ -269,6 +411,8 @@ pub fn database_connection_from_json(json: &Json) -> Result<DatabaseConnection, 
                 .to_owned(),
         );
     }
+    let tls = Tls::parse(&optional("tls", "off")?, json["caFile"].as_str())
+        .map_err(|(field, problem)| format!("the task's result has a {field} that {problem}"))?;
     let host = text("host")?;
     let database = text("database")?;
     if host.is_empty() || database.is_empty() {
@@ -284,6 +428,7 @@ pub fn database_connection_from_json(json: &Json) -> Result<DatabaseConnection, 
         table_prefix,
         charset,
         engine: "mysql".to_owned(),
+        tls,
     })
 }
 
@@ -529,6 +674,154 @@ mod tests {
             database_connection_from_json(&missing)
                 .unwrap_err()
                 .contains("database")
+        );
+    }
+
+    const WORKLOAD: &str = "SpeedySpec\\Cli\\Contracts\\Workload";
+    const MAINTENANCE: &str = "SpeedySpec\\Cli\\Contracts\\MaintenanceFile";
+
+    fn workload(r: &FakeReader, kind: &str, root: &str, container: Value) -> Value {
+        r.object(
+            WORKLOAD,
+            vec![
+                ("kind", s(kind)),
+                ("name", s("blog")),
+                ("root", s(root)),
+                ("container", container),
+            ],
+        )
+    }
+
+    fn runtime_with(r: &FakeReader, workload: Value, maintenance: Value) -> Value {
+        r.object(
+            RUNTIME,
+            vec![
+                ("entry", Value::Null),
+                ("ini", Value::Array(vec![])),
+                ("server", Value::Array(vec![])),
+                ("workload", workload),
+                ("maintenance", maintenance),
+            ],
+        )
+    }
+
+    #[test]
+    fn a_runtime_from_1_4_has_no_workload_or_maintenance_file() {
+        let r = FakeReader::default();
+        let old = runtime(&r, Value::Null, Value::Array(vec![]), Value::Array(vec![]));
+        let decoded = decode_app_runtime(&old, &r).unwrap();
+        assert_eq!(decoded.workload, None);
+        assert_eq!(decoded.maintenance, None);
+    }
+
+    #[test]
+    fn decodes_a_workload_and_a_maintenance_file() {
+        let r = FakeReader::default();
+        let file = r.object(
+            MAINTENANCE,
+            vec![("path", s(".maintenance")), ("contents", s("<?php"))],
+        );
+        let value = runtime_with(
+            &r,
+            workload(&r, "StatefulSet", "/var/www/html", s("wordpress")),
+            file,
+        );
+        let decoded = decode_app_runtime(&value, &r).unwrap();
+        assert_eq!(
+            decoded.workload,
+            Some(Workload {
+                kind: WorkloadKind::StatefulSet,
+                name: "blog".into(),
+                root: "/var/www/html".into(),
+                container: Some("wordpress".into()),
+            })
+        );
+        assert_eq!(
+            decoded.maintenance,
+            Some(MaintenanceFile {
+                path: ".maintenance".into(),
+                contents: "<?php".into(),
+            })
+        );
+    }
+
+    #[test]
+    fn workload_rules() {
+        let r = FakeReader::default();
+        for (kind, root, container, field) in [
+            ("DaemonSet", "/srv", Value::Null, "workload.kind"),
+            ("Deployment", "srv", Value::Null, "workload.root"),
+            ("Deployment", "/srv/../etc", Value::Null, "workload.root"),
+            ("Deployment", "/srv", s("Web_App"), "workload.container"),
+        ] {
+            let value = runtime_with(&r, workload(&r, kind, root, container), Value::Null);
+            let error = decode_app_runtime(&value, &r).unwrap_err();
+            assert_eq!(error.field, field, "{kind} {root}: {error}");
+        }
+        let file = r.object(
+            MAINTENANCE,
+            vec![("path", s("../.maintenance")), ("contents", s(""))],
+        );
+        let value = runtime_with(&r, Value::Null, file);
+        assert_eq!(
+            decode_app_runtime(&value, &r).unwrap_err().field,
+            "maintenance.path"
+        );
+    }
+
+    #[test]
+    fn a_connection_from_1_4_has_no_tls() {
+        let r = FakeReader::default();
+        let decoded = decode_database_connection(&database(&r, vec![]), &r).unwrap();
+        assert_eq!(decoded.tls, Tls::Off);
+    }
+
+    #[test]
+    fn decodes_tls() {
+        let r = FakeReader::default();
+        let with = |tls: &str, ca: Value| {
+            let value = database(&r, vec![]);
+            let mut props = r.properties_of(&value).unwrap();
+            props.push(("tls".into(), s(tls)));
+            props.push(("caFile".into(), ca));
+            r.object(
+                DATABASE,
+                props.iter().map(|(k, v)| (k.as_str(), v.clone())).collect(),
+            )
+        };
+        let decode = |value: Value| decode_database_connection(&value, &r);
+        assert_eq!(
+            decode(with("required", Value::Null)).unwrap().tls,
+            Tls::Required
+        );
+        assert_eq!(
+            decode(with("verify", s("/etc/ca.pem"))).unwrap().tls,
+            Tls::Verify(PathBuf::from("/etc/ca.pem"))
+        );
+        for (tls, ca, field) in [
+            ("sometimes", Value::Null, "tls"),
+            ("verify", Value::Null, "caFile"),
+            ("verify", s("ca.pem"), "caFile"),
+        ] {
+            assert_eq!(decode(with(tls, ca)).unwrap_err().field, field, "{tls}");
+        }
+    }
+
+    #[test]
+    fn tls_from_a_task_result() {
+        let json = serde_json::json!({"host": "db", "database": "d", "user": "u", "password": "p",
+            "tls": "verify", "caFile": "/etc/ca.pem"});
+        assert_eq!(
+            database_connection_from_json(&json).unwrap().tls,
+            Tls::Verify(PathBuf::from("/etc/ca.pem"))
+        );
+        let off = serde_json::json!({"host": "db", "database": "d", "user": "u", "password": "p"});
+        assert_eq!(database_connection_from_json(&off).unwrap().tls, Tls::Off);
+        let bad = serde_json::json!({"host": "db", "database": "d", "user": "u", "password": "p", "tls": "verify"});
+        assert!(
+            database_connection_from_json(&bad)
+                .unwrap_err()
+                .contains("caFile")
         );
     }
 }

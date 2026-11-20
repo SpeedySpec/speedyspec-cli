@@ -71,6 +71,26 @@ pub(crate) fn write_record(
         })
 }
 
+/// Records how far the app's setup got: `Files` with the tasks finished so far, or `Installed` once all have.
+pub fn record_setup(
+    connection: &Connection,
+    name: &str,
+    namespace: &str,
+    status: Status,
+    done: u64,
+) -> Result<(), String> {
+    let identity = InstallIdentity {
+        app: "",
+        name,
+        namespace,
+    };
+    let mut record = read_record(connection, &identity)?
+        .ok_or_else(|| format!("no install named {name} in namespace {namespace}"))?;
+    record.status = status;
+    record.setup_done = Some(done);
+    write_record(connection, &record, namespace)
+}
+
 /// Applies an install. Nothing is waited for; see `wait_and_finish`.
 pub fn apply_install(
     connection: &Connection,
@@ -160,6 +180,7 @@ pub fn apply_install(
                     retained: false,
                 })
                 .collect(),
+            setup_done: None,
         },
     );
 

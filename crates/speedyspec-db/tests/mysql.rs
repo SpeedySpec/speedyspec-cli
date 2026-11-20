@@ -56,6 +56,7 @@ impl Scratch {
             table_prefix: prefix.to_owned(),
             charset: "utf8mb4".to_owned(),
             engine: "mysql".to_owned(),
+            tls: Default::default(),
         };
         Scratch {
             admin,
@@ -541,4 +542,124 @@ fn import_rewriting_runs_the_rewritten_statements() {
             "{label}: {error}"
         );
     }
+}
+
+/// `name`'s value, which `scripts/mysql.sh env` prints; these tests never use anything else.
+fn needed(name: &str) -> String {
+    std::env::var(name).unwrap_or_else(|_| {
+        panic!("set {name} with eval \"$(scripts/mysql.sh env)\"; these tests never use any other server")
+    })
+}
+
+/// The connection to the server at `url` with `tls`, to its `mysql` database (which always exists).
+fn with_tls(url: &str, tls: speedyspec_driver::Tls) -> DatabaseConnection {
+    let opts = mysql::Opts::from_url(url).unwrap();
+    DatabaseConnection {
+        host: opts.get_ip_or_hostname().to_string(),
+        database: "mysql".to_owned(),
+        user: opts.get_user().unwrap().to_owned(),
+        password: opts.get_pass().unwrap().to_owned(),
+        port: opts.get_tcp_port(),
+        socket: None,
+        table_prefix: String::new(),
+        charset: "utf8mb4".to_owned(),
+        engine: "mysql".to_owned(),
+        tls,
+    }
+}
+
+/// The session's TLS cipher; empty when the connection is not encrypted.
+fn cipher(connection: &mut Connection) -> String {
+    let mut out = Vec::new();
+    connection
+        .query("SHOW SESSION STATUS LIKE 'Ssl_cipher'", &mut out)
+        .unwrap();
+    let shown = String::from_utf8(out).unwrap();
+    shown
+        .lines()
+        .nth(1)
+        .and_then(|row| row.split('\t').nth(1))
+        .unwrap_or_default()
+        .to_owned()
+}
+
+#[test]
+#[ignore = "needs scripts/mysql.sh up"]
+fn required_tls_connects_encrypted() {
+    for (label, url) in servers() {
+        let mut connection = Connection::open(&with_tls(&url, speedyspec_driver::Tls::Required))
+            .unwrap_or_else(|e| panic!("{label}: {e}"));
+        assert!(
+            !cipher(&mut connection).is_empty(),
+            "{label}: not encrypted"
+        );
+    }
+}
+
+/// The server whose certificate `scripts/mysql.sh` made for 127.0.0.1 (MySQL), or the one whose certificate names only
+/// another host (MariaDB).
+fn server(label: &str) -> String {
+    servers()
+        .into_iter()
+        .find(|(l, _)| *l == label)
+        .map(|(_, url)| url)
+        .unwrap_or_else(|| {
+            panic!(
+                "set SPEEDYSPEC_E2E_{} with eval \"$(scripts/mysql.sh env)\"",
+                label.to_uppercase()
+            )
+        })
+}
+
+#[test]
+#[ignore = "needs scripts/mysql.sh up"]
+fn verify_with_the_right_ca_connects() {
+    let tls = speedyspec_driver::Tls::Verify(needed("SPEEDYSPEC_E2E_MYSQL_CA").into());
+    let mut connection =
+        Connection::open(&with_tls(&server("mysql"), tls)).unwrap_or_else(|e| panic!("{e}"));
+    assert!(!cipher(&mut connection).is_empty(), "not encrypted");
+}
+
+#[test]
+#[ignore = "needs scripts/mysql.sh up"]
+fn verify_with_the_wrong_ca_is_refused() {
+    for (label, url) in servers() {
+        let tls = speedyspec_driver::Tls::Verify(needed("SPEEDYSPEC_E2E_OTHER_CA").into());
+        let settings = with_tls(&url, tls);
+        let error = match Connection::open(&settings) {
+            Ok(_) => panic!("{label}: a certificate from another CA was accepted"),
+            Err(error) => error.to_string(),
+        };
+        assert!(!error.contains(&settings.password), "{label}: {error}");
+    }
+}
+
+#[test]
+#[ignore = "needs scripts/mysql.sh up"]
+fn verify_with_another_host_name_is_refused() {
+    // MariaDB's certificate is from the right CA but names only other-host.invalid, not the 127.0.0.1 it is reached at.
+    let url = server("mariadb");
+    let tls = speedyspec_driver::Tls::Verify(needed("SPEEDYSPEC_E2E_MYSQL_CA").into());
+    let error = match Connection::open(&with_tls(&url, tls)) {
+        Ok(_) => panic!("a certificate for another host name was accepted"),
+        Err(error) => error.to_string(),
+    };
+    assert!(
+        !error.contains("refused"),
+        "the server was not reached: {error}"
+    );
+    // Encrypted without the check, the same server is reached.
+    assert!(Connection::open(&with_tls(&url, speedyspec_driver::Tls::Required)).is_ok());
+}
+
+#[test]
+#[ignore = "needs scripts/mysql.sh up"]
+fn required_tls_to_a_server_without_it_is_refused() {
+    let url = needed("SPEEDYSPEC_E2E_MARIADB_NO_TLS");
+    assert!(Connection::open(&with_tls(&url, speedyspec_driver::Tls::Off)).is_ok());
+    let error = match Connection::open(&with_tls(&url, speedyspec_driver::Tls::Required)) {
+        Ok(_) => panic!("a server without TLS was accepted for tls: required"),
+        Err(error) => error.to_string(),
+    };
+    assert!(error.contains("127.0.0.1"), "{error}");
 }

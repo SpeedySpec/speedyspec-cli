@@ -75,18 +75,14 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Downloads `asset` of `release`, checks it, runs it once, and renames it over `exe`. Nothing
-/// is changed unless every check passes. `progress` is told each stage.
-pub fn install(
+/// Downloads `asset` of `release` into a temporary file in `dir` and checks it against the release's `SHA256SUMS`;
+/// gives back the file, closed, and its SHA-256. Nothing is left in `dir` when a check fails.
+pub fn download_checked(
     fetch: &dyn Fetch,
     release: &Release,
     asset: &str,
-    exe: &Path,
-    progress: &mut dyn FnMut(&str),
-) -> Result<(), UpdateError> {
-    if let Some(problem) = writable_problem(exe, asset) {
-        return Err(UpdateError(problem));
-    }
+    dir: &Path,
+) -> Result<(tempfile::TempPath, String), UpdateError> {
     let tag = &release.tag;
     let unchanged = |message: String| UpdateError(format!("{message}; nothing was changed"));
     let binary = release.asset(asset).ok_or_else(|| {
@@ -112,8 +108,6 @@ pub fn install(
         .get(asset)
         .ok_or_else(|| unchanged(format!("{SUMS} of release {tag} does not list {asset}")))?;
 
-    progress(&format!("downloading {asset} ({tag})"));
-    let dir = exe.parent().unwrap_or(Path::new("."));
     let file = tempfile::Builder::new()
         .prefix(TEMP_PREFIX)
         .tempfile_in(dir)
@@ -133,7 +127,6 @@ pub fn install(
         });
     }
 
-    progress("verifying");
     let actual = hex(&writer.hasher.finalize());
     if &actual != expected {
         return Err(unchanged(format!(
@@ -144,8 +137,31 @@ pub fn install(
     file.as_file()
         .sync_all()
         .map_err(|e| unchanged(format!("could not write {asset}: {e}")))?;
-    // Closing the file before it is run: Linux refuses to run a file open for writing.
-    let path = file.into_temp_path();
+    // Closed, so it can be run: Linux refuses to run a file open for writing.
+    Ok((file.into_temp_path(), actual))
+}
+
+/// Downloads `asset` of `release`, checks it, runs it once, and renames it over `exe`. Nothing
+/// is changed unless every check passes. `progress` is told each stage.
+pub fn install(
+    fetch: &dyn Fetch,
+    release: &Release,
+    asset: &str,
+    exe: &Path,
+    progress: &mut dyn FnMut(&str),
+) -> Result<(), UpdateError> {
+    if let Some(problem) = writable_problem(exe, asset) {
+        return Err(UpdateError(problem));
+    }
+    progress(&format!("downloading {asset} ({})", release.tag));
+    let (path, _) = download_checked(
+        fetch,
+        release,
+        asset,
+        exe.parent().unwrap_or(Path::new(".")),
+    )?;
+    progress("verifying");
+    let unchanged = |message: String| UpdateError(format!("{message}; nothing was changed"));
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
         .map_err(|e| unchanged(format!("could not make {asset} executable: {e}")))?;
 

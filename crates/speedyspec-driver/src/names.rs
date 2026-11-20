@@ -13,6 +13,11 @@ pub fn namespace_problem(name: &str) -> Option<String> {
     dns_label_problem(name, 63)
 }
 
+/// Why `name` cannot name a Kubernetes object or container (a DNS label), if it cannot.
+pub fn label_problem(name: &str) -> Option<String> {
+    dns_label_problem(name, 63)
+}
+
 /// Why `name` is not a DNS label of at most `longest` characters, if it is not.
 fn dns_label_problem(name: &str, longest: usize) -> Option<String> {
     let edge = |c: Option<char>| c.is_some_and(|c| c.is_ascii_lowercase() || c.is_ascii_digit());

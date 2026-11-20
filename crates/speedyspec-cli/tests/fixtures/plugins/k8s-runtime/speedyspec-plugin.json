@@ -1,0 +1,6 @@
+{
+    "name": "speedyspec-fixture/k8s-runtime",
+    "version": "1.0.0",
+    "contracts": "^1.4",
+    "entry": "plugin.php"
+}

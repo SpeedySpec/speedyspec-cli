@@ -111,14 +111,40 @@ impl<W: Write> Write for Limited<W> {
 
 /// The latest release (GitHub leaves out drafts and pre-releases).
 pub fn latest_release(fetch: &dyn Fetch, api_base: &str) -> Result<Release, UpdateError> {
-    let url = format!("{api_base}/repos/{REPOSITORY}/releases/latest");
+    release_at(
+        fetch,
+        &format!("{api_base}/repos/{REPOSITORY}/releases/latest"),
+        "the latest release",
+        "no release of speedyspec has been published yet",
+    )
+}
+
+/// The release of `version`, as its tag `v<version>`.
+pub fn release_of(
+    fetch: &dyn Fetch,
+    api_base: &str,
+    version: &Version,
+) -> Result<Release, UpdateError> {
+    release_at(
+        fetch,
+        &format!("{api_base}/repos/{REPOSITORY}/releases/tags/v{version}"),
+        &format!("release v{version}"),
+        &format!("there is no release v{version} of speedyspec"),
+    )
+}
+
+/// The release GitHub describes at `url`; `missing` is the message for a 404.
+fn release_at(
+    fetch: &dyn Fetch,
+    url: &str,
+    what: &str,
+    missing: &str,
+) -> Result<Release, UpdateError> {
     let mut body = Limited::new(Vec::new(), MAX_DESCRIPTION);
-    match fetch.fetch(&url, &mut body) {
+    match fetch.fetch(url, &mut body) {
         Ok(_) => {}
         Err(FetchError::Status { status: 404, .. }) => {
-            return Err(UpdateError(
-                "no release of speedyspec has been published yet".to_owned(),
-            ));
+            return Err(UpdateError(missing.to_owned()));
         }
         Err(FetchError::Status {
             status: status @ (403 | 429),
@@ -131,19 +157,16 @@ pub fn latest_release(fetch: &dyn Fetch, api_base: &str) -> Result<Release, Upda
         }
         Err(error) => {
             return Err(UpdateError(format!(
-                "could not ask GitHub for the latest release: {error}"
+                "could not ask GitHub for {what}: {error}"
             )));
         }
     }
-    let json: serde_json::Value = serde_json::from_slice(&body.inner).map_err(|e| {
-        UpdateError(format!(
-            "the description of the latest release could not be read: {e}"
-        ))
-    })?;
+    let json: serde_json::Value = serde_json::from_slice(&body.inner)
+        .map_err(|e| UpdateError(format!("the description of {what} could not be read: {e}")))?;
     let tag = json["tag_name"].as_str().unwrap_or_default().to_owned();
     let version = Version::parse(tag.strip_prefix('v').unwrap_or(&tag)).map_err(|_| {
         UpdateError(format!(
-            "the latest release has the tag \"{tag}\", which is not a version"
+            "{what} has the tag \"{tag}\", which is not a version"
         ))
     })?;
     let assets = json["assets"]
