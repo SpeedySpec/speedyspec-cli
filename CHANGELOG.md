@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.2.1](https://github.com/SpeedySpec/speedyspec-cli/compare/v1.2.0...v1.2.1) (2026-11-20)
+
+
+### Bug Fixes
+
+* **release:** build the commit release-please tags, not the newer code on main ([#20](https://github.com/SpeedySpec/speedyspec-cli/issues/20)) ([6401dcc](https://github.com/SpeedySpec/speedyspec-cli/commit/6401dcc8330d86b2352eaea4f5d9bb6edaa360ac))
+
 ## [1.2.0](https://github.com/SpeedySpec/speedyspec-cli/compare/v1.1.0...v1.2.0) (2026-11-20)
 
 
