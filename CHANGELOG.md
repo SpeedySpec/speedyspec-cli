@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.2.0](https://github.com/SpeedySpec/speedyspec-cli/compare/v1.1.0...v1.2.0) (2026-11-20)
+
+
+### Features
+
+* maintain Kubernetes installs through a runner pod ([#16](https://github.com/SpeedySpec/speedyspec-cli/issues/16)) ([1d08337](https://github.com/SpeedySpec/speedyspec-cli/commit/1d0833776c0b235a6a84a037e1dbe9e600a498bc))
+
+
+### Bug Fixes
+
+* **build:** keep static archives' symbols out of the Linux PHP CLI's exports ([#18](https://github.com/SpeedySpec/speedyspec-cli/issues/18)) ([83c563b](https://github.com/SpeedySpec/speedyspec-cli/commit/83c563b3bb37201c90a2398ca7204455d2ad4d3d))
+
+
+### Build System
+
+* embed contracts 1.4.0 ([#15](https://github.com/SpeedySpec/speedyspec-cli/issues/15)) ([bab4a8c](https://github.com/SpeedySpec/speedyspec-cli/commit/bab4a8c22c18f502a06d131e95a392523afde8f3))
+
 ## [1.1.0](https://github.com/SpeedySpec/speedyspec-cli/compare/v1.0.1...v1.1.0) (2026-11-19)
 
 
