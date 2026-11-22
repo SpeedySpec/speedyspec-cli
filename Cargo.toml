@@ -5,8 +5,18 @@ members = ["crates/*"]
 [workspace.package]
 edition = "2024"
 rust-version = "1.99"
-# Inherited only by the crates copied from speedyspec-server, which declare it there.
-license = "MIT"
+
+# The PHP runtime crates, published to crates.io from SpeedySpec/speedyspec-server. speedyspec-php's build links the
+# static PHP at SPEEDYSPEC_PHP_PREFIX (.cargo/config.toml), which must be the version pinned in that crate.
+[workspace.dependencies]
+speedyspec-hooks = "0.1.1"
+speedyspec-hooks-memory = "0.1.1"
+speedyspec-php = "0.4.0"
+speedyspec-php-ext = "0.1.3"
+speedyspec-container = "0.1.1"
+speedyspec-container-php = "0.1.3"
+speedyspec-wp-hooks-memory = "0.1.1"
+speedyspec-wp-hooks-php = "0.1.5"
 
 # Release binaries are downloaded; symbols only add size (PHP's own errors do not need them).
 [profile.release]

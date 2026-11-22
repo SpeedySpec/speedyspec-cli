@@ -18,14 +18,14 @@ speedyspec-db = { path = "../speedyspec-db" }
 speedyspec-fetch = { path = "../speedyspec-fetch" }
 speedyspec-selfupdate = { path = "../speedyspec-selfupdate" }
 speedyspec-driver-kubernetes = { path = "../speedyspec-driver-kubernetes" }
-speedyspec-hooks = { path = "../speedyspec-hooks" }
-speedyspec-hooks-memory = { path = "../speedyspec-hooks-memory" }
-speedyspec-php = { path = "../speedyspec-php" }
-speedyspec-php-ext = { path = "../speedyspec-php-ext" }
-speedyspec-container = { path = "../speedyspec-container" }
-speedyspec-container-php = { path = "../speedyspec-container-php" }
-speedyspec-wp-hooks-memory = { path = "../speedyspec-wp-hooks-memory" }
-speedyspec-wp-hooks-php = { path = "../speedyspec-wp-hooks-php" }
+speedyspec-hooks.workspace = true
+speedyspec-hooks-memory.workspace = true
+speedyspec-php.workspace = true
+speedyspec-php-ext.workspace = true
+speedyspec-container.workspace = true
+speedyspec-container-php.workspace = true
+speedyspec-wp-hooks-memory.workspace = true
+speedyspec-wp-hooks-php.workspace = true
 speedyspec-plugin = { path = "../speedyspec-plugin" }
 # The command tree is built at run time from what plugins contribute, so the
 # builder API is used; `string` lets plugin-supplied names become clap ids.
@@ -48,7 +48,7 @@ semver = "1"
 serde_json = "1"
 
 [dev-dependencies]
-speedyspec-hooks = { path = "../speedyspec-hooks", features = ["conformance"] }
+speedyspec-hooks = { workspace = true, features = ["conformance"] }
 tempfile = "3"
 speedyspec-testkit = { path = "../speedyspec-testkit" }
 sha2 = "0.11"

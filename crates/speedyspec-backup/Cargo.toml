@@ -14,9 +14,9 @@ tempfile = "3"
 
 [dev-dependencies]
 tempfile = "3"
-speedyspec-php = { path = "../speedyspec-php" }
-speedyspec-hooks = { path = "../speedyspec-hooks" }
-speedyspec-hooks-memory = { path = "../speedyspec-hooks-memory" }
+speedyspec-php.workspace = true
+speedyspec-hooks.workspace = true
+speedyspec-hooks-memory.workspace = true
 
 [[test]]
 name = "php"

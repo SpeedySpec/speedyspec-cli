@@ -2,12 +2,14 @@
 
 speedyspec links a static PHP interpreter into its own binary and runs PHP on
 the main thread. PHP code calls back into functions implemented in Rust. This
-page records how that is built and why, as established by the first proof
-(`crates/speedyspec-php`, test `tests/php.rs`).
+page records how that is built and why. The embedding itself is the
+`speedyspec-php` crate, published to crates.io from SpeedySpec/speedyspec-server
+(with the other runtime crates the CLI uses); this repository builds the static
+PHP it links.
 
 ## Source layout
 
-`crates/speedyspec-php/src/`:
+`speedyspec-php`'s `src/` (in speedyspec-server):
 
 | File | What it holds |
 | --- | --- |
@@ -21,9 +23,9 @@ page records how that is built and why, as established by the first proof
 
 | Piece | Version | Pinned in |
 | --- | --- | --- |
-| PHP | 8.5.12 (non-thread-safe) | `php-version` (the only place) |
+| PHP | 8.5.12 (non-thread-safe) | `php-version`, which must equal the `php-version` shipped in the `speedyspec-php` crate (its build fails otherwise) |
 | static-php-cli (`spc`) | 2.8.6, nightly build published 2026-08-22 | `scripts/build-php.sh` (SHA-256 per host) |
-| ext-php-rs | 0.16.5 (`=0.16.5`, feature `embed`) | `crates/speedyspec-php/Cargo.toml` |
+| ext-php-rs | 0.16.5 (`=0.16.5`, feature `embed`) | `speedyspec-php`'s `Cargo.toml` (speedyspec-server) |
 | Rust | 1.99 | `Cargo.toml` (`rust-version`), `scripts/linux.sh` (`rust:1.99-alpine`) |
 
 **Why PHP 8.5.12.** It is the newest PHP release as of 2026-11-17 (php.net
@@ -146,16 +148,18 @@ environment, so:
 - `.cargo/config.toml` sets `PHP` and `PHP_CONFIG` (relative to the repo) to
   `.php-build/buildroot/bin/php` and `bin/php-config`. Variables already in
   the environment win.
-- `crates/speedyspec-php/build.rs` reads `SPEEDYSPEC_PHP_PREFIX` (default
-  `<workspace>/.php-build/buildroot`) and **fails the build** unless `PHP` and
-  `PHP_CONFIG` resolve to `<prefix>/bin/php` and `<prefix>/bin/php-config`,
-  and unless `php-config --version` equals `php-version`. Headers, generated
-  bindings and the linked library therefore always come from one PHP build.
+- `speedyspec-php`'s `build.rs` requires `SPEEDYSPEC_PHP_PREFIX` (also set
+  in `.cargo/config.toml`, to `.php-build/buildroot`) and **fails the build**
+  unless `PHP` and `PHP_CONFIG` resolve to `<prefix>/bin/php` and
+  `<prefix>/bin/php-config`, `SODIUM_LIB_DIR` is `<prefix>/lib`, and
+  `php-config --version` equals the version pinned in the crate. Headers,
+  generated bindings and the linked library therefore always come from one
+  PHP build.
 - `build.rs` exports the version as `SPEEDYSPEC_PHP_VERSION`, which becomes
   `speedyspec_php::PHP_VERSION`.
 
-To use a PHP build elsewhere, set all three of `SPEEDYSPEC_PHP_PREFIX`, `PHP`
-and `PHP_CONFIG`.
+To use a PHP build elsewhere, set all four of `SPEEDYSPEC_PHP_PREFIX`, `PHP`,
+`PHP_CONFIG` and `SODIUM_LIB_DIR`.
 
 ## Link flags
 
