@@ -638,6 +638,14 @@ binaries grow:
 Rebuilding PHP with them took 2 min 45 s on macOS, 9 min 46 s for Linux x86_64 under emulation
 and 1 min 51 s for Linux aarch64 (libraries already built).
 
+**ext-sodium is required, on a pinned libsodium.** `build-php.sh` fetches libsodium 1.0.22 itself,
+checks its SHA-256 (verified against the release's minisign signature), and hands that tarball to spc
+through `craft.yml`'s `download-options: custom-url`, so spc never picks whatever libsodium its source
+list resolves to. After a build, and whenever it reuses an up-to-date buildroot, it fails unless
+`lib/libsodium.a` exists, `link-flags.txt` has `-lsodium`, and PHP reports `SODIUM_LIBRARY_VERSION`
+1.0.22. The `extensions` test checks the version too. speedyspec-server's copy of the script carries
+the same pin.
+
 A first Linux aarch64 PHP build through `scripts/linux.sh` on a Mac can fail with "Too many open
 files in system" while unpacking php-src: Docker Desktop's file sharing runs out of handles on
 the ~20,000 source files. Keeping that build directory on a Docker volume instead of the shared
