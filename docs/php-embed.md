@@ -643,8 +643,7 @@ checks its SHA-256 (verified against the release's minisign signature), and hand
 through `craft.yml`'s `download-options: custom-url`, so spc never picks whatever libsodium its source
 list resolves to. After a build, and whenever it reuses an up-to-date buildroot, it fails unless
 `lib/libsodium.a` exists, `link-flags.txt` has `-lsodium`, and PHP reports `SODIUM_LIBRARY_VERSION`
-1.0.22. The `extensions` test checks the version too. speedyspec-server's copy of the script carries
-the same pin.
+1.0.22. speedyspec-server's copy of the script carries the same pin.
 
 A first Linux aarch64 PHP build through `scripts/linux.sh` on a Mac can fail with "Too many open
 files in system" while unpacking php-src: Docker Desktop's file sharing runs out of handles on
