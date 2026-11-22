@@ -1,5 +1,17 @@
 # Changelog
 
+## [1.2.2](https://github.com/SpeedySpec/speedyspec-cli/compare/v1.2.1...v1.2.2) (2026-11-22)
+
+
+### Bug Fixes
+
+* **php:** pin libsodium 1.0.22 and fail the build without ext-sodium ([#22](https://github.com/SpeedySpec/speedyspec-cli/issues/22)) ([7ed900d](https://github.com/SpeedySpec/speedyspec-cli/commit/7ed900dfa6f775731a167b6b064b48a72ef8ee79))
+
+
+### Build System
+
+* take the PHP runtime crates from crates.io instead of copies of speedyspec-server ([#25](https://github.com/SpeedySpec/speedyspec-cli/issues/25)) ([36fca2c](https://github.com/SpeedySpec/speedyspec-cli/commit/36fca2c1f989373e1dbb3b06ed45d48191e8dc14))
+
 ## [1.2.1](https://github.com/SpeedySpec/speedyspec-cli/compare/v1.2.0...v1.2.1) (2026-11-20)
 
 
